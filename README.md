@@ -140,7 +140,7 @@ Every design decision went through a formal Architecture Decision Record (226 AD
 ## Current Progress
 
 - [x] **Autonomous decision-making** — pressure field dynamics, not if-else chains
-- [x] **Three competing voices** — care / play / duty with personality vectors
+- [x] **Four competing voices** — diligence / curiosity / sociability / caution with evolving personality vector
 - [x] **Habituation** — attention naturally decays with repeated exposure
 - [x] **Circadian rhythm** — dormant mode with sleep/wake cycles
 - [x] **Working memory** — diary that consolidates and forgets like a real one
@@ -275,8 +275,24 @@ Alice's pressure field model evolved from two predecessor projects by the same a
 - A **narrative dynamics paper** — graph-theoretic state management (G=(V,E,φ)), priority function families, Laplacian propagation, and the tanh(P/κ) saturation mapping.
 - A **narrative engine** (production system) — the Mod architecture (defineMod/contribute/handle), QuickJS sandbox execution, and the Storyteller context assembly pattern.
 
+## Star History
+
+<div align="center">
+
+[![Star History Chart](https://api.star-history.com/svg?repos=LlmKira/alice&type=Date)](https://star-history.com/#LlmKira/alice&Date)
+
+</div>
+
 ## Sponsor
 
 <a href="https://www.ohmygpt.com">
   <img src="https://github.com/LlmKira/Openaibot/raw/main/.github/sponsor_ohmygpt.png" alt="Sponsored by OhMyGPT">
 </a>
+
+---
+
+<div align="center">
+
+*We didn't simulate a human. We grew a digital native — and gave it a place to live.*
+
+</div>
