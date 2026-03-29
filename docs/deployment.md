@@ -41,7 +41,8 @@ Alice needs an OpenAI-compatible API endpoint. Any of these work:
 
 | Provider | Notes |
 |----------|-------|
-| [OpenRouter](https://openrouter.ai/) | Multi-model, recommended for beginners |
+| [**OhMyGPT**](https://www.ohmygpt.com) | **Recommended** — 200+ models, no VPN needed for CN users, OpenAI-compatible |
+| [OpenRouter](https://openrouter.ai/) | Multi-model gateway |
 | [DeepSeek](https://platform.deepseek.com/) | Cost-effective |
 | [OpenAI](https://platform.openai.com/) | GPT-4o etc. |
 | [Google AI Studio](https://aistudio.google.com/) | Gemini models (free tier available) |
@@ -64,10 +65,10 @@ TELEGRAM_API_ID=12345678
 TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
 TELEGRAM_PHONE=+8613800138000
 
-# LLM
-LLM_BASE_URL=https://openrouter.ai/api/v1
-LLM_API_KEY=sk-or-...
-LLM_MODEL=google/gemini-2.5-flash-preview-05-20
+# LLM (OhMyGPT recommended: https://www.ohmygpt.com)
+LLM_BASE_URL=https://api.ohmygpt.com/v1
+LLM_API_KEY=sk-...
+LLM_MODEL=gemini-2.5-flash-preview-05-20
 ```
 
 See `.env.example` for all optional features (vision, TTS, search, music, etc.).
