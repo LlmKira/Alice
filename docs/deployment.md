@@ -1,248 +1,241 @@
 # Deployment Guide
 
-This guide walks you through getting Alice running from zero.
+> **New to this?** Just run `bash setup.sh` from the project root — it handles everything interactively. This guide is the manual walkthrough for those who want full control.
+
+---
 
 ## Prerequisites
 
-| Requirement | Version | Purpose |
-|------------|---------|---------|
-| Node.js | 20+ | Runtime |
-| pnpm | 9+ | Package manager |
-| Python | 3.13+ | Auxiliary services |
-| [uv](https://github.com/astral-sh/uv) | latest | Python package manager |
-| [pdm](https://pdm-project.org/) | latest | wd-tagger dependencies |
-| pm2 | latest | Process manager (`npm i -g pm2`) |
+Before you start, make sure you have:
 
-## 1. Clone
+| Tool | Install |
+|------|---------|
+| **Node.js 20+** | [nodejs.org](https://nodejs.org/) |
+| **pnpm** | `npm install -g pnpm` |
+| **pm2** | `npm install -g pm2` |
+
+That's all you need for the core runtime. Auxiliary services (image tagging, voice synthesis) are optional and covered later.
+
+---
+
+## Step 1 — Clone
 
 ```bash
 git clone --recurse-submodules https://github.com/LlmKira/alice.git
 cd alice
 ```
 
-If you already cloned without `--recurse-submodules`:
+---
 
-```bash
-git submodule update --init --recursive
-```
+## Step 2 — Get Telegram API Credentials
 
-## 2. Get Telegram API Credentials
+Alice runs as a **userbot** on your own Telegram account (not a bot). You need API credentials from Telegram:
 
-1. Go to [https://my.telegram.org/apps](https://my.telegram.org/apps)
-2. Log in with your Telegram phone number
-3. Create a new application (any name is fine)
-4. Note down **API ID** and **API Hash**
+1. Go to **[https://my.telegram.org/apps](https://my.telegram.org/apps)**
+2. Log in with your phone number
+3. Create a new app (any name)
+4. Copy your **API ID** (a number) and **API Hash** (a long string)
 
-> Alice runs as a **userbot** (your personal account), not a bot created via BotFather. This gives her full Telegram capabilities — reading all messages, browsing channels, sending stickers, etc.
+---
 
-## 3. Get an LLM Endpoint
+## Step 3 — Get an LLM API Key
 
-Alice needs an OpenAI-compatible API endpoint. Any of these work:
+Alice needs an OpenAI-compatible LLM endpoint. The easiest option for Chinese users:
 
-| Provider | Notes |
-|----------|-------|
-| [**OhMyGPT**](https://www.ohmygpt.com) | **Recommended** — 200+ models, no VPN needed for CN users, OpenAI-compatible |
-| [OpenRouter](https://openrouter.ai/) | Multi-model gateway |
-| [DeepSeek](https://platform.deepseek.com/) | Cost-effective |
-| [OpenAI](https://platform.openai.com/) | GPT-4o etc. |
-| [Google AI Studio](https://aistudio.google.com/) | Gemini models (free tier available) |
-| Local (Ollama, vLLM) | Self-hosted, `http://localhost:11434/v1` |
+**[OhMyGPT](https://www.ohmygpt.com)** — 200+ models, no VPN required, works out of the box.
 
-You need a **base URL**, **API key**, and **model name**.
+Other options: OpenRouter, DeepSeek, OpenAI, Google AI Studio, or a local Ollama instance.
 
-## 4. Configure
+You need three things: **base URL**, **API key**, and **model name**.
+
+---
+
+## Step 4 — Configure
 
 ```bash
 cd runtime
 cp .env.example .env
+nano .env   # or any text editor
 ```
 
-Edit `.env` — the **required** fields:
+Fill in the six required lines:
 
 ```bash
-# Telegram
 TELEGRAM_API_ID=12345678
 TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
 TELEGRAM_PHONE=+8613800138000
 
-# LLM (OhMyGPT recommended: https://www.ohmygpt.com)
 LLM_BASE_URL=https://api.ohmygpt.com/v1
 LLM_API_KEY=sk-...
 LLM_MODEL=gemini-2.5-flash-preview-05-20
 ```
 
-See `.env.example` for all optional features (vision, TTS, search, music, etc.).
+Everything else in `.env.example` is optional — vision, TTS, music, etc. Leave them commented out to start.
 
-## 5. Install Dependencies
+---
 
-```bash
-# Runtime (in runtime/)
-pnpm install
-
-# Auxiliary services
-cd ../services/anime-classify && uv sync
-cd ../wd14-tagger-server && pdm install
-```
-
-## 6. First Run (Interactive Login + Auto Migration)
-
-> **Do not run `pnpm run db:migrate` separately.** Alice uses a custom SQLite FTS5 tokenizer (`better_trigram`) that must be loaded by the application itself before migrations run. Running `drizzle-kit migrate` directly will fail with `no such tokenizer: better_trigram`. Just start Alice — she handles migration automatically on startup.
-
-The first time Alice starts, she needs to authenticate with Telegram. This is interactive — you'll receive a login code.
+## Step 5 — Install & First Login
 
 ```bash
 cd runtime
+pnpm install
 pnpm run dev
 ```
 
-Follow the prompts:
-1. Enter the verification code sent to your Telegram
-2. If you have 2FA enabled, enter your cloud password
+> **Do not run `pnpm run db:migrate` separately.** Alice auto-migrates on startup using a custom SQLite extension. Running drizzle-kit directly will fail.
 
-Alice automatically creates `alice.db` and runs migrations before starting. After successful login, a session file is saved — subsequent starts are fully automatic.
+On first run, Alice prompts you to log in to Telegram:
 
-## 8. Production Setup (pm2)
+1. Enter the verification code Telegram sends to your app
+2. Enter your 2FA password if you have one set
 
-Once the interactive login is complete:
+After login, a session file is saved. You won't need to log in again.
+
+Press `Ctrl+C` once you see Alice start ticking (you'll see log output like `[engine] tick 1`).
+
+---
+
+## Step 6 — Production (pm2)
 
 ```bash
-# From project root
-pm2 start ecosystem.config.cjs
-
-# Check status
-pm2 status
-pm2 logs alice-runtime --lines 50
+# From project root (not runtime/)
+pm2 startOrRestart ecosystem.config.cjs --only alice-runtime
+pm2 logs alice-runtime --lines 30
 ```
 
-This starts:
-- **alice-runtime** — the main engine
-- **wd-tagger** — image tagging service (port 39100)
-- **anime-classify** — anime image detector (port 39101)
-
-### Managing processes
+Alice is now running in the background and will survive reboots if you run:
 
 ```bash
-pm2 restart alice-runtime    # after code changes
-pm2 stop alice-runtime       # stop
-pm2 delete all               # remove all processes
+pm2 startup   # follow the printed instruction
+pm2 save
 ```
 
-### Auto-restart on system boot
+### Useful commands
 
 ```bash
-pm2 startup                  # generate startup script
-pm2 save                     # save current process list
+pm2 status                     # see all running processes
+pm2 logs alice-runtime         # tail logs
+pm2 restart alice-runtime      # restart after code changes
+pm2 stop alice-runtime         # pause
 ```
 
-## 9. Verify It's Working
+---
+
+## Step 7 — Verify
 
 ```bash
-# Check logs
-pm2 logs alice-runtime --lines 20
-
-# Check pressure field
+# Recent ticks (pressure values should grow over time)
 sqlite3 runtime/alice.db "SELECT tick, p1, p2, p3, p4, p5, p6, api FROM tick_log ORDER BY tick DESC LIMIT 5;"
 
-# Check recent actions
-sqlite3 runtime/alice.db "SELECT tick, voice, action_type, chat_id, confidence FROM action_log ORDER BY tick DESC LIMIT 5;"
+# Recent actions (Alice speaking, reacting, forwarding)
+sqlite3 runtime/alice.db "SELECT tick, voice, action_type, chat_id FROM action_log ORDER BY tick DESC LIMIT 5;"
 ```
 
-If you see tick_log entries with growing pressure values and occasional action_log entries — Alice is alive.
+If you see tick entries — Alice is alive. If you see action entries — she's already doing things.
 
-## Optional: Skill Runner Docker Image
+---
 
-Alice's skill sandbox uses a Docker container for isolated execution. This is required if you want Alice to run skills (weather, music, search, etc.) in a sandboxed environment.
+## Optional Features
+
+Enable these by setting the relevant env vars in `runtime/.env`:
+
+| Feature | Env Var(s) | What it enables |
+|---------|-----------|----------------|
+| **Vision** | `VISION_MODEL=gemini-2.0-flash-lite` | Alice sees photos, stickers, media |
+| **Voice (TTS)** | `TTS_BASE_URL`, `TTS_API_KEY` | Alice sends voice messages (MiniMax recommended) |
+| **Web Search** | `EXA_API_KEY` | Alice searches the web |
+| **Music** | `MUSIC_API_BASE_URL` | Alice recommends and searches music |
+| **LLM Fallback** | `LLM_FALLBACK_BASE_URL`, `LLM_FALLBACK_API_KEY` | Auto-switch to backup model on failure |
+
+---
+
+## Optional: Auxiliary Services (Image Tagging)
+
+WD-Tagger and Anime-Classify improve image understanding. They're optional — Alice degrades gracefully without them.
 
 ```bash
-# Build the skill runner image
+# WD14 Tagger
+cd services/wd14-tagger-server
+pip install pdm && pdm install
+
+# Anime Classifier
+cd services/anime-classify
+pip install uv && uv sync
+```
+
+Then start everything together:
+
+```bash
+pm2 startOrRestart ecosystem.config.cjs   # starts all three services
+```
+
+---
+
+## Optional: Skill Sandbox (Docker)
+
+For isolated skill execution (weather, music, search apps):
+
+```bash
 cd runtime
 docker build -t alice-skill-runner:bookworm -f Dockerfile.skill-runner .
 ```
 
-The container runs as an unprivileged `alice` user with:
-- Node.js 22 + Python 3 + common CLI tools (curl, jq, git, etc.)
-- `/opt/alice/bin` — Alice skill binaries (mounted read-only at runtime)
-- `/workspace` — isolated working directory per execution
-- No network access to the host by default (except via `host.docker.internal`)
-
-### With gVisor (Recommended for Production)
-
-For stronger sandbox isolation, install [gVisor](https://gvisor.dev/docs/user_guide/install/):
+For production hardening with [gVisor](https://gvisor.dev/):
 
 ```bash
-# Install runsc
 bash runtime/scripts/install-runsc.sh
-
-# Verify
-docker run --runtime=runsc hello-world
+# then set SKILL_BACKEND=sandboxed in .env
 ```
 
-Then set `SKILL_BACKEND=sandboxed` in `.env` to use gVisor for skill execution.
+Without Docker, Alice falls back to direct shell execution automatically.
 
-### Without Docker
+---
 
-If Docker is not available, Alice falls back to direct shell execution (`SKILL_BACKEND=shell`). Less isolated but functional.
+## Optional: systemd (Server Hardening)
 
-## Optional: systemd (Production Server)
-
-For a hardened production deployment, see `runtime/deploy/systemd/`:
+For a production server with security restrictions:
 
 ```bash
-# Create service account
 sudo useradd --system --home /var/lib/alice-runtime --shell /usr/sbin/nologin alice-runtime
-
-# Install service
 sudo cp runtime/deploy/systemd/alice-runtime.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now alice-runtime
 ```
 
-The systemd unit includes security hardening (PrivateTmp, ProtectSystem=strict, NoNewPrivileges, etc.).
-
-## Optional Features
-
-| Feature | Env Vars | What it enables |
-|---------|----------|----------------|
-| Vision | `VISION_MODEL` | Alice sees images/stickers/photos |
-| TTS | `TTS_BASE_URL`, `TTS_API_KEY` | Alice sends voice messages |
-| ASR | `ASR_BASE_URL`, `ASR_API_KEY` | Alice transcribes incoming voice |
-| Web Search | `EXA_API_KEY` | Alice can search the web |
-| Music | `MUSIC_API_BASE_URL` | Alice can recommend/search music |
-| YouTube | `YOUTUBE_API_KEY` | Alice can search videos |
-
-All optional — Alice works without them, just with reduced capabilities.
+---
 
 ## Troubleshooting
 
-### "no such tokenizer: better_trigram"
+### `no such tokenizer: better_trigram`
 
-You ran `pnpm run db:migrate` directly — don't. Alice loads the FTS5 tokenizer extension before running migrations. Use `pnpm run dev` instead, which does both automatically.
+You ran `pnpm run db:migrate` directly. Don't — use `pnpm run dev` which loads the tokenizer first.
 
-### "AUTH_KEY_UNREGISTERED" or session errors
+### `AUTH_KEY_UNREGISTERED` or session errors
 
-Delete the session file and re-authenticate:
 ```bash
 rm runtime/alice.session
-pnpm run dev  # interactive login again
+cd runtime && pnpm run dev   # re-login
 ```
 
-### "Cannot find module" errors
+### `Cannot find module`
 
 ```bash
 cd runtime && pnpm install
 ```
 
-### Database locked errors
+### Database locked
 
-Make sure only one Alice instance is running:
+Only one Alice instance should run at a time:
+
 ```bash
-pm2 delete all
-pnpm run dev
+pm2 delete alice-runtime
+cd runtime && pnpm run dev
 ```
 
 ### WD Tagger / Anime Classify not starting
 
-These are optional services. If they fail, Alice degrades gracefully (skips image tagging). Check:
+These are optional. Alice works without them. Check:
+
 ```bash
 pm2 logs wd-tagger --lines 20
 pm2 logs anime-classify --lines 20
