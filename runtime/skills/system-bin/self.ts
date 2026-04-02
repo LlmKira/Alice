@@ -4,13 +4,17 @@
  * ADR-217: 合并原 engine CLI。所有非 irc 操作统一走 self。
  * 路由：`self <kebab-cmd> [key=value ...]` → POST /cmd/<snake_cmd>
  * Engine 侧自动区分 query 和 instruction——CLI 无需关心。
+ *
+ * @see docs/adr/235-cli-human-readable-output.md
  */
 
 import { defineCommand, runMain } from "citty";
 import {
   enginePostJson,
+  extractJsonFlag,
   parseKeyValueArgs,
   renderBridgeResult,
+  renderHuman,
 } from "../../src/system/cli-bridge.ts";
 
 /** kebab-case → snake_case。 */
@@ -70,6 +74,7 @@ async function printHelp(): Promise<void> {
   }
 
   console.log('Use "self <command> --help" for details.');
+  console.log('Use "--json" flag for raw JSON output.');
 }
 
 const main = defineCommand({
@@ -91,19 +96,27 @@ const main = defineCommand({
       return;
     }
 
+    const { json, args: cleaned } = extractJsonFlag(rawArgs);
+
     const cmd = args.command as string;
     // kebab→snake：`begin-topic` → `begin_topic`
     const snakeCmd = toSnake(cmd);
 
     // rawArgs 第一个是 command，其余是 key=value 参数
-    const kvArgs = rawArgs.slice(1).filter((a) => a !== "--help" && a !== "-h");
+    const kvArgs = cleaned.slice(1).filter((a) => a !== "--help" && a !== "-h");
     const body = parseKeyValueArgs(kvArgs);
 
     // ADR-217: 统一端点，Engine 侧区分 query/instruction
     const response = (await enginePostJson(`/cmd/${snakeCmd}`, body)) as {
       result?: unknown;
     };
-    console.log(renderBridgeResult(response.result));
+
+    // ADR-235: 默认人类可读，--json 保留原始格式
+    if (json) {
+      console.log(renderBridgeResult(response.result));
+    } else {
+      console.log(renderHuman(response.result));
+    }
   },
 });
 

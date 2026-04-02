@@ -421,6 +421,14 @@ export interface EngagementMetrics {
 // processResult — 后处理：反馈闭环 + 行动日志 + 人格演化
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** ADR-235: TC 循环可观测性元数据。 */
+interface TcMeta {
+  toolCallCount: number;
+  budgetExhausted: boolean;
+  afterward: string;
+  commandLog: string;
+}
+
 /** 后处理：反馈闭环 + 行动日志 + 人格演化。 */
 export function processResult(
   ctx: ActContext,
@@ -430,6 +438,7 @@ export function processResult(
   errorCount: number,
   closureDepth?: number,
   engagementMetrics?: EngagementMetrics,
+  tcMeta?: TcMeta,
 ): void {
   // ADR-129: LLM 调用失败时正确标记 success=false
   const llmFailed = engagementMetrics?.outcome === "llm_failed";
@@ -606,6 +615,10 @@ export function processResult(
         engagementDurationMs: engagementMetrics?.durationMs ?? null,
         engagementOutcome: engagementMetrics?.outcome ?? null,
         autoWriteback: Object.keys(autoWriteback).length > 0 ? JSON.stringify(autoWriteback) : null,
+        tcToolCallCount: tcMeta?.toolCallCount ?? null,
+        tcBudgetExhausted: tcMeta?.budgetExhausted ?? null,
+        tcAfterward: tcMeta?.afterward ?? null,
+        tcCommandLog: tcMeta?.commandLog ?? null,
       })
       .run();
   } catch (e) {

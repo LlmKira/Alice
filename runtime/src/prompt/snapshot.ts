@@ -75,6 +75,8 @@ export interface SnapshotInput {
   observations: string[];
   item: ActionQueueItem;
   round: number;
+  /** @deprecated ADR-233: TC 循环已接管续轮，不再使用 */
+  episodeRound?: number;
   board: {
     maxSteps: number;
     contextVars: Readonly<Record<string, unknown>>;
@@ -496,6 +498,15 @@ function buildRoundHint(round: number, maxSteps: number): string | undefined {
     return "Been going back and forth — time to wrap up.";
   }
   return "The conversation is still going.";
+}
+
+/**
+ * ADR-232: TC episode 提示 — 当 LLM 使用 watching 续轮时，
+ * 告知它命令结果已在 observations 中，可以继续决策。
+ */
+function buildEpisodeHint(episodeRound: number): string | undefined {
+  if (episodeRound <= 0) return undefined;
+  return "The command result is in your observations — continue from where you left off.";
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1062,7 +1073,18 @@ function buildRelationshipDesc(G: WorldModel, target: string): string | undefine
 // ═══════════════════════════════════════════════════════════════════════════
 
 export function buildUserPromptSnapshot(input: SnapshotInput): UserPromptSnapshot {
-  const { G, messages, observations, item, round, board, nowMs, isGroup, isChannel } = input;
+  const {
+    G,
+    messages,
+    observations,
+    item,
+    round,
+    episodeRound = 0,
+    board,
+    nowMs,
+    isGroup,
+    isChannel,
+  } = input;
 
   // ── 场景推断 ──
   const scene: Scene = isChannel ? "channel" : isGroup ? "group" : "private";
@@ -1110,6 +1132,8 @@ export function buildUserPromptSnapshot(input: SnapshotInput): UserPromptSnapsho
 
   // ── 轮次感知 ──
   const roundHint = buildRoundHint(round, board.maxSteps);
+  // ADR-232: TC episode 提示（watching 续轮时）
+  const episodeHint = buildEpisodeHint(episodeRound);
 
   // ── 关系描述（私聊）──
   const relationshipDesc =
@@ -1178,6 +1202,7 @@ export function buildUserPromptSnapshot(input: SnapshotInput): UserPromptSnapsho
     feedback,
     whisper,
     roundHint,
+    episodeHint,
     relationshipDesc,
     conversationRecap,
     contactProfile,

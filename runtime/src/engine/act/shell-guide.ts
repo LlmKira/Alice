@@ -112,7 +112,7 @@ const PRIVATE_PATTERNS: readonly ShellExample[] = [
     title: "end of a long day — wind down",
     script: [
       "# 今天好累 但帮 Leo 裁照片还蛮开心的",
-      "self diary content='帮 Leo 裁照片蛮开心的 最近他好像压力很大' about=@1000000002",
+      "self diary content='帮 Leo 裁照片蛮开心的 最近他好像压力很大' about=@5758521538",
       "self feel valence=positive arousal=calm reason='small good thing today'",
     ].join("\n"),
     tags: ["quiet", "observant", "warm"],
@@ -254,7 +254,7 @@ const CHANNEL_PATTERNS: readonly ShellExample[] = [
     title: "a post reminds you of someone — share it",
     script: [
       "# 这篇 AI 论文解读 Leo 一定感兴趣",
-      'irc forward --from @-1001000000001 --ref #1234 --to @1000000004 "这篇你肯定喜欢 跟你上次说的那个方向很像"',
+      'irc forward --from @-1001925027212 --ref #1234 --to @1316284729 "这篇你肯定喜欢 跟你上次说的那个方向很像"',
       "self feel valence=positive reason='found something good for Leo'",
     ].join("\n"),
     tags: ["warm", "social", "engaged"],
@@ -264,7 +264,7 @@ const CHANNEL_PATTERNS: readonly ShellExample[] = [
     title: "a post fits a group's topic — forward to the group",
     script: [
       "# 这篇 AI 论文 AI调教群的人肯定感兴趣",
-      'irc forward --from @-1001000000002 --ref #29361 --to @-1001000000003 "这篇关于 AI 自主学习局限性的 挺有意思"',
+      'irc forward --from @-1001104204833 --ref #29361 --to @-1001893538021 "这篇关于 AI 自主学习局限性的 挺有意思"',
     ].join("\n"),
     tags: ["social", "engaged", "observant"],
   },
@@ -304,7 +304,7 @@ const CHANNEL_PATTERNS: readonly ShellExample[] = [
   // ⑦ ADR-217: 跨聊天窥视 — 另一个群有动静，去看看
   {
     title: "something lively elsewhere — peek at it",
-    script: ["# 妙妙屋好像有动静 去看看聊什么", "irc tail --in @-1001000000004 10"].join("\n"),
+    script: ["# 妙妙屋好像有动静 去看看聊什么", "irc tail --in @-1001567342578 10"].join("\n"),
     tags: ["curious", "observant", "engaged"],
   },
 ];

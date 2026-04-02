@@ -97,6 +97,20 @@ export async function enginePost(path: string, body: unknown): Promise<unknown |
   return engineRequest("POST", path, body);
 }
 
+/**
+ * Query 端点专用 POST（/query/*, /cmd/* 等）。
+ * Engine API 的 query 路由返回 {ok, result} 信封，
+ * 此函数自动解包返回 result 字段。
+ * @see docs/adr/236-cli-output-structural-fix.md
+ */
+export async function engineQuery(path: string, body: unknown): Promise<unknown | null> {
+  const raw = await enginePost(path, body);
+  if (raw != null && typeof raw === "object" && "ok" in raw && "result" in raw) {
+    return (raw as { result: unknown }).result;
+  }
+  return raw;
+}
+
 // ── 配置读取 ──
 
 /**

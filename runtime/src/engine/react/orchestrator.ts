@@ -81,6 +81,7 @@ export interface ActContext {
  *
  * P1-2: 归一化后计算 L2 距离。裸 L2 被 P1/P4（量级~200）主导，
  * P5（量级~3）的剧变几乎无法触发 staleness。归一化到 [0,1] 后各维度等权。
+ * @see .claude/sessions/review-runtime-G6oHOR/worker-2-engine-core.md §P1-2
  */
 function isStale(
   item: ActionQueueItem,
@@ -119,12 +120,12 @@ async function finalizeSlot(ctx: ActContext, slot: EngagementSlot): Promise<void
       subcycles: session.subcycle,
       durationMs: session.elapsed,
       outcome: session.outcome,
-    });
-    // ADR-173: 延迟记录——仅在真实 Telegram 行动确认后写入 recentActions
-    // ADR-214 Wave A: completedActions 替代 RecordedAction 管线追踪真实 Telegram 行动
-    if (mergedResult.completedActions.length > 0) {
-      ctx.recordAction(item.action, item.target);
-    }
+    }, session.lastTcMeta);
+    // ADR-173: 延迟记录——行动确认后写入 recentActions
+    // ADR-215 Wave 2: 所有行动类型（包括 observe）都计入 rateCap，防止内部循环超频
+    // 区分：真实 Telegram 行动（有 completedActions）vs 内部行动（silence/observe/llm_failed）
+    // 两者都消耗注意力预算，但内部行动的 socialCost 和 netValue 计算方式不同
+    ctx.recordAction(item.action, item.target);
     // ADR-190: 通知 evolve 线程 LLM 调用结果，驱动调度层指数退避
     ctx.reportLLMOutcome(session.outcome !== "llm_failed");
   } finally {

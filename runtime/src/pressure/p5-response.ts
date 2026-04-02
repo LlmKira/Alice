@@ -1,20 +1,18 @@
 /**
- * P5 回应义务 (Response Obligation) — Channel×Contact 驱动。
- * 对应 Python pressure.py P5_response_obligation()。
+ * P5 Response Obligation — 论文 §3.5 对齐实现 + 工程增强。
  *
- * P5(n) = Σ_h directed(h) · w_tier(h) · w_chat(h) · decay(age(h))
+ * 论文公式：
+ *   P₅(n) = Σ_{h ∈ H_active} directed(h, n) × w_tier(h) × w_chat(h) × decay(h, n)
  *
- * ADR-157: 衰减核统一为指数核 2^(-ageS/τ)，与 signal-decay.ts 的
- * effectiveObligation 使用相同的物理模型（一阶动力学）和参数。
- * 旧版使用双曲线 1/(1+t/τ)，在 10τ 处残余 9.1%（指数核 0.1%），
- * 为已过期义务持续产生虚高 P5 压力。
+ * 工程修正（ADR-157, ADR-153, ADR-215）：
+ * - 指数核替代双曲线（物理更正确，残余更低）
+ * - Hawkes λ(t) 调制（对方活跃时义务持续）
+ * - 对数缩放 directed（防止大规模图中未处理消息累积导致饱和）
+ * - per-channel 义务上限（防止单频道消息风暴淹没系统）
  *
- * chat_type 调制（#2.1）：
- * 私聊中的 directed 消息回应义务更强——不回私聊比不回群聊更严重。
- *
- * Wave 6: Tier Overestimate Bias Correction — σ² 高时向基线 150 回归。
- * @see paper/ §Social POMDP "Tier Overestimate Bias Correction"
- * @see docs/adr/157-signal-decay-integrity.md §Fix 1
+ * @see paper/ §3.5 Response Obligation
+ * @see docs/adr/157-signal-decay-integrity.md
+ * @see docs/adr/215-p5-directed-saturation-fix.md
  */
 
 import {
@@ -35,12 +33,30 @@ import {
   OBLIGATION_HALFLIFE_PRIVATE,
 } from "./signal-decay.js";
 
-// ADR-222: CONVERSATION_INERTIA_BOOST (×1.5) 和 CONVERSATION_INERTIA_WINDOW (300s)
-// 已删除——反物理的正反馈。适应性衰减 ρ_H 在 evolve.ts 张力层替代其功能。
-// @see docs/adr/222-habituation-truth-model.md
+// ADR-222 已删除
 
 /** alice_turn 时的额外回应义务加成（30%）。 */
 const TURN_OBLIGATION_BOOST = 1.3;
+
+/**
+ * ADR-215: per-channel directed 上限。
+ * 防止单频道消息风暴：即使未处理 100 条 directed 消息，
+ * 有效义务上限为 ln(1+5) ≈ 1.8（而非 100）。
+ */
+const DIRECTED_CAP_PER_CHANNEL = 5.0;
+
+/**
+ * 对数缩放 directed 计数：将线性增长的未处理消息计数
+ * 转换为有界义务强度。大规模图中防止 P5 饱和。
+ *
+ * effectiveDirected = ln(1 + min(directed, DIRECTED_CAP_PER_CHANNEL))
+ *
+ * @see docs/adr/215-p5-directed-saturation-fix.md
+ */
+function effectiveDirected(directed: number): number {
+  const capped = Math.min(Math.max(0, directed), DIRECTED_CAP_PER_CHANNEL);
+  return Math.log1p(capped); // ln(1 + capped), capped=5 → ~1.79
+}
 
 export function p5ResponseObligation(G: WorldModel, _n: number, nowMs: number): PressureResult {
   const contributions: Record<string, number> = {};
@@ -48,8 +64,11 @@ export function p5ResponseObligation(G: WorldModel, _n: number, nowMs: number): 
 
   for (const hid of G.getEntitiesByType("channel")) {
     const attrs = G.getChannel(hid);
-    const directed = attrs.pending_directed;
-    if (directed <= 0) continue;
+    const directedRaw = attrs.pending_directed;
+    if (directedRaw <= 0) continue;
+
+    // ADR-215: 对数缩放 directed，防止大规模图中饱和
+    const directed = effectiveDirected(directedRaw);
 
     // Wave 6: Tier bias correction — 通过 channel 的 tier_contact 推断 contactId，
     // 读取 BeliefStore 中 tier 信念的 σ²，σ² 高时向基线回归。

@@ -19,7 +19,14 @@ export type { ActionQueueItem } from "../action-queue.js";
  */
 export interface SubcycleResult {
   /** 子周期退出原因——决定 orchestrator 的后续分支。 */
-  outcome: "waiting_reply" | "watching" | "terminal" | "empty" | "fed_up" | "cooling_down";
+  outcome:
+    | "waiting_reply"
+    | "watching"
+    | "terminal"
+    | "empty"
+    | "fed_up"
+    | "cooling_down"
+    | "tc_budget_exhausted";
   /** think() 调用收集的推理日志。 */
   thinks: string[];
   /** Query 自动打印日志。 */
@@ -32,4 +39,13 @@ export interface SubcycleResult {
   errors: string[];
   /** D5: 实际使用的 ReAct 轮次数（0-based count）。 */
   roundsUsed: number;
+  /** ADR-232: episode 内 TC 续轮次数（watching 触发的额外 LLM 调用轮数）。 */
+  episodeRounds: number;
+  /** ADR-235: TC 循环可观测性元数据。 */
+  tcMeta?: {
+    toolCallCount: number;
+    budgetExhausted: boolean;
+    afterward: string;
+    commandLog: string;
+  };
 }

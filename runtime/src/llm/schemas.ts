@@ -72,7 +72,7 @@ export const ResidueSchema = z.object({
     .string()
     .optional()
     .describe(
-      "If your mind drifts to someone or somewhere, their @id (e.g. @1000000003). Omit if nowhere specific.",
+      "If your mind drifts to someone or somewhere, their @id (e.g. @7785440246). Omit if nowhere specific.",
     ),
   reason: z.string().max(200).optional().describe("Why, in a few words."),
 });
@@ -96,7 +96,9 @@ export const TickStepSchema = z.object({
         "done: finished — said what you wanted, nothing more to do (most common, use this by default). " +
         "waiting_reply: you JUST SAID something and are waiting for THEIR response — " +
         "if you asked a question, you must use this, not done. " +
-        "watching: something is unfolding — you want to observe before deciding. " +
+        "watching: you just ran a command to fetch data (weather, music, search...) and need to " +
+        "see its output before deciding what to say — your next execution will have the result. " +
+        "Also use when something external is unfolding and you want to observe before deciding. " +
         "fed_up: the room is draining or hostile — walk away (penalty: closes the conversation). " +
         "cooling_down: the room is spammy or toxic — take a break (penalty: freezes this chat for ~30 min).",
     ),

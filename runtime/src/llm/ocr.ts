@@ -70,6 +70,7 @@ async function getEngine(): Promise<OcrEngine> {
  * 消除 Promise.race 裸 setTimeout 的 timer 泄漏。
  * timer.unref() 防止 timer 阻止进程优雅退出。
  *
+ * @see .claude/sessions/ocr-research.md §Q4
  */
 async function withTimeout<T>(promise: Promise<T>, ms: number, msg: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;

@@ -50,6 +50,13 @@
       "when": 1774076153368,
       "tag": "0006_awesome_sugar_man",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1775032799350,
+      "tag": "0007_oval_mandarin",
+      "breakpoints": true
     }
   ]
 }

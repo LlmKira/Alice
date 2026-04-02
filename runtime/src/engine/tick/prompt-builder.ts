@@ -76,6 +76,8 @@ export interface TickPromptContext {
   messages: MessageRecord[];
   observations: string[];
   round: number;
+  /** ADR-232: episode 内 TC 续轮次数（watching 触发的额外轮数）。0 = 首轮。 */
+  episodeRound?: number;
   /** 墙钟时间覆盖（ms）。省略时使用 Date.now()。Eval 用固定时间戳消除时间漂移。 */
   nowMs?: number;
 }
@@ -162,7 +164,7 @@ export async function buildTickPrompt(
   allTools: readonly UnifiedTool[],
   ctx: TickPromptContext,
 ): Promise<{ system: string; user: string }> {
-  const { G, dispatcher, config, item, tick, messages, observations, round } = ctx;
+  const { G, dispatcher, config, item, tick, messages, observations, round, episodeRound } = ctx;
 
   const chatType =
     item.target && G.has(item.target)
@@ -185,7 +187,7 @@ export async function buildTickPrompt(
   // 56 个工具 × CLI 签名 ≈ 4000 token，在 12K budget 内。
   // 所有工具签名已通过 Command Catalog + shell manual 扁平展示。
   // 三层折叠（core/capability/on-demand）为省 2000 token 导致搜索等关键工具被永久隐藏。
-  // LLM Tool Search 解决的是 500+ JSON schema 工具的问题（每个~1000 token）；
+  // Claude Tool Search 解决的是 500+ JSON schema 工具的问题（每个~1000 token）；
   // Alice 用 CLI 签名（每个~70 token），56 个工具全展开仅 4000 token，不需要搜索机制。
 
   // ── Zone-aware budget ──
@@ -261,6 +263,7 @@ export async function buildTickPrompt(
     observations,
     item,
     round,
+    episodeRound,
     board: { maxSteps: board.budget.maxSteps, contextVars: board.contextVars },
     nowMs,
     chatType,

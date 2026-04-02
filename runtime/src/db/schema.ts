@@ -81,6 +81,14 @@ export const actionLog = sqliteTable(
     engagementOutcome: text("engagement_outcome"),
     /** ADR-199: 自动状态回写记录 JSON: {"feel":"positive","advance_topic":"conv:xxx"}。 */
     autoWriteback: text("auto_writeback"),
+    /** ADR-235: TC 循环工具调用次数。 */
+    tcToolCallCount: integer("tc_tool_call_count"),
+    /** ADR-235: 是否触及 TC_MAX_TOOL_CALLS 预算上限。 */
+    tcBudgetExhausted: integer("tc_budget_exhausted", { mode: "boolean" }),
+    /** ADR-235: signal 工具的 afterward 值（done/waiting_reply/watching/fed_up/cooling_down）。 */
+    tcAfterward: text("tc_afterward"),
+    /** ADR-235: 聚合的 $ cmd\noutput 块（截断到 4KB）。 */
+    tcCommandLog: text("tc_command_log"),
     createdAt: integer("created_at", { mode: "timestamp" })
       .notNull()
       .$defaultFn(() => new Date()),

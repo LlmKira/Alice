@@ -1,27 +1,18 @@
 /**
- * P6 好奇心 (Curiosity) — Surprise-driven Curiosity。
+ * P6 好奇心 (Curiosity) — 论文 Definition 3.3 对齐实现。
  *
- * ADR-112 D1+D2: 从静态画像缺口重写为预测误差驱动。
+ * 论文公式（减性，有界）：
+ *   P6(n) = max(0, η - (1/k) × Σ_{j=n-k}^{n} novelty(j))    ∈ [0, η]
  *
- * P6(c) = w_tier(c) × surprise(c) × γ(c)
+ * 当信息丰富时 P6→0（好奇心得到满足），信息匮乏时 P6→η（驱动探索行为）。
  *
- * surprise 基于 2 个正交的结构性信号（"语义归 LLM，结构归代码"原则）：
- *   1. 沉默偏差: |actual_silence - tier_expected_silence| / tier_expected_silence
- *      — 当前沉默是否偏离该 tier 的自然节奏？（时间维度）
- *   2. 活跃率偏差: |log(actual_rate / tier_expected_rate)|
- *      — 总交互量是否偏离该 tier 的典型频率？（量级维度，Weber-Fechner 对数律）
+ * novelty(j) 通过 per-contact prediction error 具体化（论文 Remark "Per-Contact Surprise"）。
+ * contributions 保留 per-contact/per-channel 粒度用于 IAUS 路由。
  *
- * surprise 有界 ∈ [0, 1]:
- *   surprise = σ + (1 - σ) × tanh(signalMean)
- *   σ 高（新联系人）→ 认识论好奇心主导（我还不了解你）
- *   σ 低（老联系人）→ 偶然好奇心主导（你的行为出乎我意料）
- *
- * D2: Ambient Curiosity 解决冷启动停滞。
- *   P6_ambient = η × (1 - familiarity(G))
- *   P6_total = max(P6_surprise, P6_ambient)
- *
+ * @see paper/ Definition 3.3 (Curiosity)
+ * @see paper/ Remark "Per-Contact Surprise as Novelty Realization"
+ * @see paper/ Remark "Curiosity Saturation" — max(0,·) guarantees P6 ∈ [0, η]
  * @see docs/adr/112-pressure-dynamics-rehabilitation/ §D1, §D2
- * @see paper/ Definition 3.3 (Information Curiosity Pressure)
  */
 
 import { DUNBAR_TIER_WEIGHT } from "../graph/constants.js";
@@ -70,13 +61,6 @@ const FAMILIARITY_DAYS = 7;
  * Tier → 期望沉默间隔（秒）。
  *
  * 为**线上即时通讯**场景标定（非面对面社交）。
- * Dunbar 层级结构保持不变，但频率按 IM 行为重新估计：
- * - 亲密圈（5）：约每 4 小时消息一次（一天多轮对话）
- * - 同情圈（15）：约每天一次
- * - 亲友圈（50）：约每 3 天一次
- * - 认识圈（150）：约每 2 周一次
- * - 面熟圈（500）：约每 2 月一次
- *
  * @see Dunbar (2016) "Do online social media cut through the constraints
  *      that limit the size of offline social networks?"
  */
@@ -91,33 +75,36 @@ const TIER_EXPECTED_SILENCE_S: Record<DunbarTier, number> = {
 /**
  * Tier → 期望每日消息率。
  * 与 TIER_EXPECTED_SILENCE_S 互为倒数，用于活跃率偏差计算。
- * 注意 interaction_count 追踪的是**单条消息**，不是"对话次数"。
  */
 const TIER_EXPECTED_DAILY_RATE: Record<DunbarTier, number> = {
-  5: 6.0, // ~6 条/天（一天多轮对话）
+  5: 6.0, // ~6 条/天
   15: 1.0, // ~1 条/天
   50: 0.33, // ~1 条/3 天
   150: 0.07, // ~1 条/2 周
   500: 0.016, // ~1 条/2 月
 };
 
+// -- Novelty history buffer --------------------------------------------------
+// 论文 lookback window k：追踪最近 k 个 tick 的 novelty 值。
+// 模块级状态——重启后从空 buffer 开始（P6=η，几个 tick 后收敛）。
+
+/** Novelty 历史环形缓冲。 */
+const noveltyHistory: number[] = [];
+
+/** 重置 novelty 历史（用于测试）。 */
+export function resetNoveltyHistory(): void {
+  noveltyHistory.length = 0;
+}
+
 // -- Surprise 信号 -----------------------------------------------------------
 
-/**
- * σ_prediction: 预测不确定性（认识论不确定性）。
- * 新联系人 σ=1.0（最大不确定性），随交互次数递减。
- */
+/** σ_prediction: 预测不确定性。 */
 function sigmaPrediction(interactionCount: number): number {
   return 1.0 / (1.0 + interactionCount / SIGMA_HALF_LIFE);
 }
 
 /**
  * 信号 1: 沉默偏差（时间维度）。
- *
- * 当前沉默时长与该 tier 期望沉默的归一化偏差。
- * 亲密联系人沉默一周 → 高偏差。
- * 疏远联系人沉默一周 → 正常，低偏差。
- *
  * @see Dunbar (2010) "How Many Friends Does One Person Need?"
  */
 function silenceDeviation(attrs: ContactAttrs, nowMs: number): number {
@@ -132,13 +119,7 @@ function silenceDeviation(attrs: ContactAttrs, nowMs: number): number {
 
 /**
  * 信号 2: 活跃率偏差（量级维度，Weber-Fechner 对数律）。
- *
- * 该联系人的实际交互频率与 tier 期望频率的对数比。
- * 使用图年龄作为关系持续时间的保守估计。
- *
- * log-ratio 保证对称性：交互量是期望的 2 倍 和 期望的 1/2 产生相同偏差。
- *
- * @see Weber-Fechner law: 感知量与刺激强度的对数成正比
+ * @see Weber-Fechner law
  */
 function activityRateDeviation(attrs: ContactAttrs, graphAgeDays: number): number {
   const interactionCount = attrs.interaction_count ?? 0;
@@ -147,7 +128,6 @@ function activityRateDeviation(attrs: ContactAttrs, graphAgeDays: number): numbe
   const actualDailyRate = interactionCount / graphAgeDays;
   const expectedDailyRate = TIER_EXPECTED_DAILY_RATE[attrs.tier] ?? 0.14;
 
-  // Weber-Fechner 对数律：对称偏差
   const ratio = actualDailyRate / expectedDailyRate;
   return Math.abs(Math.log(Math.max(ratio, 0.01)));
 }
@@ -156,11 +136,6 @@ function activityRateDeviation(attrs: ContactAttrs, graphAgeDays: number): numbe
  * 综合 surprise 值（有界 ∈ [0, 1]）。
  *
  * surprise = σ + (1 - σ) × tanh(signalMean)
- *
- * 这是认识论不确定性与偶然不确定性的凸插值：
- * - σ=1（新联系人）→ surprise = 1.0（纯认识论好奇心："我还不了解你"）
- * - σ=0（老联系人）→ surprise = tanh(signals)（纯偶然好奇心："你的行为出乎意料"）
- * - tanh 保证输出有界，避免极端信号值主导系统
  *
  * @see Friston (2010) "The free-energy principle: a unified brain theory?"
  */
@@ -172,100 +147,118 @@ function computeSurprise(attrs: ContactAttrs, nowMs: number, graphAgeDays: numbe
 
   const signalMean = (s1 + s2) / 2;
 
-  // 有界插值：σ 提供认识论基线，(1-σ)×tanh 提供信号驱动的偶然好奇心
   return sigma + (1 - sigma) * Math.tanh(signalMean);
 }
 
 // -- P6 主函数 ---------------------------------------------------------------
 
 /**
- * P6 好奇心压力（ADR-112 重写版）。
+ * P6 好奇心压力（论文 Definition 3.3 对齐版）。
+ *
+ * 实现论文的减性公式 P6 = max(0, η - mean_novelty)，保证 P6 ∈ [0, η]。
+ * per-contact/per-channel surprise 值作为 novelty 信号和 IAUS 路由 contributions。
  *
  * @param G - 伴侣图
  * @param nowMs - 当前墙钟时间（毫秒）
  * @param eta - 环境好奇心基线（config.eta，默认 0.6）
+ * @param k - novelty lookback window（config.k，默认 20）
  */
-export function p6Curiosity(G: WorldModel, nowMs: number, eta = 0.6): PressureResult {
-  // ── D2: Ambient Curiosity（冷启动兜底）──────────────────────────
+export function p6Curiosity(G: WorldModel, nowMs: number, eta = 0.6, k = 20): PressureResult {
   const contacts = G.getEntitiesByType("contact");
   const contactCount = contacts.length;
-
   const graphAgeDays = G.getGraphAgeMs(nowMs) / 86_400_000;
-  const contactFamiliarity = Math.min(1, contactCount / DUNBAR_150);
-  const timeFamiliarity = Math.min(1, graphAgeDays / FAMILIARITY_DAYS);
-  const familiarity = contactFamiliarity * timeFamiliarity;
-  const ambientCuriosity = eta * (1 - familiarity);
 
-  if (contactCount === 0) {
-    return { total: ambientCuriosity, contributions: {} };
-  }
+  // ── 计算 per-contact surprise（论文 Remark: novelty 的具体化）──────
 
-  // ── D1: Per-contact Surprise-driven Curiosity ──────────────────
   const contributions: Record<string, number> = {};
-  let totalSurprise = 0;
+  let surpriseSum = 0;
+  let sourceCount = 0;
 
   for (const cid of contacts) {
     const attrs = G.getContact(cid);
 
-    // w_tier: 高 tier 联系人更值得了解（归一化到 (0, 1]）
     const wTier = DUNBAR_TIER_WEIGHT[attrs.tier] / MAX_TIER_WEIGHT;
-
-    // surprise: 预测误差（有界 [0, 1]）
     const surprise = computeSurprise(attrs, nowMs, graphAgeDays);
 
-    // γ: 信息增益折扣（最近交互过的联系人打折，避免重复探索）
-    // 审计修复: 从未交互的联系人（lastActive=0）γ=0（不产生好奇心驱动的行动）。
-    // 旧代码 elapsedS(nowMs, 0) 返回 ~56 年 → γ≈1.0 → 大量 tier-500 新联系人
-    // 累积可使 P6 爆炸到 3.0+，tanh 饱和。
-    // "从未交互" ≠ "很久没交互"。没有关系基线的人不触发好奇心压力。
-    // Ambient Curiosity 已覆盖冷启动场景。
+    // γ: 信息增益折扣（最近交互过的联系人打折）
     const lastActiveMs = readNodeMs(G, cid, "last_active_ms");
-    if (lastActiveMs <= 0) continue; // 从未交互 → 跳过（好奇心需要预测基线）
+    if (lastActiveMs <= 0) continue; // 从未交互 → 跳过
     const timeSinceLastS = elapsedS(nowMs, lastActiveMs);
     const gamma = 1 - Math.exp(-timeSinceLastS / TAU_CURIOSITY);
 
     const curiosity = wTier * surprise * gamma;
     if (curiosity > 0) {
       contributions[cid] = curiosity;
-      totalSurprise += curiosity;
+      surpriseSum += surprise; // novelty 用 raw surprise（不含 wTier/gamma）
+      sourceCount++;
     }
   }
 
-  // P6 raw total = Σ per-contact curiosity（不除以联系人数量，与 P1-P5 一致）。
-  // κ₆ 负责 tanh 归一化，不需要在此处归一化。
-
   // ── ADR-206 W4: 频道好奇心（信息饥渴）──────────────────────────
-  // 频道好奇心 = 未读信号 × 时间饥渴度 × 基础权重
-  // 不同于联系人的预测误差模型——频道是信息源，好奇心来自"好久没看了"
-  let channelCuriosity = 0;
   for (const chId of G.getEntitiesByType("channel")) {
     const attrs = G.getChannel(chId);
-    if (attrs.chat_type !== "channel") continue; // 只处理 Telegram 频道
+    if (attrs.chat_type !== "channel") continue;
 
     const unread = attrs.unread ?? 0;
-    if (unread === 0) continue; // 没有未读 → 不产生好奇心
+    if (unread === 0) continue;
 
-    // 信息饥渴度：距上次阅读越久，好奇心越高
     const lastReadMs = Number(attrs.last_read_ms ?? 0);
     const sinceReadS = lastReadMs > 0 ? elapsedS(nowMs, lastReadMs) : 0;
-    // 从未阅读过的频道 → 使用 last_activity_ms 作为 fallback
     const effectiveSinceS =
       sinceReadS > 0 ? sinceReadS : elapsedS(nowMs, Number(attrs.last_activity_ms ?? 0));
     if (effectiveSinceS <= 0) continue;
 
     const hunger = 1 - Math.exp(-effectiveSinceS / CHANNEL_HUNGER_TAU_S);
-    // unread 信号用 log 压缩（10 条 vs 100 条差距不大，但 0 vs 10 差距大）
     const unreadSignal = Math.log1p(unread);
 
     const chCuriosity = CHANNEL_CURIOSITY_WEIGHT * hunger * unreadSignal;
     if (chCuriosity > 0) {
       contributions[chId] = chCuriosity;
-      channelCuriosity += chCuriosity;
+      // 频道 hunger 也是 novelty 信号（论文 Remark "Novelty Sources"）
+      // hunger 高 = 没看 = novelty 低；hunger 低 = 刚看过 = novelty 高
+      // 取反：channelNovelty = 1 - hunger（刚消费过频道内容 → 高 novelty）
+      surpriseSum += 1 - hunger;
+      sourceCount++;
     }
   }
 
-  // D2: P6_total = max(P6_surprise + P6_channel, P6_ambient)
-  const total = Math.max(totalSurprise + channelCuriosity, ambientCuriosity);
+  // ── 论文公式：P6 = max(0, η - mean(novelty_history)) ──────────
 
-  return { total, contributions };
+  // 本 tick 的 novelty = 所有 source 的平均 surprise
+  const noveltyThisTick = sourceCount > 0 ? surpriseSum / sourceCount : 0;
+
+  // 更新历史缓冲
+  noveltyHistory.push(noveltyThisTick);
+  if (noveltyHistory.length > k) noveltyHistory.shift();
+
+  // 论文公式：减性，有界 [0, η]
+  const meanNovelty =
+    noveltyHistory.length > 0
+      ? noveltyHistory.reduce((a, b) => a + b, 0) / noveltyHistory.length
+      : 0;
+  const total = Math.max(0, eta - meanNovelty);
+
+  // D2: Ambient Curiosity 兜底（冷启动时 noveltyHistory 为空，P6=η）
+  const contactFamiliarity = Math.min(1, contactCount / DUNBAR_150);
+  const timeFamiliarity = Math.min(1, graphAgeDays / FAMILIARITY_DAYS);
+  const familiarity = contactFamiliarity * timeFamiliarity;
+  const ambientCuriosity = eta * (1 - familiarity);
+
+  const finalTotal = Math.max(total, ambientCuriosity);
+
+  // 缩放 contributions 使其总和 = finalTotal（IAUS 路由用）
+  const rawContribSum = Object.values(contributions).reduce((a, b) => a + b, 0);
+  if (rawContribSum > 0 && finalTotal > 0) {
+    const scale = finalTotal / rawContribSum;
+    for (const key of Object.keys(contributions)) {
+      contributions[key] *= scale;
+    }
+  } else if (rawContribSum > 0 && finalTotal === 0) {
+    // P6=0 时清空 contributions（好奇心满足，不需要路由）
+    for (const key of Object.keys(contributions)) {
+      contributions[key] = 0;
+    }
+  }
+
+  return { total: finalTotal, contributions };
 }

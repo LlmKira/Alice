@@ -1,91 +1,103 @@
 /**
- * Blackboard Tick LLM 调用 — instructor-js 结构化输出 + 脚本预验证。
+ * ADR-233: TC 循环 LLM 调用 — 原生 tool_use。
  *
- * ADR-213: BT 通信协议升级。LLM 通过 instructor（TOOLS mode）输出 {script, flow}。
- * 引擎确定性执行 script，从 flow 字段读取控制信号。
- * 空 script = 保持沉默（自然终止协议）。
+ * 纯错误包装层：构建 TCLoopContext → 调用 runTCLoop → 捕获异常写 audit。
  *
- * 使用 instructor-js（TOOLS mode）而非 AI SDK generateObject：
- * - TOOLS mode 用 tool calling 协议做结构化提取，兼容性最好
- * - instructor 自带 max_retries + Zod 验证反馈闭环
- * - 避免 JSON mode 在某些 provider 上的解析失败
- *
- * @see docs/adr/213-tool-calling-act-thread.md
- * @see https://js.useinstructor.com/
+ * @see docs/adr/233-native-toolcall-bt-hybrid.md
+ * @see docs/adr/234-wave5-session-erratum.md
  */
-
-import { validateScript } from "../../core/script-validator.js";
+import OpenAI from "openai";
 import { writeAuditEvent } from "../../db/audit.js";
-import { getAvailableInstructor } from "../../llm/instructor-client.js";
-import { withResilience } from "../../llm/resilience.js";
-import { normalizeScript, type TickStep, TickStepSchema } from "../../llm/schemas.js";
+import { getBreakerState } from "../../llm/resilience.js";
 import { createLogger } from "../../utils/logger.js";
+import { runTCLoop, type TCLoopContext, type TCLoopResult } from "./tc-loop.js";
+
+export type { TCLoopResult } from "./tc-loop.js";
 
 const log = createLogger("tick/callLLM");
 
-/** instructor 验证重试次数（Zod 错误反馈 → LLM 自我修正）。 */
-const INSTRUCTOR_MAX_RETRIES = 2;
+// -- 类型 -------------------------------------------------------------------
 
-/**
- * 调用 LLM 生成 TickStep（shell script + flow 信号）。
- *
- * instructor-js TOOLS mode 提取 {script, flow}。
- * 空 script = 保持沉默 → 返回 null。
- *
- * 返回 null 表示 LLM 选择沉默或调用失败（已审计写入）。
- */
+interface OpenAIClientEntry {
+  name: string;
+  model: string;
+  openai: OpenAI;
+}
+
+// -- 状态 -------------------------------------------------------------------
+
+let _clients: OpenAIClientEntry[] = [];
+
+// -- 客户端管理 --------------------------------------------------------------
+
+export function initOpenAIClients(config: {
+  providers: Array<{ name: string; baseUrl: string; apiKey: string; model: string }>;
+}): void {
+  _clients = config.providers.map((pc) => {
+    const openai = new OpenAI({
+      baseURL: pc.baseUrl,
+      apiKey: pc.apiKey,
+    });
+    log.info("OpenAI client initialized", { name: pc.name, model: pc.model });
+    return {
+      name: pc.name,
+      model: pc.model,
+      openai,
+    };
+  });
+}
+
+export function getAvailableOpenAIClient(): { openai: OpenAI; model: string; name: string } {
+  if (_clients.length === 0) {
+    throw new Error("No OpenAI clients initialized — call initOpenAIClients() first");
+  }
+  for (const entry of _clients) {
+    if (getBreakerState(entry.name) !== "open") {
+      return { openai: entry.openai, model: entry.model, name: entry.name };
+    }
+  }
+  const first = _clients[0];
+  return { openai: first.openai, model: first.model, name: first.name };
+}
+
+export function resetOpenAIClients(): void {
+  _clients = [];
+}
+
+// -- 主接口 -----------------------------------------------------------------
+
 export async function callTickLLM(
   system: string,
   user: string,
   tick: number,
   target: string | null,
   voice: string,
-  temperature?: number,
-): Promise<TickStep | null> {
+  contextVars: Record<string, unknown> | undefined,
+): Promise<TCLoopResult | null> {
   try {
-    const { client, model, name } = getAvailableInstructor();
+    const client = getAvailableOpenAIClient();
 
-    const extracted = await withResilience(
-      () =>
-        client.chat.completions.create({
-          model,
-          messages: [
-            { role: "system", content: system },
-            { role: "user", content: user },
-          ],
-          response_model: { schema: TickStepSchema, name: "TickStep" },
-          max_retries: INSTRUCTOR_MAX_RETRIES,
-          temperature: temperature ?? 0.7,
-        }),
-      {},
-      name,
-    );
+    const tcCtx: TCLoopContext = {
+      openai: client.openai,
+      model: client.model,
+      providerName: client.name,
+      systemPrompt: system,
+      userMessage: user,
+      contextVars,
+    };
 
-    const script = normalizeScript(extracted.script ?? "");
-    const afterward = extracted.afterward;
-
-    // 空 script → LLM 选择沉默（自然终止协议）
-    if (!script) {
-      log.info("LLM chose silence (empty script)", { tick, voice });
-      return null;
-    }
-
-    // 脚本语法预验证（instructor 已做 Zod 验证，这里检查 shell 语法）
-    const validation = validateScript(script);
-    if (!validation.valid) {
-      log.warn("Script validation warning (executing as-is)", {
-        tick,
-        errors: validation.summary,
-      });
-    }
-
-    return { script, afterward, residue: extracted.residue };
+    return await runTCLoop(tcCtx);
   } catch (e) {
     log.error("Tick LLM call failed", e);
+    // ADR-235: 记录更多诊断上下文
+    const client = _clients.length > 0 ? getAvailableOpenAIClient() : null;
     writeAuditEvent(tick, "error", "tick", "LLM call failed", {
       voice,
       target,
       error: e instanceof Error ? e.message : String(e),
+      provider: client?.name ?? "none",
+      model: client?.model ?? "none",
+      breakerState: client ? getBreakerState(client.name) : "unknown",
     });
     return null;
   }

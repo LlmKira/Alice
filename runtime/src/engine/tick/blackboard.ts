@@ -82,11 +82,14 @@ export function isTerminal(board: Blackboard): TickOutcome | null {
 /**
  * Drain Blackboard — 将 Blackboard 状态转换为 TickResult。
  * 调用后 Blackboard 不应再被使用。
+ *
+ * @param episodeRounds ADR-232: episode 内 TC 续轮次数（watching 触发的轮数）。
  */
 export function drainBoard(
   board: Blackboard,
   outcome: TickOutcome,
   durationMs: number,
+  episodeRounds = 0,
 ): TickResult {
   return {
     outcome,
@@ -98,5 +101,6 @@ export function drainBoard(
     stepsUsed: board.budget.usedSteps,
     preparedCategories: [...board.preparedCategories],
     duration: durationMs,
+    episodeRounds,
   };
 }

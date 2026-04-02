@@ -45,12 +45,16 @@ export class EngagementSession {
     this._maxSubcycles = maxSubcycles;
   }
 
+  /** ADR-235: 最后一次 TC 循环的可观测性元数据。 */
+  lastTcMeta?: SubcycleResult["tcMeta"];
+
   /** 吸收一个子周期的结果到 engagement 级累积。 */
   absorb(sub: SubcycleResult): void {
     this.thinks.push(...sub.thinks);
     this.queryLogs.push(...sub.queryLogs);
     this.instructionErrors.push(...sub.instructionErrors);
     this.totalDuration += sub.duration;
+    if (sub.tcMeta) this.lastTcMeta = sub.tcMeta;
   }
 
   /** 检查 engagement 是否可以继续（未超出子周期/时长上限）。 */

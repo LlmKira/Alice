@@ -212,6 +212,8 @@ export interface UserPromptSnapshot {
 
   // ── 轮次感知 ──
   roundHint?: string;
+  /** ADR-232: TC episode 提示（watching 续轮时，告知 LLM 结果已在 observations 中）。 */
+  episodeHint?: string;
 
   // ── 私聊对象关系描述（仅 private 场景）──
   relationshipDesc?: string;

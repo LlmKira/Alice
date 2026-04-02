@@ -230,7 +230,9 @@ export type TickOutcome =
   | "watching"
   | "empty"
   | "fed_up"
-  | "cooling_down";
+  | "cooling_down"
+  /** ADR-232: episode 内 TC 续轮预算耗尽（maxSteps 内 watching 消耗完）。 */
+  | "tc_budget_exhausted";
 
 /**
  * tick() 循环的完整输出 — 从 Blackboard drain 的最终结果。
@@ -248,6 +250,16 @@ export interface TickResult {
   duration: number;
   /** ADR-215: LLM 最后一步输出的认知残留（来自 TickStepSchema.residue）。 */
   llmResidue?: import("../../llm/schemas.js").LLMResidue;
+  /** @deprecated ADR-233: TC 循环已接管续轮，episodeRounds 不再使用，保留为 0 */
+  episodeRounds: number;
+  /** ADR-235: TC 循环可观测性元数据。 */
+  tcMeta?: {
+    toolCallCount: number;
+    budgetExhausted: boolean;
+    afterward: string;
+    /** 聚合的 $ cmd\noutput 块（截断到 4KB）。 */
+    commandLog: string;
+  };
 }
 
 /**

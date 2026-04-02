@@ -382,7 +382,7 @@ export function loadConfig(): Config {
 
     actionRateWindow: 3000, // ADR-110: 3000 秒（50 分钟）窗口
     // ADR-113 F15 + ADR-189 D2 + ADR-206: chat-type-aware 硬上限（窗口内绝对计数，四 scope 独立配额）
-    rateCap: { private: 10, group: 8, channel: 3, bot: 0 },
+    rateCap: { private: 10, group: 8, channel: 3, bot: 3 },
     actionRateFloor: 0.05,
 
     // 人格漂移速率校准（#8.3）：α=0.001 导致天级漂移，真实人格变化是月-年级

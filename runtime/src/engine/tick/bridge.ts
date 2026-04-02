@@ -28,7 +28,7 @@ import { callTickLLM } from "./callLLM.js";
 import type { TickPromptContext } from "./prompt-builder.js";
 import type { ResolvedTarget } from "./target.js";
 import { type TickDeps, tick } from "./tick.js";
-import type { FeatureFlags, TickResult, TickStepOutput, UnifiedTool } from "./types.js";
+import type { FeatureFlags, TickResult, UnifiedTool } from "./types.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // FeatureFlags 派生
@@ -80,6 +80,8 @@ function toSubcycleResult(result: TickResult): SubcycleResult {
     duration: result.duration,
     errors: result.errors,
     roundsUsed: result.stepsUsed,
+    episodeRounds: result.episodeRounds,
+    tcMeta: result.tcMeta,
   };
 }
 
@@ -93,15 +95,11 @@ function toSubcycleResult(result: TickResult): SubcycleResult {
  * 每个 dep 是对现有模块函数的薄包装，确保签名对齐 TickDeps 接口。
  * ADR-169: 包含 resolveQueries — 查询动作 inline 解析的完整闭环。
  */
-function buildTickDeps(ctx: ActContext, currentTick: number, item: ActionQueueItem): TickDeps {
+function buildTickDeps(): TickDeps {
   return {
-    callLLM: async (system, user): Promise<TickStepOutput | null> => {
-      const step = await callTickLLM(system, user, currentTick, item.target ?? null, item.action);
-      if (!step) return null;
-      return step;
+    callLLM: async (system, user, tick, target, voice, contextVars) => {
+      return callTickLLM(system, user, tick, target, voice, contextVars);
     },
-
-    executeScript: (script, opts) => executeShellScript(script, { contextVars: opts.contextVars }),
 
     // ADR-214 Wave A: resolveQueries 已删除。
     // shell-native 架构下 scriptResult.actions 始终为空，
@@ -134,7 +132,6 @@ interface TickRunKit {
 function prepareTickRun(
   ctx: ActContext,
   item: ActionQueueItem,
-  currentTick: number,
   contextVars: Record<string, unknown>,
   opts?: { maxSteps?: number },
 ): TickRunKit {
@@ -151,7 +148,7 @@ function prepareTickRun(
   });
 
   const allTools = collectAllTools(ctx.dispatcher.mods, TELEGRAM_ACTIONS);
-  const deps = buildTickDeps(ctx, currentTick, item);
+  const deps = buildTickDeps();
 
   return { board, allTools, deps };
 }
@@ -201,7 +198,7 @@ export async function runTickSubcycle(
   contextVars: Record<string, unknown> | undefined,
   _session: EngagementSession,
 ): Promise<SubcycleResult> {
-  const { board, allTools, deps } = prepareTickRun(ctx, item, currentTick, contextVars ?? {});
+  const { board, allTools, deps } = prepareTickRun(ctx, item, contextVars ?? {});
 
   const tickCtx = buildTickRunContext(ctx, item, currentTick, liveMessages, board.observations);
   const result = await tick(board, allTools, deps, tickCtx);

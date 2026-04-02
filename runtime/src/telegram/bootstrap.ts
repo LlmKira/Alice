@@ -34,6 +34,10 @@ export async function buildInitialGraph(client: TelegramClient): Promise<WorldMo
   let dialogCount = 0;
   for await (const dialog of client.iterDialogs()) {
     const peer = dialog.peer;
+
+    // 跳过 Saved Messages（self-chat）——Alice 不应向自己发消息
+    if (peer instanceof User && peer.id === self.id) continue;
+
     const chatId = String(peer.id);
     const channelId = `${CHANNEL_PREFIX}${chatId}`;
 
@@ -86,6 +90,7 @@ export async function buildInitialGraph(client: TelegramClient): Promise<WorldMo
         G.addContact(contactId, {
           tier: tierContact,
           display_name: peer.displayName ?? `user_${chatId}`,
+          ...(peer.isBot ? { is_bot: true } : {}),
         });
         G.addRelation(selfId, "acquaintance", contactId);
         G.addRelation(contactId, "joined", channelId);
