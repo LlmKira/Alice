@@ -27,12 +27,11 @@ export function renderPrivate(snapshot: UserPromptSnapshot): string {
   // LLM 需要知道对方是谁、关系如何，来调整语气和亲密度
   // ADR-34: 使用配置的时区，而非系统时区
   const now = localNow(snapshot.timezoneOffset);
-  const timeStr = now.toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true,
-    timeZone: `Etc/GMT${snapshot.timezoneOffset <= 0 ? '+' : '-'}${Math.abs(snapshot.timezoneOffset)}`,
-  });
+  const hour = now.getUTCHours();
+  const minute = now.getUTCMinutes();
+  const ampm = hour >= 12 ? 'PM' : 'AM';
+  const hour12 = hour % 12 || 12;
+  const timeStr = `${hour12}:${String(minute).padStart(2, '0')} ${ampm}`;
 
   // Bot 场景：简化 header，不渲染关系/心情/画像
   if (isBot) {
