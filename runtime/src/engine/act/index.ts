@@ -40,8 +40,9 @@ export { EngagementSession } from "./engagement.js";
 export { diffuseReplyChain } from "./messages.js";
 export {
   type ActiveWatcher,
+  type DeferredTurnOutcome,
   type EngagementSlot,
   MAX_CONCURRENT_ENGAGEMENTS,
   SWITCH_COST_MS,
-  type WatchKind,
+  type WatchPlan,
 } from "./scheduler.js";

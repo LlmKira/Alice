@@ -140,6 +140,60 @@ describe("observer.mod — rate_outcome", () => {
     expect(r2.success).toBe(false);
     expect(r2.reason).toBe("cooldown");
   });
+
+  it("bot target 不进入社交 outcomeHistory", () => {
+    const ctx = makeCtx({ outcomeHistory: [] as unknown[] });
+    ctx.graph.addContact("contact:777000", { is_bot: true, display_name: "HelperBot" });
+    ctx.graph.addChannel("channel:777000", { chat_type: "private" });
+
+    const result = instructions.rate_outcome.impl(ctx as unknown as ModContext, {
+      target: "channel:777000",
+      action_ms: 1700000000000 - 300_000,
+      quality: "poor",
+      reason: "Bot unresponsive for days.",
+    }) as { success: boolean; skipped?: string };
+
+    expect(result.success).toBe(true);
+    expect(result.skipped).toBe("bot_tool_target");
+    expect(ctx.state.outcomeHistory).toHaveLength(0);
+    expect(ctx.graph.getChannel("channel:777000").last_outcome_quality).toBeUndefined();
+    expect(ctx.graph.getContact("contact:777000").last_outcome_quality).toBeUndefined();
+  });
+
+  it("past_results 过滤旧的 bot outcome 记录", () => {
+    const ctx = makeCtx({
+      outcomeHistory: [
+        {
+          target: "channel:777000",
+          actionMs: 1700000000000 - 300_000,
+          quality: -0.8,
+          reason: "Bot unresponsive for days.",
+          beatType: "",
+          ms: 1700000000000 - 60_000,
+        },
+        {
+          target: "contact:human",
+          actionMs: 1700000000000 - 300_000,
+          quality: 0.5,
+          reason: "reply landed",
+          beatType: "",
+          ms: 1700000000000 - 30_000,
+        },
+      ],
+    });
+    ctx.graph.addContact("contact:777000", { is_bot: true, display_name: "HelperBot" });
+    ctx.graph.addChannel("channel:777000", { chat_type: "private" });
+    ctx.graph.addContact("contact:human", { display_name: "Human" });
+
+    const result = queries.past_results.impl(ctx as unknown as ModContext, { count: 10 }) as Array<{
+      name: string;
+      reason?: string;
+    }>;
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.name).toBe("Human");
+    expect(result[0]?.reason).toBe("reply landed");
+  });
 });
 
 describe("observer.mod — feel", () => {
@@ -201,6 +255,28 @@ describe("observer.mod — observe_activity", () => {
     // ADR-50: 语义标签 → 数值映射在代码侧完成
     expect(attrs.activity_intensity).toBe(0.8); // "high" → 0.8
     expect(attrs.activity_relevance).toBe(0.4); // "somewhat_relevant" → 0.4
+  });
+});
+
+describe("observer.mod — sense", () => {
+  it("默认从当前联系人派生 who，降低私聊印象记录摩擦", () => {
+    expect(instructions.sense.deriveParams?.who({ TARGET_CONTACT: "contact:1" })).toBe("contact:1");
+  });
+
+  it("写入 trait belief", () => {
+    const ctx = makeCtx({ outcomeHistory: [], impressionCounts: {} });
+    ctx.graph.addContact("contact:1");
+
+    const result = instructions.sense.impl(ctx as unknown as ModContext, {
+      who: "contact:1",
+      trait: "gentle",
+      intensity: "moderate",
+    }) as { success: boolean; dimension: string; observations: number };
+
+    expect(result.success).toBe(true);
+    expect(result.dimension).toBe("gentleness");
+    expect(result.observations).toBe(1);
+    expect(ctx.graph.beliefs.get("contact:1", "trait:gentleness")).toBeDefined();
   });
 });
 

@@ -9,19 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { closeDb, getSqlite, initDb } from "../src/db/connection.js";
 import * as schema from "../src/db/schema.js";
 
-const tables = [
-  schema.graphSnapshots,
-  schema.tickLog,
-  schema.actionLog,
-  schema.personalitySnapshots,
-  schema.messageLog,
-  schema.narrativeThreads,
-  schema.narrativeBeats,
-  schema.modStates,
-  schema.graphNodes,
-  schema.graphEdges,
-  schema.scheduledTasks,
-];
+const tables = Object.values(schema);
 
 describe("Schema drift detection", () => {
   beforeEach(() => initDb(":memory:"));

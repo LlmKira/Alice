@@ -56,8 +56,14 @@ describe("selectFacetDeterministic — 归一化压力驱动的 facet 选择", (
     expect(facet.id).toBe("diligence:engaged");
   });
 
-  it("diligence + 高 api → diligence:drained", () => {
-    const ctx = makeFacetCtx({ normalized: makeNormalized({ api: 0.9, p1: 0.15 }) });
+  it("diligence + 高 p1 但线程不乱 → diligence:backlog", () => {
+    const ctx = makeFacetCtx({ normalized: makeNormalized({ p1: 0.9, p4: 0.1 }) });
+    const facet = selectFacetDeterministic("diligence", ctx);
+    expect(facet.id).toBe("diligence:backlog");
+  });
+
+  it("diligence + 高 p1 和高 p4 → diligence:drained", () => {
+    const ctx = makeFacetCtx({ normalized: makeNormalized({ p1: 0.9, p4: 0.9 }) });
     const facet = selectFacetDeterministic("diligence", ctx);
     expect(facet.id).toBe("diligence:drained");
   });
@@ -131,8 +137,8 @@ describe("facet 查找工具函数", () => {
   it("getFacet 通过 ID 获取", () => {
     const facet = getFacet("diligence:backlog");
     expect(facet).toBeDefined();
-    expect(facet!.voice).toBe("diligence");
-    expect(facet!.guidance).toContain("piled up");
+    expect(facet?.voice).toBe("diligence");
+    expect(facet?.guidance).toContain("piled up");
   });
 
   it("getFacet 无效 ID → undefined", () => {
@@ -155,7 +161,7 @@ describe("facet 查找工具函数", () => {
   it("getFacetTags 返回标签数组", () => {
     const tags = getFacetTags("diligence:backlog");
     expect(tags).toBeDefined();
-    expect(tags!.length).toBeGreaterThan(0);
+    expect(tags?.length).toBeGreaterThan(0);
     expect(tags).toContain("engaged");
   });
 
@@ -221,5 +227,30 @@ describe("soul.mod contribute — facet guidance 注入", () => {
     const items = contribute(ctx as unknown as ModContext);
     const soulCore = items.find((i) => i.priority === 100 && i.bucket === "header");
     expect(soulCore).toBeDefined();
+  });
+
+  it("Instincts 只投影媒体感知边界，不包含工具命令教学", () => {
+    const graph = new WorldModel();
+    graph.tick = 100;
+    const ctx = {
+      graph,
+      state: { activeVoice: null, activeFacet: null, voiceLostSince: null },
+      tick: 100,
+      nowMs: Date.now(),
+      getModState: () => undefined,
+      dispatch: () => undefined,
+    };
+    const items = contribute(ctx as unknown as ModContext);
+    const instincts = items.find((i) => i.priority === 80 && i.bucket === "header");
+    const text = instincts?.lines.join("\n") ?? "";
+
+    expect(text).toContain("You do not receive raw pixels or raw audio");
+    expect(text).toContain("media descriptions, OCR text, labels, captions, and chat context");
+    expect(text).not.toContain("album search");
+    expect(text).not.toContain("album send");
+    expect(text).not.toContain("irc whois");
+    expect(text).not.toContain("man <topic>");
+    expect(text).not.toContain("You can't see images");
+    expect(text).not.toContain("only text and labels");
   });
 });

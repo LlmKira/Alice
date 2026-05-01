@@ -38,7 +38,29 @@ export interface ActionQueueItem {
   episodeId?: string;
   /** ADR-215: LLM 输出的认知残留（来自 TickStepSchema.residue）。 */
   llmResidue?: import("../llm/schemas.js").LLMResidue;
+  /** ADR-258: typed observation spine identity. */
+  observation?: {
+    candidateId: string;
+    enqueueId: string;
+    api: number;
+    apiPeak: number | null;
+  };
 }
+
+export interface ActionQueueMetrics {
+  queued: number;
+  processing: number;
+  active: number;
+  waitingConsumers: number;
+  maxDepth: number;
+  overflowCount: number;
+  saturation: number;
+}
+
+export type ActionQueueEnqueueResult =
+  | { outcome: "accepted"; delivery: "queued" | "direct"; evicted?: undefined }
+  | { outcome: "rejected_overflow"; delivery: "dropped"; evicted?: undefined }
+  | { outcome: "accepted"; delivery: "queued"; evicted: ActionQueueItem };
 
 /** 聚合压力分数：六维压力之和。用于溢出淘汰和调度排序。 */
 export function pressureScore(item: ActionQueueItem): number {
@@ -65,8 +87,8 @@ export class ActionQueue {
   private processing = new Set<string>();
 
   /** 推入一个行动。溢出时淘汰压力最低的行动。 */
-  enqueue(item: ActionQueueItem): void {
-    if (this._closed) return;
+  enqueue(item: ActionQueueItem): ActionQueueEnqueueResult {
+    if (this._closed) return { outcome: "rejected_overflow", delivery: "dropped" };
     if (this.items.length >= ActionQueue.MAX_DEPTH) {
       // 找到队列中压力最低的行动
       let minIdx = 0;
@@ -87,7 +109,7 @@ export class ActionQueue {
           newTarget: item.target,
           newScore: newScore.toFixed(2),
         });
-        return;
+        return { outcome: "rejected_overflow", delivery: "dropped" };
       }
       // 淘汰优先级最低的已有行动
       const evicted = this.items.splice(minIdx, 1)[0];
@@ -98,6 +120,8 @@ export class ActionQueue {
         evictedScore: minScore.toFixed(2),
         newScore: newScore.toFixed(2),
       });
+      this.items.push(item);
+      return { outcome: "accepted", delivery: "queued", evicted };
     }
     const waiter = this.waiters.shift();
     if (waiter) {
@@ -105,8 +129,10 @@ export class ActionQueue {
       // 原子性设置 processing（与 dequeue 的 shift+add 对称）。
       if (item.target) this.processing.add(item.target);
       waiter(item);
+      return { outcome: "accepted", delivery: "direct" };
     } else {
       this.items.push(item);
+      return { outcome: "accepted", delivery: "queued" };
     }
   }
 
@@ -160,6 +186,23 @@ export class ActionQueue {
   /** ADR-186: 返回所有活跃 engagement 的 target 集合。 */
   getActiveTargets(): ReadonlySet<string> {
     return this.processing;
+  }
+
+  /** ADR-252 Wave 1: 只读队列/ACT 背压指标。 */
+  getMetrics(): ActionQueueMetrics {
+    const queued = this.items.length;
+    const processing = this.processing.size;
+    const active = queued + processing;
+    const maxDepth = ActionQueue.MAX_DEPTH;
+    return {
+      queued,
+      processing,
+      active,
+      waitingConsumers: this.waiters.length,
+      maxDepth,
+      overflowCount: this._overflowCount,
+      saturation: maxDepth > 0 ? Math.min(1, active / maxDepth) : 0,
+    };
   }
 
   /**

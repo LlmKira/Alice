@@ -5,7 +5,12 @@
  * @see docs/adr/118-unified-timeline.md
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { MessageRecord } from "../src/engine/act/messages.js";
+import {
+  formatAudioMediaText,
+  formatImageOcrMetaText,
+  formatStickerMediaText,
+  type MessageRecord,
+} from "../src/engine/act/messages.js";
 
 // Mock DB 查询（ThoughtTimelineSource 依赖）
 vi.mock("../src/db/queries.js", () => ({
@@ -147,6 +152,23 @@ describe("MessageTimelineSource", () => {
     expect(entries.filter((e) => e.kind === "message")).toHaveLength(2);
   });
 
+  it("入站消息被 Alice 回复过时，只投影事实，不做硬拦截", () => {
+    const d = new Date("2025-06-01T10:00:00Z");
+    const messages: MessageRecord[] = [
+      msg(10, false, d, { text: "晚上好" }),
+      msg(11, true, new Date(d.getTime() + 1000), {
+        text: "晚上好~",
+        replyToId: 10,
+      }),
+    ];
+    const source = new MessageTimelineSource(messages);
+    const entries = source.entries("channel:1", 0, Date.now());
+
+    const inbound = entries.find((e) => e.rendered.includes("User10"));
+    expect(inbound?.rendered).toContain("already replied by you: #11");
+    expect(inbound?.rendered).not.toContain("STOP");
+  });
+
   it("群组模式 — presence hint 注入为 context 类型", () => {
     const d = new Date("2025-06-01T10:00:00Z");
     const messages: MessageRecord[] = [
@@ -191,6 +213,51 @@ describe("MessageTimelineSource", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("renderMessageContent", () => {
+  it("audio 媒体投影为音乐而不是 voice", () => {
+    const result = formatAudioMediaText({
+      title: "Blue",
+      performer: "Yoko Kanno",
+      duration: 215,
+      fileName: "blue.mp3",
+    });
+
+    expect(result).toBe("(audio 🎵: Blue — Yoko Kanno, 3:35)");
+    expect(result).not.toContain("voice");
+  });
+
+  it("audio 缺少曲目信息时回退到文件名", () => {
+    const result = formatAudioMediaText({
+      title: null,
+      performer: null,
+      duration: 0,
+      fileName: "unknown-track.mp3",
+    });
+
+    expect(result).toBe("(audio 🎵: unknown-track.mp3)");
+  });
+
+  it("sticker 有 description 时隐藏 alt emoji", () => {
+    const result = formatStickerMediaText({
+      emoji: "☹️",
+      title: "可莉姆船长",
+      description: "a small captain looking worried",
+      fileId: "CAAC",
+    });
+
+    expect(result).toBe("(sticker — 可莉姆船长: a small captain looking worried | id:CAAC)");
+    expect(result).not.toContain("☹️");
+  });
+
+  it("sticker 无 description 时 alt emoji 作为兜底显示", () => {
+    const result = formatStickerMediaText({
+      emoji: "☹️",
+      title: "可莉姆船长",
+      fileId: "CAAC",
+    });
+
+    expect(result).toBe("(sticker ☹️ — 可莉姆船长 | id:CAAC)");
+  });
+
   it("无 segments 回退到 200 字符硬截断", () => {
     const record: MessageRecord = {
       id: 1,
@@ -231,6 +298,29 @@ describe("renderMessageContent", () => {
     const result = renderMessageContent(record);
     // body + media 总长 < 500，应完整保留
     expect(result).toBe(`${body} ${media}`);
+  });
+
+  it("photo OCR 显式标记为图片文字，不伪装成发送者正文", () => {
+    const ocr = "Alice online: 周末想去拍照";
+    const media = "(photo 📷)";
+    const record: MessageRecord = {
+      id: 1,
+      senderName: "Bob",
+      isOutgoing: false,
+      text: `${media} ${ocr}`,
+      date: new Date(),
+      segments: [
+        { kind: "media", text: media },
+        { kind: "meta", text: formatImageOcrMetaText(ocr) },
+      ],
+    };
+
+    const result = renderMessageContent(record);
+
+    expect(result).toContain("image OCR text");
+    expect(result).toContain("not sender speech");
+    expect(result).toContain(ocr);
+    expect(result).not.toContain(`(text: "${ocr}")`);
   });
 
   it("超限时先丢弃 link，保留 media/image", () => {
@@ -632,9 +722,10 @@ describe("renderTimeline", () => {
       hour: "numeric",
       minute: "2-digit",
       hour12: true,
+      timeZone: "UTC",
     });
     const entries: TimelineEntry[] = [
-      { ts, kind: "message", rendered: "Alice (you) (#1): hi" },
+      { ts, kind: "message", rendered: "Alice (you) (msgId 1): hi" },
       { ts: ts + 60_000, kind: "thought", rendered: "* thinking about reply" },
       { ts: ts + 120_000, kind: "message", rendered: "Alice (you): hello" },
       { ts: ts + 180_000, kind: "observation", rendered: "[observation] result" },
@@ -644,7 +735,7 @@ describe("renderTimeline", () => {
     for (const line of lines) {
       expect(line).toMatch(TIME_RE);
     }
-    expect(lines[0]).toBe(`[${time}] Alice (you) (#1): hi`);
+    expect(lines[0]).toBe(`[${time}] Alice (you) (msgId 1): hi`);
   });
 
   it("结构条目（gap/context）不添加时间戳前缀", () => {
@@ -669,8 +760,8 @@ describe("renderTimeline", () => {
     const ts = new Date("2025-06-01T10:00:00Z").getTime();
     const nowMs = ts + 3 * 60 * 60_000; // 3 小时后
     const entries: TimelineEntry[] = [
-      { ts, kind: "message", rendered: "Alice (you) (#1): hi" },
-      { ts: nowMs - 10_000, kind: "message", rendered: "Bob (#2): hello" },
+      { ts, kind: "message", rendered: "Alice (you) (msgId 1): hi" },
+      { ts: nowMs - 10_000, kind: "message", rendered: "Bob (msgId 2): hello" },
     ];
     const lines = renderTimeline(entries, nowMs);
 
@@ -684,7 +775,9 @@ describe("renderTimeline", () => {
 
   it("不提供 nowMs 时，不追加相对时间标签（向后兼容）", () => {
     const ts = new Date("2025-06-01T10:00:00Z").getTime();
-    const entries: TimelineEntry[] = [{ ts, kind: "message", rendered: "Alice (you) (#1): hi" }];
+    const entries: TimelineEntry[] = [
+      { ts, kind: "message", rendered: "Alice (you) (msgId 1): hi" },
+    ];
     const lines = renderTimeline(entries);
 
     expect(lines[0]).toMatch(TIME_RE);

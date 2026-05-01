@@ -1,11 +1,15 @@
 import { defineCommand, renderUsage } from "citty";
-import { findUnknownOption } from "./cli-strict.js";
+import { EngineApiError, engineGet, enginePost } from "../../skills/_lib/engine-client.js";
+import type { ExecutionObservation } from "../core/script-execution.js";
+import { telegramChannelId } from "../graph/constants.js";
 import { parseMsgId, resolveTarget } from "./chat-client.js";
 import { renderConfirm } from "./cli-bridge.js";
 import {
+  assertCurrentChatForSend,
   joinCommand,
   leaveCommand,
   motdCommand,
+  OBSERVATION_PREFIX,
   reactCommand,
   readCommand,
   replyCommand,
@@ -18,8 +22,15 @@ import {
 } from "./cli-commands.js";
 import { createRealContext } from "./cli-io.js";
 import { type CommandName, filterOutput, parseOutputMode } from "./cli-json.js";
-import type { CliContext } from "./cli-types.js";
-import { engineGet, enginePost } from "../../skills/_lib/engine-client.js";
+import { findUnknownOption } from "./cli-strict.js";
+import {
+  type CliContext,
+  type CliErrorCode,
+  CliExecutionError,
+  emitCliErrorCode,
+  isCliErrorCode,
+  makeDie,
+} from "./cli-types.js";
 
 /** --in 选项：目标聊天。 */
 const inOption = {
@@ -40,6 +51,7 @@ const jsonFlag = {
 /** 命令执行结果。 */
 interface CommandResult {
   action?: string;
+  observation?: ExecutionObservation;
   output: string;
   /** 原始结果对象（用于 JSON 字段过滤）。 */
   rawResult?: unknown;
@@ -62,22 +74,39 @@ function makeRunner<A extends { json?: string }>(
     const ctx = createRealContext();
     const { json } = cittyCtx.args;
 
-    const mode = parseOutputMode(command, json);
-    const result = await handler(ctx, cittyCtx.args);
+    try {
+      const mode = parseOutputMode(command, json);
+      const result = await handler(ctx, cittyCtx.args);
 
-    if (result.action) console.log(result.action);
-
-    switch (mode.type) {
-      case "human":
-        console.log(result.output);
-        break;
-      case "json": {
-        const filtered = filterOutput(result.rawResult as Record<string, unknown>, mode.fields);
-        console.log(JSON.stringify(filtered, null, 2));
-        break;
+      if (result.action) console.log(result.action);
+      if (result.observation) {
+        console.log(`${OBSERVATION_PREFIX}${JSON.stringify(result.observation)}`);
       }
+
+      switch (mode.type) {
+        case "human":
+          console.log(result.output);
+          break;
+        case "json": {
+          const filtered = filterOutput(result.rawResult as Record<string, unknown>, mode.fields);
+          console.log(JSON.stringify(filtered, null, 2));
+          break;
+        }
+      }
+    } catch (error) {
+      const code = extractCliErrorCode(error);
+      if (code) emitCliErrorCode(ctx.output, code);
+      throw error;
     }
   };
+}
+
+function extractCliErrorCode(error: unknown): CliErrorCode | null {
+  if (error instanceof CliExecutionError) return error.code;
+  if (error instanceof EngineApiError && error.code && isCliErrorCode(error.code)) {
+    return error.code;
+  }
+  return null;
 }
 
 const say = defineCommand({
@@ -102,7 +131,7 @@ const reply = defineCommand({
     in: inOption,
     ref: {
       type: "string",
-      description: "Message ID to reply to",
+      description: "Visible current-chat message ID to reply to",
       required: true,
       valueHint: "msgId",
     },
@@ -118,11 +147,16 @@ const react = defineCommand({
     in: inOption,
     ref: {
       type: "string",
-      description: "Message ID to react to",
+      description: "Visible current-chat message ID to react to",
       required: true,
       valueHint: "msgId",
     },
-    emoji: { type: "string", description: "Emoji", required: true, valueHint: "emoji" },
+    emoji: {
+      type: "string",
+      description: "Telegram reaction emoji, e.g. 👍 👎 ❤ 🔥 🥰 👏 😁 🤔 😢 🎉 👀 😴",
+      required: true,
+      valueHint: "telegram-reaction",
+    },
   },
   run: makeRunner("react", reactCommand),
 });
@@ -134,9 +168,10 @@ const sticker = defineCommand({
     in: inOption,
     keyword: {
       type: "string",
-      description: "Sticker keyword (emotion/action)",
+      description:
+        "Sticker keyword. Use one of: happy, sad, angry, surprised, shy, tired, love, scared, wave, hug, cry, laugh, sleep, eat, dance, thumbsup, facepalm, peek.",
       required: true,
-      valueHint: "keyword",
+      valueHint: "happy|shy|laugh|hug|wave|peek",
     },
   },
   run: makeRunner("sticker", stickerCommand),
@@ -152,7 +187,11 @@ const voice = defineCommand({
       description: "Emotion: happy, sad, angry, calm, whisper, ...",
       valueHint: "emotion",
     },
-    ref: { type: "string", description: "Message ID to reply to", valueHint: "msgId" },
+    ref: {
+      type: "string",
+      description: "Visible current-chat message ID to reply to",
+      valueHint: "msgId",
+    },
     text: { type: "string", description: "Text to speak", required: true, valueHint: "message" },
   },
   run: makeRunner("voice", voiceCommand),
@@ -284,7 +323,7 @@ const topic = defineCommand({
   },
   async run({ args }) {
     const chatId = await resolveTarget(args.in as string | undefined);
-    const topicResult = await engineGet(`/graph/channel:${chatId}/topic`);
+    const topicResult = await engineGet(`/graph/${telegramChannelId(chatId)}/topic`);
     const topicValue = gval(topicResult);
     const rawResult = { chatId, topic: topicValue };
     outputMode("topic", args.json, rawResult, topicValue ? `Topic: "${topicValue}"` : "(no topic)");
@@ -298,7 +337,7 @@ const download = defineCommand({
     in: inOption,
     ref: {
       type: "string",
-      description: "Message ID containing the attachment",
+      description: "Visible current-chat message ID containing the attachment",
       required: true,
       valueHint: "msgId",
     },
@@ -310,6 +349,7 @@ const download = defineCommand({
     },
   },
   async run({ args }) {
+    const ctx = createRealContext();
     const chatId = await resolveTarget(args.in as string | undefined);
     const msgId = parseMsgId(args.ref as string);
     const outputPath = (args.output as string).trim();
@@ -322,6 +362,24 @@ const download = defineCommand({
 
     if (result?.path) {
       console.log(`${ACTION_PREFIX}downloaded:chatId=${chatId}:msgId=${msgId}:path=${result.path}`);
+      console.log(
+        `${OBSERVATION_PREFIX}${JSON.stringify({
+          kind: "query_result",
+          source: "irc.download",
+          text: `downloaded attachment from #${msgId} to ${result.path}`,
+          enablesContinuation: true,
+          currentChatId: ctx.currentChatId == null ? null : String(ctx.currentChatId),
+          targetChatId: String(chatId),
+          payload: {
+            intent: "send_downloaded_file",
+            path: result.path,
+            sourceChatId: chatId,
+            sourceMsgId: msgId,
+            mime: result.mime ?? null,
+            size: result.size ?? null,
+          },
+        })}`,
+      );
     }
 
     const detail = result?.path ?? outputPath;
@@ -342,10 +400,23 @@ const sendFile = defineCommand({
       valueHint: "file",
     },
     caption: { type: "string", description: "Optional caption", valueHint: "message" },
-    ref: { type: "string", description: "Message ID to reply to", valueHint: "msgId" },
+    ref: {
+      type: "string",
+      description: "Visible current-chat message ID to reply to",
+      valueHint: "msgId",
+    },
   },
   async run({ args }) {
+    const ctx = createRealContext();
+    const die = makeDie(ctx.output, "irc");
     const chatId = await resolveTarget(args.in as string | undefined);
+    assertCurrentChatForSend(
+      ctx,
+      chatId,
+      die,
+      "irc.send-file",
+      args.ref ? { replyRef: args.ref } : undefined,
+    );
     const filePath = (args.path as string).trim();
 
     const body: Record<string, unknown> = { chatId, path: filePath };

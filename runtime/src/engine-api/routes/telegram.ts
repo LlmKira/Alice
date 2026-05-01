@@ -14,6 +14,8 @@
 
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { ALLOWED_REACTIONS, normalizeReactionEmoji } from "../../telegram/actions/shared.js";
+import { isTelegramActionError } from "../../telegram/errors.js";
 import type { EngineApiDeps } from "../server.js";
 
 // ── 去重缓存：防止 LLM 重试轮重发已成功的消息 ──
@@ -70,7 +72,26 @@ function notConfigured(res: ServerResponse, action: string): void {
   res.end(JSON.stringify({ error: `telegram ${action} not configured` }));
 }
 
+function typedInputError(
+  res: ServerResponse,
+  code: string,
+  error: string,
+  details?: Record<string, unknown>,
+): void {
+  res.writeHead(400, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ code, error, ...details }));
+}
+
+function allowedReactionList(): string[] {
+  return Array.from(ALLOWED_REACTIONS);
+}
+
 function serverError(res: ServerResponse, fallback: string, err: unknown): void {
+  if (isTelegramActionError(err)) {
+    typedInputError(res, err.code, err.message, err.details);
+    return;
+  }
+
   // ADR-237: 记录完整错误堆栈便于排查
   console.error(`[Engine API] ${fallback}:`, err instanceof Error ? err.stack : err);
   res.writeHead(500, { "Content-Type": "application/json" });
@@ -174,8 +195,15 @@ export async function handleTelegramForward(
       badRequest(res, 'body must be { "chatId": number, "msgId": number, "emoji": string }');
       return;
     }
+    const normalizedEmoji = normalizeReactionEmoji(emoji);
+    if (!ALLOWED_REACTIONS.has(normalizedEmoji)) {
+      typedInputError(res, "invalid_reaction", "invalid reaction: use a Telegram-supported emoji", {
+        allowed: allowedReactionList(),
+      });
+      return;
+    }
     try {
-      const result = await deps.telegramReact({ chatId, msgId, emoji });
+      const result = await deps.telegramReact({ chatId, msgId, emoji: normalizedEmoji });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
     } catch (err) {

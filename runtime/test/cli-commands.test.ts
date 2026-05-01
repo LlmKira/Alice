@@ -15,8 +15,10 @@ import {
   readCommand,
   replyCommand,
   sayCommand,
+  stickerCommand,
   tailCommand,
   threadsCommand,
+  voiceCommand,
   whoisCommand,
 } from "../src/system/cli-commands.js";
 import type { CliContext, EngineClient, Output } from "../src/system/cli-types.js";
@@ -76,11 +78,13 @@ function makeFakeContext(
   responses: Map<string, unknown>,
   output: Output,
   resolveTarget: (t: unknown) => Promise<number> = async () => 123,
+  currentChatId?: number,
 ): CliContext {
   return {
     engine: makeFakeEngine(responses),
     output,
     resolveTarget,
+    currentChatId,
   };
 }
 
@@ -97,6 +101,14 @@ describe("parseMsgId", () => {
 
   it("throws on invalid", () => {
     expect(() => parseMsgId("abc")).toThrow("invalid message ID");
+  });
+
+  it("rejects non-integer IDs", () => {
+    expect(() => parseMsgId("1.5")).toThrow("visible current-chat msgId");
+  });
+
+  it("rejects fake latest aliases", () => {
+    expect(() => parseMsgId("#latest")).toThrow("never latest");
   });
 });
 
@@ -117,7 +129,13 @@ describe("gval", () => {
 describe("sayCommand", () => {
   it("sends message and returns formatted output", async () => {
     const responses = new Map([
-      ['POST:/telegram/send:{"chatId":123,"text":"hello"}', { msgId: 789 }],
+      [
+        'POST:/transport/send:{"target":"channel:telegram:123","text":"hello"}',
+        {
+          messageId: "message:telegram:123:789",
+          nativeMessageId: 789,
+        },
+      ],
     ]);
     const output = new FakeOutput();
     const ctx = makeFakeContext(responses, output);
@@ -127,13 +145,17 @@ describe("sayCommand", () => {
       text: "hello",
     });
 
-    expect(result.action).toBe("__ALICE_ACTION__:sent:chatId=123:msgId=789");
+    expect(result.action).toBe(
+      "__ALICE_ACTION__:sent:chatId=123:msgId=789:message=message:telegram:123:789",
+    );
     expect(result.output).toBe('✓ Sent: "hello"');
     expect(output.logs).toHaveLength(0); // 命令逻辑不直接输出
   });
 
   it("returns rawResult when json flag is set", async () => {
-    const responses = new Map([['POST:/telegram/send:{"chatId":123,"text":"test"}', { msgId: 1 }]]);
+    const responses = new Map([
+      ['POST:/transport/send:{"target":"channel:telegram:123","text":"test"}', { msgId: 1 }],
+    ]);
     const ctx = makeFakeContext(responses, new FakeOutput());
 
     const result = await sayCommand(ctx, {
@@ -143,8 +165,123 @@ describe("sayCommand", () => {
     });
 
     // rawResult 用于 JSON 输出，output 是人类可读文本
-    expect(result.rawResult).toEqual({ msgId: 1, chatId: 123 });
+    expect(result.rawResult).toEqual({
+      msgId: 1,
+      chatId: 123,
+      target: "channel:telegram:123",
+      messageId: undefined,
+    });
     expect(result.output).toBe('✓ Sent: "test"');
+  });
+
+  it("accepts stable transport targets without numeric resolver fallback", async () => {
+    const responses = new Map([
+      [
+        'POST:/transport/send:{"target":"channel:telegram:123","text":"stable"}',
+        {
+          messageId: "message:telegram:123:790",
+          nativeMessageId: 790,
+        },
+      ],
+    ]);
+    const ctx = makeFakeContext(responses, new FakeOutput(), async () => {
+      throw new Error("numeric resolver should not be called");
+    });
+
+    const result = await sayCommand(ctx, {
+      in: "channel:telegram:123",
+      text: "stable",
+    });
+
+    expect(result.action).toBe(
+      "__ALICE_ACTION__:sent:chatId=123:msgId=790:message=message:telegram:123:790",
+    );
+    expect(result.rawResult).toMatchObject({
+      chatId: 123,
+      target: "channel:telegram:123",
+      messageId: "message:telegram:123:790",
+    });
+  });
+
+  it("posts non-Telegram stable targets through transport without Telegram assumptions", async () => {
+    const responses = new Map([
+      ['POST:/transport/send:{"target":"channel:discord:guild-1/thread-2","text":"hello"}', null],
+    ]);
+    const ctx = makeFakeContext(responses, new FakeOutput(), async () => {
+      throw new Error("numeric resolver should not be called");
+    });
+
+    const result = await sayCommand(ctx, {
+      in: "channel:discord:guild-1/thread-2",
+      text: "hello",
+    });
+
+    expect(result.action).toBeUndefined();
+    expect(result.rawResult).toMatchObject({
+      chatId: undefined,
+      target: "channel:discord:guild-1/thread-2",
+    });
+  });
+
+  it("resolves display names through neutral target resolver", async () => {
+    const responses = new Map([
+      [
+        'POST:/resolve/target:{"target":"游戏群"}',
+        { result: { target: "channel:discord:guild-1/thread-2" } },
+      ],
+      ['POST:/transport/send:{"target":"channel:discord:guild-1/thread-2","text":"hello"}', null],
+    ]);
+    const ctx = makeFakeContext(responses, new FakeOutput(), async () => {
+      throw new Error("numeric resolver should not be called");
+    });
+
+    const result = await sayCommand(ctx, {
+      in: "游戏群",
+      text: "hello",
+    });
+
+    expect(result.rawResult).toMatchObject({
+      target: "channel:discord:guild-1/thread-2",
+    });
+  });
+
+  it("normalizes visible CJK quotes before sending", async () => {
+    const responses = new Map([
+      [
+        'POST:/transport/send:{"target":"channel:telegram:123","text":"不行不行，系统说“道德模块异常，请重启”，一刀杀五个直接蓝屏了😵"}',
+        { msgId: 789 },
+      ],
+    ]);
+    const ctx = makeFakeContext(responses, new FakeOutput());
+
+    const result = await sayCommand(ctx, {
+      in: undefined,
+      text: "不行不行，系统说'道德模块异常，请重启'，一刀杀五个直接蓝屏了😵",
+    });
+
+    expect(result.action).toBe(
+      "__ALICE_ACTION__:sent:chatId=123:msgId=789:message=message:telegram:123:789",
+    );
+    expect(result.output).toBe(
+      '✓ Sent: "不行不行，系统说“道德模块异常，请重启”，一刀杀五个直接蓝屏了😵"',
+    );
+  });
+
+  it("keeps English apostrophe semantics while normalizing typography", async () => {
+    const responses = new Map([
+      [
+        'POST:/transport/send:{"target":"channel:telegram:123","text":"don’t worry"}',
+        { msgId: 789 },
+      ],
+    ]);
+    const ctx = makeFakeContext(responses, new FakeOutput());
+
+    const result = await sayCommand(ctx, {
+      in: undefined,
+      text: "don't worry",
+    });
+
+    expect(result.output).toBe('✓ Sent: "don’t worry"');
   });
 
   it("throws on empty text", async () => {
@@ -158,10 +295,47 @@ describe("sayCommand", () => {
     ).rejects.toThrow("exit(1)");
   });
 
+  it("rejects cross-chat active send when execution context has a current chat", async () => {
+    const output = new FakeOutput();
+    const ctx = makeFakeContext(new Map(), output, async () => 456, 123);
+
+    await expect(
+      sayCommand(ctx, {
+        in: "@456",
+        text: "wrong room",
+      }),
+    ).rejects.toThrow("exit(1)");
+
+    expect(output.errors.join("\n")).toContain("refusing cross-chat send");
+    expect(output.errors.join("\n")).toContain("self switch-chat --to @456");
+    expect(output.errors.join("\n")).toContain("__ALICE_ERROR__:command_cross_chat_send");
+    expect(output.errors.join("\n")).toContain("__ALICE_ERROR_DETAIL__:");
+    expect(output.errors.join("\n")).toContain('"source":"irc.say"');
+    expect(output.errors.join("\n")).toContain('"currentChatId":"123"');
+    expect(output.errors.join("\n")).toContain('"requestedChatId":"channel:telegram:456"');
+  });
+
+  it("allows active send to the current chat", async () => {
+    const responses = new Map([
+      ['POST:/transport/send:{"target":"channel:telegram:123","text":"same room"}', { msgId: 789 }],
+    ]);
+    const output = new FakeOutput();
+    const ctx = makeFakeContext(responses, output, async () => 123, 123);
+
+    const result = await sayCommand(ctx, {
+      in: "@123",
+      text: "same room",
+    });
+
+    expect(result.action).toBe(
+      "__ALICE_ACTION__:sent:chatId=123:msgId=789:message=message:telegram:123:789",
+    );
+  });
+
   describe("--resolve-thread (ADR-240)", () => {
     it("resolves thread after sending message", async () => {
       const responses = new Map([
-        ['POST:/telegram/send:{"chatId":123,"text":"done"}', { msgId: 789 }],
+        ['POST:/transport/send:{"target":"channel:telegram:123","text":"done"}', { msgId: 789 }],
         ['POST:/dispatch/resolve_topic:{"threadId":158}', { ok: true }],
       ]);
       const output = new FakeOutput();
@@ -173,15 +347,19 @@ describe("sayCommand", () => {
         "resolve-thread": "158",
       });
 
-      expect(result.action).toBe("__ALICE_ACTION__:sent:chatId=123:msgId=789");
+      expect(result.action).toBe(
+        "__ALICE_ACTION__:sent:chatId=123:msgId=789:message=message:telegram:123:789",
+      );
       expect(result.output).toBe('✓ Sent: "done"');
       // 验证发送了 resolve_topic 请求
-      expect(Array.from(responses.keys())).toContain('POST:/dispatch/resolve_topic:{"threadId":158}');
+      expect(Array.from(responses.keys())).toContain(
+        'POST:/dispatch/resolve_topic:{"threadId":158}',
+      );
     });
 
     it("throws on invalid thread ID", async () => {
       const responses = new Map([
-        ['POST:/telegram/send:{"chatId":123,"text":"done"}', { msgId: 789 }],
+        ['POST:/transport/send:{"target":"channel:telegram:123","text":"done"}', { msgId: 789 }],
       ]);
       const output = new FakeOutput();
       const ctx = makeFakeContext(responses, output);
@@ -197,7 +375,7 @@ describe("sayCommand", () => {
 
     it("throws on negative thread ID", async () => {
       const responses = new Map([
-        ['POST:/telegram/send:{"chatId":123,"text":"done"}', { msgId: 789 }],
+        ['POST:/transport/send:{"target":"channel:telegram:123","text":"done"}', { msgId: 789 }],
       ]);
       const output = new FakeOutput();
       const ctx = makeFakeContext(responses, output);
@@ -213,7 +391,7 @@ describe("sayCommand", () => {
 
     it("does not fail when resolve throws", async () => {
       const responses = new Map([
-        ['POST:/telegram/send:{"chatId":123,"text":"done"}', { msgId: 789 }],
+        ['POST:/transport/send:{"target":"channel:telegram:123","text":"done"}', { msgId: 789 }],
         // resolve_topic 返回 null（模拟失败）
         ['POST:/dispatch/resolve_topic:{"threadId":158}', null],
       ]);
@@ -228,12 +406,14 @@ describe("sayCommand", () => {
 
       // 消息应该成功发送，即使 resolve 失败
       expect(result.output).toBe('✓ Sent: "done"');
-      expect(result.action).toBe("__ALICE_ACTION__:sent:chatId=123:msgId=789");
+      expect(result.action).toBe(
+        "__ALICE_ACTION__:sent:chatId=123:msgId=789:message=message:telegram:123:789",
+      );
     });
 
     it("works without resolve-thread flag", async () => {
       const responses = new Map([
-        ['POST:/telegram/send:{"chatId":123,"text":"hello"}', { msgId: 789 }],
+        ['POST:/transport/send:{"target":"channel:telegram:123","text":"hello"}', { msgId: 789 }],
       ]);
       const output = new FakeOutput();
       const ctx = makeFakeContext(responses, output);
@@ -244,7 +424,9 @@ describe("sayCommand", () => {
         // 不带 resolve-thread 参数
       });
 
-      expect(result.action).toBe("__ALICE_ACTION__:sent:chatId=123:msgId=789");
+      expect(result.action).toBe(
+        "__ALICE_ACTION__:sent:chatId=123:msgId=789:message=message:telegram:123:789",
+      );
       expect(result.output).toBe('✓ Sent: "hello"');
       // 不应发送 resolve_topic 请求
       expect(Array.from(responses.keys())).not.toContain("resolve_topic");
@@ -255,7 +437,10 @@ describe("sayCommand", () => {
 describe("replyCommand", () => {
   it("sends reply with correct params", async () => {
     const responses = new Map([
-      ['POST:/telegram/send:{"chatId":123,"text":"reply text","replyTo":456}', { msgId: 789 }],
+      [
+        'POST:/transport/send:{"target":"channel:telegram:123","text":"reply text","replyTo":"message:telegram:123:456"}',
+        { msgId: 789 },
+      ],
     ]);
     const ctx = makeFakeContext(responses, new FakeOutput());
 
@@ -267,12 +452,163 @@ describe("replyCommand", () => {
 
     expect(result.output).toContain("Replied to: #456");
   });
+
+  it("normalizes quoted CJK phrases before replying", async () => {
+    const responses = new Map([
+      [
+        'POST:/transport/send:{"target":"channel:telegram:123","text":"而且“二桃杀三士”本来是计谋","replyTo":"message:telegram:123:456"}',
+        { msgId: 789 },
+      ],
+    ]);
+    const ctx = makeFakeContext(responses, new FakeOutput());
+
+    const result = await replyCommand(ctx, {
+      in: undefined,
+      ref: "456",
+      text: "而且'二桃杀三士'本来是计谋",
+    });
+
+    expect(result.output).toBe('✓ Replied to: #456: "而且“二桃杀三士”本来是计谋"');
+  });
+
+  it("uses stable message refs for non-Telegram replies", async () => {
+    const responses = new Map([
+      [
+        'POST:/transport/send:{"target":"channel:discord:guild-1/thread-2","text":"reply text","replyTo":"message:discord:guild-1/thread-2:m-9"}',
+        null,
+      ],
+    ]);
+    const ctx = makeFakeContext(responses, new FakeOutput(), async () => {
+      throw new Error("numeric resolver should not be called");
+    });
+
+    const result = await replyCommand(ctx, {
+      in: "channel:discord:guild-1/thread-2",
+      ref: "message:discord:guild-1/thread-2:m-9",
+      text: "reply text",
+    });
+
+    expect(result.action).toBeUndefined();
+    expect(result.output).toContain("message:discord:guild-1/thread-2:m-9");
+    expect(result.rawResult).toMatchObject({
+      target: "channel:discord:guild-1/thread-2",
+      replyToMessage: "message:discord:guild-1/thread-2:m-9",
+    });
+  });
+
+  it("rejects numeric message refs for non-Telegram targets", async () => {
+    const output = new FakeOutput();
+    const ctx = makeFakeContext(new Map(), output, async () => {
+      throw new Error("numeric resolver should not be called");
+    });
+
+    await expect(
+      replyCommand(ctx, {
+        in: "channel:discord:guild-1/thread-2",
+        ref: "456",
+        text: "reply text",
+      }),
+    ).rejects.toThrow("exit(1)");
+
+    expect(output.errors.join("\n")).toContain("use a stable message ref for discord");
+  });
+
+  it("rejects cross-chat reply", async () => {
+    const output = new FakeOutput();
+    const ctx = makeFakeContext(new Map(), output, async () => 456, 123);
+
+    await expect(
+      replyCommand(ctx, {
+        in: "@456",
+        ref: "1",
+        text: "wrong room",
+      }),
+    ).rejects.toThrow("exit(1)");
+  });
+
+  it("rejects malformed reply refs before calling Telegram", async () => {
+    const output = new FakeOutput();
+    const ctx = makeFakeContext(new Map(), output);
+
+    await expect(
+      replyCommand(ctx, {
+        in: undefined,
+        ref: "abc",
+        text: "wrong ref",
+      }),
+    ).rejects.toThrow("exit(1)");
+
+    expect(output.errors.join("\n")).toContain("visible current-chat msgId");
+  });
+});
+
+describe("stickerCommand", () => {
+  it("rejects empty sticker keyword", async () => {
+    const output = new FakeOutput();
+    const ctx = makeFakeContext(new Map(), output);
+
+    await expect(
+      stickerCommand(ctx, {
+        in: undefined,
+        keyword: "  ",
+      }),
+    ).rejects.toThrow("exit(1)");
+
+    expect(output.errors.join("\n")).toContain("sticker requires non-empty keyword");
+  });
+
+  it("rejects cross-chat sticker", async () => {
+    const output = new FakeOutput();
+    const ctx = makeFakeContext(new Map(), output, async () => 456, 123);
+
+    await expect(
+      stickerCommand(ctx, {
+        in: "@456",
+        keyword: "wave",
+      }),
+    ).rejects.toThrow("exit(1)");
+  });
+});
+
+describe("voiceCommand", () => {
+  it("normalizes visible text before voice delivery or text fallback", async () => {
+    const responses = new Map([
+      [
+        'POST:/telegram/voice:{"chatId":123,"text":"系统说“道德模块异常，请重启”"}',
+        { msgId: 789, deliveredAs: "text" },
+      ],
+    ]);
+    const ctx = makeFakeContext(responses, new FakeOutput());
+
+    const result = await voiceCommand(ctx, {
+      in: undefined,
+      text: "系统说'道德模块异常，请重启'",
+    });
+
+    expect(result.action).toBe("__ALICE_ACTION__:sent:chatId=123:msgId=789");
+    expect(result.output).toBe('✓ Sent text fallback: "系统说“道德模块异常，请重启”"');
+  });
+
+  it("rejects cross-chat voice", async () => {
+    const output = new FakeOutput();
+    const ctx = makeFakeContext(new Map(), output, async () => 456, 123);
+
+    await expect(
+      voiceCommand(ctx, {
+        in: "@456",
+        text: "wrong room",
+      }),
+    ).rejects.toThrow("exit(1)");
+  });
 });
 
 describe("reactCommand", () => {
   it("sends reaction", async () => {
     const responses = new Map([
-      ['POST:/telegram/react:{"chatId":123,"msgId":123,"emoji":"👍"}', { ok: true }],
+      [
+        'POST:/transport/react:{"target":"channel:telegram:123","message":"message:telegram:123:123","emoji":"👍"}',
+        { ok: true },
+      ],
     ]);
     const ctx = makeFakeContext(responses, new FakeOutput());
 
@@ -282,20 +618,133 @@ describe("reactCommand", () => {
       emoji: "👍",
     });
 
+    expect(result.action).toBe("__ALICE_ACTION__:react:chatId=123:msgId=123");
     expect(result.output).toContain("Reacted 👍 to: #123");
+  });
+
+  it("normalizes heart variation selector before reaction validation", async () => {
+    const responses = new Map([
+      [
+        'POST:/transport/react:{"target":"channel:telegram:123","message":"message:telegram:123:123","emoji":"❤"}',
+        { ok: true },
+      ],
+    ]);
+    const ctx = makeFakeContext(responses, new FakeOutput());
+
+    const result = await reactCommand(ctx, {
+      in: undefined,
+      ref: "123",
+      emoji: "❤️",
+    });
+
+    expect(result.action).toBe("__ALICE_ACTION__:react:chatId=123:msgId=123");
+    expect(result.output).toContain("Reacted ❤ to: #123");
+  });
+
+  it("uses stable target and message refs for non-Telegram reactions", async () => {
+    const responses = new Map([
+      [
+        'POST:/transport/react:{"target":"channel:discord:guild-1/thread-2","message":"message:discord:guild-1/thread-2:m-9","emoji":"👍"}',
+        { ok: true },
+      ],
+    ]);
+    const ctx = makeFakeContext(responses, new FakeOutput(), async () => {
+      throw new Error("numeric resolver should not be called");
+    });
+
+    const result = await reactCommand(ctx, {
+      in: "channel:discord:guild-1/thread-2",
+      ref: "message:discord:guild-1/thread-2:m-9",
+      emoji: "👍",
+    });
+
+    expect(result.action).toBeUndefined();
+    expect(result.output).toContain("message:discord:guild-1/thread-2:m-9");
+    expect(result.rawResult).toMatchObject({
+      target: "channel:discord:guild-1/thread-2",
+      message: "message:discord:guild-1/thread-2:m-9",
+    });
+  });
+
+  it("rejects unsupported reaction before calling Engine API", async () => {
+    const responses = new Map<string, unknown>();
+    const output = new FakeOutput();
+    const ctx = makeFakeContext(responses, output);
+
+    await expect(
+      reactCommand(ctx, {
+        in: undefined,
+        ref: "123",
+        emoji: "💤",
+      }),
+    ).rejects.toThrow("exit(1)");
+
+    expect(output.errors.join("\n")).toContain("invalid reaction");
+    expect(responses.size).toBe(0);
+  });
+});
+
+describe("voiceCommand", () => {
+  it("reports voice text fallback as sent text", async () => {
+    const responses = new Map([
+      [
+        'POST:/telegram/voice:{"chatId":123,"text":"hello"}',
+        { msgId: 9, deliveredAs: "text", fallbackReason: "voice_messages_forbidden" },
+      ],
+    ]);
+    const ctx = makeFakeContext(responses, new FakeOutput());
+
+    const result = await voiceCommand(ctx, {
+      in: undefined,
+      text: "hello",
+    });
+
+    expect(result.action).toBe("__ALICE_ACTION__:sent:chatId=123:msgId=9");
+    expect(result.output).toContain('✓ Sent text fallback: "hello"');
+    expect(result.rawResult).toMatchObject({
+      msgId: 9,
+      deliveredAs: "text",
+      fallbackReason: "voice_messages_forbidden",
+    });
   });
 });
 
 describe("readCommand", () => {
   it("marks chat as read", async () => {
-    const responses = new Map([['POST:/telegram/read:{"chatId":123}', { ok: true }]]);
-    const ctx = makeFakeContext(responses, new FakeOutput());
+    const responses = new Map([
+      ['POST:/transport/read:{"target":"channel:telegram:123"}', { ok: true }],
+    ]);
+    const ctx = makeFakeContext(responses, new FakeOutput(), async () => 123, 123);
 
     const result = await readCommand(ctx, {
       in: undefined,
     });
 
     expect(result.output).toBe("✓ Marked as read");
+    expect(result.observation).toMatchObject({
+      source: "irc.read",
+      currentChatId: "123",
+      targetChatId: "123",
+    });
+  });
+
+  it("marks stable non-Telegram transport targets as read", async () => {
+    const responses = new Map([
+      ['POST:/transport/read:{"target":"channel:discord:guild-1/thread-2"}', { ok: true }],
+    ]);
+    const ctx = makeFakeContext(responses, new FakeOutput(), async () => {
+      throw new Error("numeric resolver should not be called");
+    });
+
+    const result = await readCommand(ctx, {
+      in: "channel:discord:guild-1/thread-2",
+    });
+
+    expect(result.output).toBe("✓ Marked as read");
+    expect(result.observation).toMatchObject({
+      source: "irc.read",
+      targetChatId: "channel:discord:guild-1/thread-2",
+    });
   });
 });
 
@@ -303,26 +752,70 @@ describe("tailCommand", () => {
   it("formats messages as numbered list", async () => {
     const responses = new Map([
       [
-        "GET:/chat/123/tail?limit=20",
-        [
-          { id: 1, sender: "Alice", text: "hello" },
-          { id: 2, sender: "Bob", text: "hi there" },
-        ],
+        "GET:/chat/456/tail?limit=20",
+        {
+          messages: [
+            {
+              id: 1,
+              sender: "Alice",
+              senderId: "self",
+              text: "hello",
+              mediaType: null,
+              outgoing: true,
+              directed: false,
+              timestamp: "2026-03-11T00:00:00.000Z",
+            },
+            {
+              id: 2,
+              sender: "Bob",
+              senderId: "contact:2",
+              text: "hi there",
+              mediaType: null,
+              outgoing: false,
+              directed: true,
+              timestamp: "2026-03-11T00:01:00.000Z",
+            },
+          ],
+        },
       ],
     ]);
-    const ctx = makeFakeContext(responses, new FakeOutput());
+    const ctx = makeFakeContext(responses, new FakeOutput(), async () => 456, 123);
 
     const result = await tailCommand(ctx, {
-      in: undefined,
+      in: "@456",
       count: "20",
     });
 
-    expect(result.output).toContain('1. (#1) Alice: "hello"');
-    expect(result.output).toContain('2. (#2) Bob: "hi there"');
+    expect(result.output).toContain('1. (msgId 1) Alice: "hello"');
+    expect(result.output).toContain('2. (msgId 2) Bob: "hi there"');
+    expect(result.observation).toMatchObject({
+      source: "irc.tail",
+      currentChatId: "123",
+      targetChatId: "456",
+      payload: { count: 20, messageCount: 2 },
+    });
   });
 
   it("returns rawResult with json flag", async () => {
-    const responses = new Map([["GET:/chat/123/tail?limit=10", [{ id: 1, text: "test" }]]]);
+    const responses = new Map([
+      [
+        "GET:/chat/123/tail?limit=10",
+        {
+          messages: [
+            {
+              id: 1,
+              sender: "Mika",
+              senderId: "contact:1",
+              text: "test",
+              mediaType: null,
+              outgoing: false,
+              directed: false,
+              timestamp: "2026-03-11T00:00:00.000Z",
+            },
+          ],
+        },
+      ],
+    ]);
     const ctx = makeFakeContext(responses, new FakeOutput());
 
     const result = await tailCommand(ctx, {
@@ -331,7 +824,18 @@ describe("tailCommand", () => {
       json: "", // 空字符串表示 JSON 模式
     });
 
-    expect(result.rawResult).toEqual([{ id: 1, text: "test" }]);
+    expect(result.rawResult).toEqual([
+      {
+        id: 1,
+        sender: "Mika",
+        senderId: "contact:1",
+        text: "test",
+        mediaType: null,
+        outgoing: false,
+        directed: false,
+        timestamp: "2026-03-11T00:00:00.000Z",
+      },
+    ]);
   });
 
   it("shows (no messages) for empty result", async () => {

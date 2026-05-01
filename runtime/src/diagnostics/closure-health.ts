@@ -45,20 +45,25 @@ export function computeClosureHealth(
   const stats = db.all<{
     total: number;
     closed: number;
-    no_gap: number;
+    feel_closed: number;
     has_auto: number;
   }>(sql`
     SELECT
       count(*) as total,
       sum(case when closure_depth > 0 then 1 else 0 end) as closed,
-      sum(case when observation_gap = 0 or observation_gap is null then 1 else 0 end) as no_gap,
+      sum(case
+        when observation_gap = 0 or observation_gap is null then 1
+        when json_valid(auto_writeback)
+          and json_extract(auto_writeback, '$.feel') is not null then 1
+        else 0
+      end) as feel_closed,
       sum(case when auto_writeback is not null then 1 else 0 end) as has_auto
     FROM action_log
     WHERE action_type = 'message'
       AND tick > (SELECT coalesce(max(tick), 0) - ${windowTicks} FROM action_log)
   `);
 
-  const row = stats[0] ?? { total: 0, closed: 0, no_gap: 0, has_auto: 0 };
+  const row = stats[0] ?? { total: 0, closed: 0, feel_closed: 0, has_auto: 0 };
   const total = Number(row.total);
 
   if (total === 0) {
@@ -75,7 +80,7 @@ export function computeClosureHealth(
   }
 
   const actionStateRatio = Number(row.closed) / total;
-  const feelCoverage = Number(row.no_gap) / total;
+  const feelCoverage = Number(row.feel_closed) / total;
   const autoWritebackRatio = Number(row.has_auto) / total;
 
   // 延迟评估统计

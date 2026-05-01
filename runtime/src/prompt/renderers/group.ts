@@ -29,7 +29,7 @@ import {
 } from "./shared.js";
 
 export function renderGroup(snapshot: UserPromptSnapshot): string {
-  const timeStr = renderLocalClock(snapshot.timezoneOffset);
+  const timeStr = renderLocalClock(snapshot.nowMs, snapshot.timezoneOffset);
   const metaParts = ["group", snapshot.groupMeta?.membersInfo].filter(
     (part): part is string => part != null && part.length > 0,
   );
@@ -46,13 +46,16 @@ export function renderGroup(snapshot: UserPromptSnapshot): string {
 
   return joinBlocks([
     rawBlock(
-      `${timeStr}. ${targetLabel} (${metaParts.join(", ")}). Current mood: ${snapshot.moodLabel}.`,
+      `${timeStr}. ${targetLabel} (${metaParts.join(", ")}).`,
       snapshot.groupMeta?.bio ? `About: ${snapshot.groupMeta.bio.slice(0, 100)}` : undefined,
       snapshot.groupMeta?.restrictions,
     ),
+    rawBlock(snapshot.emotionProjection),
+    rawBlock(snapshot.emotionStyleHint),
     rawBlock(snapshot.roundHint, snapshot.episodeHint),
     conversationStateBlock(snapshot.presence),
     sectionBlock("Recent activity", snapshot.timeline.lines),
+    sectionBlock("Social cases", snapshot.socialCaseLines),
     rawBlock(
       snapshot.groupMeta?.directed ? "Someone directed a message at you." : undefined,
       snapshot.groupMeta?.topic ? `Current topic: ${snapshot.groupMeta.topic}` : undefined,
@@ -64,6 +67,7 @@ export function renderGroup(snapshot: UserPromptSnapshot): string {
       "Local slang",
       snapshot.jargon.map((jargon) => `"${jargon.term}" = ${jargon.meaning}`),
     ),
+    listSectionBlock("Timing", snapshot.timingSignals ?? []),
     listSectionBlock("What's happening", snapshot.situationSignals),
     listSectionBlock("Scheduled", snapshot.scheduledEvents),
     listSectionBlock("Caution", snapshot.riskFlags),

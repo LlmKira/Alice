@@ -6,7 +6,11 @@
  *
  * @see docs/adr/107-engagement-session/README.md
  */
-import type { ScriptExecutionResult } from "../../core/script-execution.js";
+import {
+  emptyScriptExecutionResult,
+  mergeScriptExecutionResults,
+  type ScriptExecutionResult,
+} from "../../core/script-execution.js";
 import { CHAT_TYPE_WEIGHTS, DUNBAR_TIER_WEIGHT, PRESSURE_SPECS } from "../../graph/constants.js";
 import type { WorldModel } from "../../graph/world-model.js";
 // ADR-222: CONVERSATION_INERTIA_BOOST 已删除。Continuation 使用固定系数 0.67（≈ 旧 1/1.5）。
@@ -21,10 +25,7 @@ import type { SubcycleResult } from "../react/types.js";
  * ADR-214 Wave A: 删除 actions/instructions/lastSilenceReason/pendingActions/markAllExecuted。
  */
 export class EngagementSession {
-  readonly thinks: string[] = [];
-  readonly queryLogs: Array<{ fn: string; result: string }> = [];
-  readonly logs: string[] = [];
-  readonly instructionErrors: string[] = [];
+  execution: ScriptExecutionResult = emptyScriptExecutionResult();
   totalDuration = 0;
   errorCount = 0;
   subcycle = 0;
@@ -36,6 +37,7 @@ export class EngagementSession {
     | "limit"
     | "llm_failed"
     | "observation_empty"
+    | "resting"
     | "fed_up"
     | "cooling_down" = "complete";
   /** 可参数化 subcycle 上限（群聊收束用）。 */
@@ -47,14 +49,16 @@ export class EngagementSession {
 
   /** ADR-235: 最后一次 TC 循环的可观测性元数据。 */
   lastTcMeta?: SubcycleResult["tcMeta"];
+  /** 最近一次 LLM 调用失败分类。 */
+  failureKind?: SubcycleResult["failureKind"];
 
   /** 吸收一个子周期的结果到 engagement 级累积。 */
   absorb(sub: SubcycleResult): void {
-    this.thinks.push(...sub.thinks);
-    this.queryLogs.push(...sub.queryLogs);
-    this.instructionErrors.push(...sub.instructionErrors);
+    this.execution = mergeScriptExecutionResults([this.execution, sub.execution]);
+    this.errorCount += sub.execution.errors.length;
     this.totalDuration += sub.duration;
     if (sub.tcMeta) this.lastTcMeta = sub.tcMeta;
+    if (sub.failureKind) this.failureKind = sub.failureKind;
   }
 
   /** 检查 engagement 是否可以继续（未超出子周期/时长上限）。 */
@@ -64,13 +68,7 @@ export class EngagementSession {
 
   /** 将累积数据合并为 ScriptExecutionResult（用于 processResult 审计）。 */
   toMergedResult(): ScriptExecutionResult {
-    return mergeScriptExecutionResults({
-      thinks: this.thinks,
-      queryLogs: this.queryLogs,
-      logs: this.logs,
-      instructionErrors: this.instructionErrors,
-      duration: this.totalDuration,
-    });
+    return this.execution;
   }
 }
 
@@ -224,7 +222,15 @@ export function prepareStayWatch(
   cancel: () => void;
 } {
   const activityWatch = ctx.buffer.watch(
-    (e) => e.channelId === targetChannelId && (e.type === "new_message" || e.type === "typing"),
+    // ADR-247: watching 是继续注意，不是发言授权。
+    // 只有同目标 directed 新消息可以把 linger slot 重新唤醒；typing / ambient activity
+    // 仍进入 EventBuffer，由外层控制器按真实压力重新评估。
+    // @see docs/adr/247-block-contract-over-transport.md §P1：拆 `watching`
+    (e) =>
+      e.type === "new_message" &&
+      e.channelId === targetChannelId &&
+      e.isDirected === true &&
+      !e.senderIsBot,
   );
   const interruptWatch = ctx.buffer.watch(
     (e) =>
@@ -257,32 +263,5 @@ export function prepareStayWatch(
       activityWatch.cancel();
       interruptWatch.cancel();
     },
-  };
-}
-
-/**
- * ADR-214 Wave B: MergeScriptOpts — 纯 ScriptExecutionResult 字段。
- */
-export interface MergeScriptOpts {
-  thinks?: string[];
-  queryLogs?: Array<{ fn: string; result: string }>;
-  logs?: string[];
-  errors?: string[];
-  instructionErrors?: string[];
-  duration?: number;
-  completedActions?: string[];
-  silenceReason?: string | null;
-}
-
-export function mergeScriptExecutionResults(opts: MergeScriptOpts): ScriptExecutionResult {
-  return {
-    thinks: opts.thinks ?? [],
-    queryLogs: opts.queryLogs ?? [],
-    logs: opts.logs ?? [],
-    errors: opts.errors ?? [],
-    instructionErrors: opts.instructionErrors ?? [],
-    duration: opts.duration ?? 0,
-    completedActions: opts.completedActions ?? [],
-    silenceReason: opts.silenceReason ?? null,
   };
 }

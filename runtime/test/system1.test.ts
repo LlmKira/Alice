@@ -103,50 +103,15 @@ describe("System 1: Caution skip", () => {
     expect(result.action).toBe("skip");
   });
 
-  it("高 mood severity → 升级 System 2（S8/H3 修复）", () => {
+  it("ADR-268: channel mood_valence no longer upgrades System 1 by itself", () => {
     const G = new WorldModel();
-    // ADR-110: mood_shift_ms 设为近期（刚发生）→ decay ≈ 1 → severity = 0.8 > 0.5
     G.addChannel("ch1", {
       risk_level: "none",
       mood_valence: -0.8,
-      mood_shift_ms: Date.now() - 1000, // 1 秒前，几乎无衰减
+      mood_shift_ms: Date.now() - 1000,
     });
     const focalSets = makeFocalSets({
       caution: { entities: ["ch1"], primaryTarget: "ch1", meanRelevance: 0.8 },
-    });
-    const result = trySystem1("caution", focalSets, G, 100);
-    expect(result.handled).toBe(false);
-  });
-
-  it("低 mood severity → skip（阈值以下）", () => {
-    const G = new WorldModel();
-    // ADR-110: valence=0.3, 即使 decay≈1 → severity=0.3 < 0.5 → skip
-    G.addChannel("ch1", {
-      risk_level: "none",
-      mood_valence: -0.3,
-      mood_shift_ms: Date.now() - 1000, // 1 秒前
-    });
-    const focalSets = makeFocalSets({
-      caution: { entities: ["ch1"], primaryTarget: "ch1", meanRelevance: 0.3 },
-    });
-    const result = trySystem1("caution", focalSets, G, 100);
-    expect(result.handled).toBe(true);
-    expect(result.action).toBe("skip");
-  });
-
-  it("高 mood severity 但衰减后低于阈值 → skip", () => {
-    const G = new WorldModel();
-    // ADR-110: DEFAULT_MOOD_DECAY_HALFLIFE = 3600 秒
-    // 设置 mood_shift_ms 为很久以前 → 高衰减
-    // age = 7200 秒 → decay = 1/(1+7200/3600) = 1/3 = 0.333
-    // severity = 0.8 × 0.333 = 0.267 < 0.5 → skip
-    G.addChannel("ch1", {
-      risk_level: "none",
-      mood_valence: -0.8,
-      mood_shift_ms: Date.now() - 7200_000, // 7200 秒前
-    });
-    const focalSets = makeFocalSets({
-      caution: { entities: ["ch1"], primaryTarget: "ch1", meanRelevance: 0.3 },
     });
     const result = trySystem1("caution", focalSets, G, 100);
     expect(result.handled).toBe(true);

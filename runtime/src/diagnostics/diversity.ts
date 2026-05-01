@@ -10,11 +10,19 @@
  * @see docs/adr/75-deliberation-state/75-deliberation-state.md
  */
 
-import { asc } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "../db/connection.js";
-import { actionLog, personalitySnapshots } from "../db/schema.js";
+import {
+  actionLog,
+  candidateTrace,
+  decisionTrace,
+  personalitySnapshots,
+  tickLog,
+} from "../db/schema.js";
 import { VOICE_COUNT } from "../voices/personality.js";
+
+const IAUS_ACTION_VOICE_COUNT = 3;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 类型
@@ -33,6 +41,25 @@ export interface VoiceDiversityReport {
   consecutiveRepeatRate: number;
   /** 人格漂移分析（需要 personality_snapshots 数据）。 */
   personalityDrift: PersonalityDriftReport | null;
+  /** 按观测层拆开的声部序列。A2 权威面是 voice_selection_tick_log。 */
+  planes: Record<string, VoiceDiversityPlaneReport>;
+  /** A2 当前采用的权威观测面。 */
+  authorityPlane: "voice_selection_tick_log";
+}
+
+export interface VoiceDiversityPlaneReport {
+  /** 样本数。 */
+  sampleCount: number;
+  /** 声部选择的 Shannon 熵 H（bits）。 */
+  shannonEntropy: number;
+  /** 当前观测面的理论最大熵。 */
+  maxEntropy: number;
+  /** 归一化熵 H/H_max ∈ [0, 1]。 */
+  normalizedEntropy: number;
+  /** 各声部使用频率。 */
+  voiceFrequencies: Record<string, number>;
+  /** 连续相同声部的比率。 */
+  consecutiveRepeatRate: number;
 }
 
 export interface PersonalityDriftReport {
@@ -54,32 +81,54 @@ export interface PersonalityDriftReport {
 /**
  * 分析声部多样性。
  *
- * 从 action_log 读取声部选择序列，计算 Shannon 熵和轮换率。
+ * 从 tick_log 读取声部选择序列，计算 Shannon 熵和轮换率。
  * 从 personality_snapshots 读取 π 演化，计算漂移速率。
  */
 export function analyzeVoiceDiversity(): VoiceDiversityReport {
   const db = getDb();
 
-  // ── 1. 声部选择序列 ──────────────────────────────────────────────────
-  const actions = db
-    .select({ voice: actionLog.voice })
-    .from(actionLog)
-    .orderBy(asc(actionLog.tick))
+  // ── 1. 声部选择权威序列 ───────────────────────────────────────────────
+  // ADR-124 D7: tick_log.action 是 loudness winner；action_log 是下游执行记录。
+  const voiceSelections = db
+    .select({ voice: tickLog.action })
+    .from(tickLog)
+    .orderBy(asc(tickLog.tick), asc(tickLog.id))
     .all();
 
-  // 频率统计
+  const authority = summarizeVoiceSequence(voiceSelections, VOICE_COUNT);
+  const planes = buildVoiceDiversityPlanes(db, authority);
+
+  // ── 3. 人格漂移（V5）────────────────────────────────────────────────
+  const personalityDrift = analyzePersonalityDrift(db);
+
+  return {
+    shannonEntropy: authority.shannonEntropy,
+    maxEntropy: authority.maxEntropy,
+    normalizedEntropy: authority.normalizedEntropy,
+    voiceFrequencies: authority.voiceFrequencies,
+    consecutiveRepeatRate: authority.consecutiveRepeatRate,
+    personalityDrift,
+    planes,
+    authorityPlane: "voice_selection_tick_log",
+  };
+}
+
+function summarizeVoiceSequence(
+  rows: Array<{ voice: string | null }>,
+  expectedVoiceCount: number,
+): VoiceDiversityPlaneReport {
+  const voices = rows.map((row) => row.voice).filter((voice): voice is string => Boolean(voice));
   const voiceCounts: Record<string, number> = {};
-  for (const row of actions) {
-    voiceCounts[row.voice] = (voiceCounts[row.voice] ?? 0) + 1;
+  for (const voice of voices) {
+    voiceCounts[voice] = (voiceCounts[voice] ?? 0) + 1;
   }
 
-  const total = actions.length;
+  const total = voices.length;
   const voiceFrequencies: Record<string, number> = {};
   for (const [voice, count] of Object.entries(voiceCounts)) {
     voiceFrequencies[voice] = total > 0 ? count / total : 0;
   }
 
-  // Shannon 熵
   let shannonEntropy = 0;
   if (total > 0) {
     for (const freq of Object.values(voiceFrequencies)) {
@@ -88,29 +137,90 @@ export function analyzeVoiceDiversity(): VoiceDiversityReport {
       }
     }
   }
-  const maxEntropy = Math.log2(VOICE_COUNT);
-  const normalizedEntropy = maxEntropy > 0 ? shannonEntropy / maxEntropy : 0;
 
-  // ── 2. 连续重复率 ────────────────────────────────────────────────────
   let consecutiveRepeats = 0;
-  for (let i = 1; i < actions.length; i++) {
-    if (actions[i].voice === actions[i - 1].voice) {
+  for (let i = 1; i < voices.length; i++) {
+    if (voices[i] === voices[i - 1]) {
       consecutiveRepeats++;
     }
   }
-  const consecutiveRepeatRate = actions.length > 1 ? consecutiveRepeats / (actions.length - 1) : 0;
 
-  // ── 3. 人格漂移（V5）────────────────────────────────────────────────
-  const personalityDrift = analyzePersonalityDrift(db, actions);
-
+  const maxEntropy = Math.log2(expectedVoiceCount);
+  const normalizedEntropy = maxEntropy > 0 ? shannonEntropy / maxEntropy : 0;
   return {
+    sampleCount: total,
     shannonEntropy,
     maxEntropy,
     normalizedEntropy,
     voiceFrequencies,
-    consecutiveRepeatRate,
-    personalityDrift,
+    consecutiveRepeatRate: voices.length > 1 ? consecutiveRepeats / (voices.length - 1) : 0,
   };
+}
+
+function buildVoiceDiversityPlanes(
+  db: ReturnType<typeof getDb>,
+  authority: VoiceDiversityPlaneReport,
+): Record<string, VoiceDiversityPlaneReport> {
+  const actionLogAll = db
+    .select({ voice: actionLog.voice })
+    .from(actionLog)
+    .orderBy(asc(actionLog.tick), asc(actionLog.id))
+    .all();
+  const actionLogSuccess = db
+    .select({ voice: actionLog.voice })
+    .from(actionLog)
+    .where(eq(actionLog.success, true))
+    .orderBy(asc(actionLog.tick), asc(actionLog.id))
+    .all();
+  const decisionEnqueue = db
+    .select({ payloadJson: decisionTrace.payloadJson })
+    .from(decisionTrace)
+    .where(and(eq(decisionTrace.phase, "evolve"), eq(decisionTrace.finalDecision, "enqueue")))
+    .orderBy(asc(decisionTrace.tick), asc(decisionTrace.id))
+    .all()
+    .map((row) => ({ voice: readSelectedAction(row.payloadJson) }));
+  const candidateSelectedAll = db
+    .select({ voice: candidateTrace.actionType })
+    .from(candidateTrace)
+    .where(eq(candidateTrace.selected, true))
+    .orderBy(asc(candidateTrace.tick), asc(candidateTrace.id))
+    .all();
+  const candidateSelectedNormal = db
+    .select({ voice: candidateTrace.actionType })
+    .from(candidateTrace)
+    .where(and(eq(candidateTrace.selected, true), eq(candidateTrace.gatePlane, "none")))
+    .orderBy(asc(candidateTrace.tick), asc(candidateTrace.id))
+    .all();
+  const candidateSelectedDirected = db
+    .select({ voice: candidateTrace.actionType })
+    .from(candidateTrace)
+    .where(
+      and(eq(candidateTrace.selected, true), eq(candidateTrace.gatePlane, "directed_override")),
+    )
+    .orderBy(asc(candidateTrace.tick), asc(candidateTrace.id))
+    .all();
+
+  return {
+    voice_selection_tick_log: authority,
+    decision_enqueue: summarizeVoiceSequence(decisionEnqueue, IAUS_ACTION_VOICE_COUNT),
+    iaus_selected_all: summarizeVoiceSequence(candidateSelectedAll, IAUS_ACTION_VOICE_COUNT),
+    iaus_selected_normal: summarizeVoiceSequence(candidateSelectedNormal, IAUS_ACTION_VOICE_COUNT),
+    iaus_selected_directed_override: summarizeVoiceSequence(
+      candidateSelectedDirected,
+      IAUS_ACTION_VOICE_COUNT,
+    ),
+    action_log_all: summarizeVoiceSequence(actionLogAll, IAUS_ACTION_VOICE_COUNT),
+    action_log_success: summarizeVoiceSequence(actionLogSuccess, IAUS_ACTION_VOICE_COUNT),
+  };
+}
+
+function readSelectedAction(payloadJson: string): string | null {
+  try {
+    const payload = JSON.parse(payloadJson) as { selectedAction?: unknown };
+    return typeof payload.selectedAction === "string" ? payload.selectedAction : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -118,10 +228,7 @@ export function analyzeVoiceDiversity(): VoiceDiversityReport {
  *
  * V5 预测：π 的演化时间尺度 >> 压力振荡时间尺度（记忆是慢变量）。
  */
-function analyzePersonalityDrift(
-  db: ReturnType<typeof getDb>,
-  _actions: Array<{ voice: string }>,
-): PersonalityDriftReport | null {
+function analyzePersonalityDrift(db: ReturnType<typeof getDb>): PersonalityDriftReport | null {
   const snapshots = db
     .select({ tick: personalitySnapshots.tick, weights: personalitySnapshots.weights })
     .from(personalitySnapshots)

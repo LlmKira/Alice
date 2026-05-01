@@ -21,6 +21,11 @@ import {
   type CandidateContext,
   compensate,
   computeCandidateBypass,
+  computeEmotionActionUtility,
+  computeEmotionProactiveCapUtility,
+  computeInactivityStaleUtility,
+  computeProactivePacingUtility,
+  computeTimingShadowUtility,
   evalCurve,
   type IAUSCandidate,
   type IAUSConfig,
@@ -367,6 +372,22 @@ describe("scoreAllCandidates", () => {
     const G = buildGraph([]);
     const tensionMap = new Map<string, TensionVector>();
     const config = buildIAUSConfig(G, tensionMap, { nowMs });
+    const result = scoreAllCandidates(tensionMap, G, 100, [], config);
+    expect(result).toBeNull();
+  });
+
+  it("self resting 期间不产生普通行动候选", () => {
+    const G = buildGraph([{ id: "channel:a", tierContact: 5, pendingDirected: 3 }]);
+    G.updateAgent("self", {
+      resting_since_ms: nowMs - 1_000,
+      resting_until_ms: nowMs + 30_000,
+      resting_reason: "test",
+    });
+    const tensionMap = new Map<string, TensionVector>([
+      ["channel:a", tension({ tau5: 3.0, tau1: 1.0 })],
+    ]);
+    const config = buildIAUSConfig(G, tensionMap, { nowMs });
+
     const result = scoreAllCandidates(tensionMap, G, 100, [], config);
     expect(result).toBeNull();
   });
@@ -1083,6 +1104,28 @@ describe("D5: Bottleneck Logging", () => {
     }
   });
 
+  it("scored 保留反事实诊断需要的数值和 considerations", () => {
+    const G = buildGraph([{ id: "channel:a", tierContact: 5 }]);
+    const tensionMap = new Map([["channel:a", tension({ tau1: 1.0, tau3: 0.5 })]]);
+
+    const config = buildIAUSConfig(G, tensionMap, {
+      nowMs,
+      contributions: { P1: { "channel:a": 10 } },
+    });
+    const result = scoreAllCandidates(tensionMap, G, 100, [], config);
+
+    expect(result).not.toBeNull();
+    if (result) {
+      for (const s of result.scored) {
+        expect(typeof s.deltaP).toBe("number");
+        expect(typeof s.socialCost).toBe("number");
+        expect(typeof s.netValue).toBe("number");
+        expect(s.considerations).toEqual(expect.any(Object));
+        expect(Object.keys(s.considerations).length).toBeGreaterThan(0);
+      }
+    }
+  });
+
   it("bottleneck 是最低分 Consideration 的 key", () => {
     const G = buildGraph([{ id: "channel:a", tierContact: 5 }]);
     const tensionMap = new Map([["channel:a", tension({ tau1: 0.5, tau3: 0.3 })]]);
@@ -1620,9 +1663,14 @@ describe("ADR-219 D1: U_voice_affinity — cross-voice pressure dominance", () =
       const curiosity = result.scored.find(
         (s) => s.target === "channel:obligated" && s.action === "curiosity",
       );
+      expect(diligence).toBeDefined();
+      expect(sociability).toBeDefined();
+      expect(curiosity).toBeDefined();
       // diligence 应因 U_voice_affinity 而得分最高
-      expect(diligence!.V).toBeGreaterThan(sociability!.V);
-      expect(diligence!.V).toBeGreaterThan(curiosity!.V);
+      if (diligence && sociability && curiosity) {
+        expect(diligence.V).toBeGreaterThan(sociability.V);
+        expect(diligence.V).toBeGreaterThan(curiosity.V);
+      }
     }
   });
 
@@ -1646,7 +1694,11 @@ describe("ADR-219 D1: U_voice_affinity — cross-voice pressure dominance", () =
       const dil = result.scored.find(
         (s) => s.target === "channel:cooling" && s.action === "diligence",
       );
-      expect(soc!.V).toBeGreaterThan(dil!.V);
+      expect(soc).toBeDefined();
+      expect(dil).toBeDefined();
+      if (soc && dil) {
+        expect(soc.V).toBeGreaterThan(dil.V);
+      }
     }
   });
 
@@ -1674,7 +1726,504 @@ describe("ADR-219 D1: U_voice_affinity — cross-voice pressure dominance", () =
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 15. ADR-186: computeCandidateBypass — @ signal guarantee
+// 15. ADR-251: 热聊安全的 proactive pacing
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("ADR-251: computeProactivePacingUtility — hot-chat-safe damping", () => {
+  const nowMs = BASE_NOW_MS;
+
+  it("directed/bypass → 不阻尼", () => {
+    expect(
+      computeProactivePacingUtility({
+        chatType: "private",
+        bypassGates: true,
+        nowMs,
+        lastProactiveOutreachMs: nowMs - 1_000,
+        consecutiveOutgoing: 5,
+      }),
+    ).toBe(1.0);
+  });
+
+  it("private hot chat: 对方最后发言晚于 Alice 最后发言 → 不阻尼", () => {
+    expect(
+      computeProactivePacingUtility({
+        chatType: "private",
+        bypassGates: false,
+        nowMs,
+        lastIncomingMs: nowMs - 10_000,
+        lastOutgoingMs: nowMs - 30_000,
+        lastProactiveOutreachMs: nowMs - 20_000,
+        consecutiveOutgoing: 3,
+      }),
+    ).toBe(1.0);
+  });
+
+  it("unsolicited private proactive: 60s 内重复主动外展 → 闭环软阻尼", () => {
+    expect(
+      computeProactivePacingUtility({
+        chatType: "private",
+        bypassGates: false,
+        nowMs,
+        lastIncomingMs: nowMs - 300_000,
+        lastOutgoingMs: nowMs - 30_000,
+        lastProactiveOutreachMs: nowMs - 30_000,
+        consecutiveOutgoing: 1,
+      }),
+    ).toBeCloseTo(0.4, 6);
+  });
+
+  it("unsolicited private proactive: 单方连续输出 >= 2 → 连续软阻尼", () => {
+    expect(
+      computeProactivePacingUtility({
+        chatType: "private",
+        bypassGates: false,
+        nowMs,
+        lastIncomingMs: nowMs - 300_000,
+        lastOutgoingMs: nowMs - 90_000,
+        lastProactiveOutreachMs: nowMs - 120_000,
+        consecutiveOutgoing: 2,
+      }),
+    ).toBeCloseTo(1 / 3.5, 6);
+  });
+
+  it("group/channel → 不阻尼", () => {
+    expect(
+      computeProactivePacingUtility({
+        chatType: "supergroup",
+        bypassGates: false,
+        nowMs,
+        lastProactiveOutreachMs: nowMs - 1_000,
+        consecutiveOutgoing: 3,
+      }),
+    ).toBe(1.0);
+    expect(
+      computeProactivePacingUtility({
+        chatType: "channel",
+        bypassGates: false,
+        nowMs,
+        lastProactiveOutreachMs: nowMs - 1_000,
+        consecutiveOutgoing: 3,
+      }),
+    ).toBe(1.0);
+  });
+});
+
+describe("ADR-251: scoreAllCandidates integrates U_proactive_pacing post-CF", () => {
+  const nowMs = BASE_NOW_MS;
+
+  it("hot chat target beats otherwise equal recent unsolicited proactive target", () => {
+    const G = buildGraph([
+      { id: "channel:hot", tierContact: 50, chatType: "private" },
+      { id: "channel:cold", tierContact: 50, chatType: "private" },
+    ]);
+    G.setDynamic("channel:hot", "last_outgoing_ms", nowMs - 30_000);
+    G.setDynamic("channel:hot", "last_incoming_ms", nowMs - 10_000);
+    G.setDynamic("channel:hot", "last_proactive_outreach_ms", nowMs - 20_000);
+    G.setDynamic("channel:cold", "last_outgoing_ms", nowMs - 30_000);
+    G.setDynamic("channel:cold", "last_incoming_ms", nowMs - 300_000);
+    G.setDynamic("channel:cold", "last_proactive_outreach_ms", nowMs - 20_000);
+
+    const t = tension({ tau1: 1.0, tau3: 1.0, tau6: 0.5 });
+    const tensionMap = new Map([
+      ["channel:hot", t],
+      ["channel:cold", t],
+    ]);
+    const config = buildIAUSConfig(G, tensionMap, {
+      nowMs,
+      contributions: { P1: { "channel:hot": 10, "channel:cold": 10 } },
+      deterministic: true,
+    });
+
+    const result = scoreAllCandidates(tensionMap, G, 100, [], config);
+    expect(result).not.toBeNull();
+    if (result) {
+      expect(result.candidate.target).toBe("channel:hot");
+      expect(result.candidate.considerations.U_proactive_pacing).toBe(1.0);
+
+      const hotV = Math.max(
+        ...result.scored.filter((s) => s.target === "channel:hot").map((s) => s.V),
+      );
+      const coldV = Math.max(
+        ...result.scored.filter((s) => s.target === "channel:cold").map((s) => s.V),
+      );
+      expect(hotV).toBeGreaterThan(coldV * 2);
+    }
+  });
+
+  it("directed candidate keeps U_proactive_pacing=1 even with recent proactive timestamp", () => {
+    const G = buildGraph([
+      { id: "channel:directed", tierContact: 50, chatType: "private", pendingDirected: 1 },
+    ]);
+    setObligation(G, "channel:directed", 1, nowMs);
+    G.setDynamic("channel:directed", "last_outgoing_ms", nowMs - 30_000);
+    G.setDynamic("channel:directed", "last_incoming_ms", nowMs - 300_000);
+    G.setDynamic("channel:directed", "last_proactive_outreach_ms", nowMs - 10_000);
+    G.setDynamic("channel:directed", "consecutive_outgoing", 5);
+
+    const tensionMap = new Map([["channel:directed", tension({ tau1: 1.0, tau5: 1.5 })]]);
+    const config = buildIAUSConfig(G, tensionMap, {
+      nowMs,
+      contributions: { P5: { "channel:directed": 10 } },
+      candidateCtx: buildCandidateCtx(G, nowMs),
+      deterministic: true,
+    });
+
+    const result = scoreAllCandidates(tensionMap, G, 100, [], config);
+    expect(result).not.toBeNull();
+    if (result) {
+      expect(result.candidate.target).toBe("channel:directed");
+      expect(result.winnerBypassGates).toBe(true);
+      expect(result.candidate.considerations.U_proactive_pacing).toBe(1.0);
+    }
+  });
+});
+
+describe("IAUS inactivity stale utility", () => {
+  const nowMs = 2_000_000_000;
+
+  it("keeps bypass, group, and unknown-last-incoming candidates neutral", () => {
+    expect(
+      computeInactivityStaleUtility({
+        chatType: "private",
+        bypassGates: true,
+        nowMs,
+        lastIncomingMs: nowMs - 30 * 24 * 3600_000,
+      }),
+    ).toBe(1.0);
+    expect(
+      computeInactivityStaleUtility({
+        chatType: "supergroup",
+        bypassGates: false,
+        nowMs,
+        lastIncomingMs: nowMs - 30 * 24 * 3600_000,
+      }),
+    ).toBe(1.0);
+    expect(
+      computeInactivityStaleUtility({
+        chatType: "private",
+        bypassGates: false,
+        nowMs,
+      }),
+    ).toBe(1.0);
+  });
+
+  it("softly downranks long-inactive private chats without making them unreachable", () => {
+    expect(
+      computeInactivityStaleUtility({
+        chatType: "private",
+        bypassGates: false,
+        nowMs,
+        lastIncomingMs: nowMs - 12 * 3600_000,
+      }),
+    ).toBe(1.0);
+    expect(
+      computeInactivityStaleUtility({
+        chatType: "private",
+        bypassGates: false,
+        nowMs,
+        lastIncomingMs: nowMs - 8 * 24 * 3600_000,
+      }),
+    ).toBeCloseTo(0.15, 6);
+  });
+
+  it("fresh private chat beats otherwise equal stale private chat", () => {
+    const G = buildGraph([
+      { id: "channel:fresh", tierContact: 50, chatType: "private" },
+      { id: "channel:stale", tierContact: 50, chatType: "private" },
+    ]);
+    G.setDynamic("channel:fresh", "last_incoming_ms", nowMs - 12 * 3600_000);
+    G.setDynamic("channel:stale", "last_incoming_ms", nowMs - 8 * 24 * 3600_000);
+
+    const t = tension({ tau1: 1.0, tau3: 1.0 });
+    const tensionMap = new Map([
+      ["channel:fresh", t],
+      ["channel:stale", t],
+    ]);
+    const config = buildIAUSConfig(G, tensionMap, {
+      nowMs,
+      contributions: { P1: { "channel:fresh": 10, "channel:stale": 10 } },
+      deterministic: true,
+    });
+
+    const result = scoreAllCandidates(tensionMap, G, 100, [], config);
+    expect(result).not.toBeNull();
+    if (result) {
+      expect(result.candidate.target).toBe("channel:fresh");
+      const stale = result.scored.find((entry) => entry.target === "channel:stale");
+      expect(stale?.considerations.U_inactivity_stale).toBeCloseTo(0.15, 6);
+    }
+  });
+});
+
+describe("ADR-268: emotion proactive cap", () => {
+  const nowMs = BASE_NOW_MS;
+
+  it("keeps bypass and hot private chats neutral", () => {
+    expect(
+      computeEmotionProactiveCapUtility({
+        chatType: "private",
+        bypassGates: true,
+        proactiveCap: 1,
+        consecutiveOutgoing: 5,
+      }),
+    ).toBe(1.0);
+    expect(
+      computeEmotionProactiveCapUtility({
+        chatType: "private",
+        bypassGates: false,
+        proactiveCap: 1,
+        consecutiveOutgoing: 5,
+        lastIncomingMs: nowMs - 1_000,
+        lastOutgoingMs: nowMs - 5_000,
+      }),
+    ).toBe(1.0);
+  });
+
+  it("downranks unsolicited private outreach after lonely cap is exceeded", () => {
+    expect(
+      computeEmotionProactiveCapUtility({
+        chatType: "private",
+        bypassGates: false,
+        proactiveCap: 1,
+        consecutiveOutgoing: 1,
+        lastIncomingMs: nowMs - 60_000,
+        lastOutgoingMs: nowMs - 10_000,
+      }),
+    ).toBe(1.0);
+    expect(
+      computeEmotionProactiveCapUtility({
+        chatType: "private",
+        bypassGates: false,
+        proactiveCap: 1,
+        consecutiveOutgoing: 2,
+        lastIncomingMs: nowMs - 60_000,
+        lastOutgoingMs: nowMs - 10_000,
+      }),
+    ).toBeCloseTo(0.2, 6);
+  });
+
+  it("scoreAllCandidates records U_emotion_proactive_cap and prefers non-chasing target", () => {
+    const G = buildGraph([
+      { id: "channel:waiting", tierContact: 50, chatType: "private" },
+      { id: "channel:fresh", tierContact: 50, chatType: "private" },
+    ]);
+    G.setDynamic("channel:waiting", "last_outgoing_ms", nowMs - 10_000);
+    G.setDynamic("channel:waiting", "last_incoming_ms", nowMs - 300_000);
+    G.setDynamic("channel:waiting", "consecutive_outgoing", 2);
+    G.setDynamic("channel:fresh", "last_outgoing_ms", nowMs - 20_000);
+    G.setDynamic("channel:fresh", "last_incoming_ms", nowMs - 5_000);
+    G.addContact("contact:friend", { display_name: "Friend" });
+    G.setDynamic(
+      "self",
+      "emotion_episodes",
+      JSON.stringify([
+        {
+          id: "lonely",
+          kind: "lonely",
+          valence: -0.45,
+          arousal: 0.35,
+          intensity: 0.8,
+          cause: { type: "silence", targetId: "contact:friend", summary: "waiting after check-in" },
+          createdAtMs: nowMs,
+          halfLifeMs: 2 * 60 * 60_000,
+          confidence: 0.8,
+        },
+      ]),
+    );
+
+    const t = tension({ tau1: 1.0, tau3: 1.0 });
+    const tensionMap = new Map([
+      ["channel:waiting", t],
+      ["channel:fresh", t],
+    ]);
+    const config = buildIAUSConfig(G, tensionMap, {
+      nowMs,
+      contributions: { P1: { "channel:waiting": 10, "channel:fresh": 10 } },
+      deterministic: true,
+    });
+
+    const result = scoreAllCandidates(tensionMap, G, 100, [], config);
+    expect(result).not.toBeNull();
+    if (result) {
+      expect(result.candidate.target).toBe("channel:fresh");
+      const waiting = result.scored.find((entry) => entry.target === "channel:waiting");
+      expect(waiting?.considerations.U_emotion_proactive_cap).toBeCloseTo(0.2, 6);
+    }
+  });
+});
+
+describe("ADR-268: emotion action utility", () => {
+  const nowMs = BASE_NOW_MS;
+  const hurtControl = {
+    voiceBias: { sociability: -0.08, caution: 0.2, reflection: 0.08 },
+    actionCaps: { proactiveMessages: null },
+    styleBudget: {
+      maxCharsMultiplier: 0.75,
+      preferShort: true,
+      allowVulnerability: false,
+      avoidSelfProof: true,
+      avoidCruelty: true,
+    },
+  };
+
+  it("keeps bypass obligations neutral and softly downranks non-obligatory sociability", () => {
+    expect(
+      computeEmotionActionUtility({
+        actionType: "sociability",
+        chatType: "private",
+        bypassGates: true,
+        control: hurtControl,
+      }),
+    ).toBe(1.0);
+    expect(
+      computeEmotionActionUtility({
+        actionType: "sociability",
+        chatType: "private",
+        bypassGates: false,
+        control: hurtControl,
+      }),
+    ).toBeLessThan(1.0);
+  });
+
+  it("scoreAllCandidates records U_emotion_action for active hurt state", () => {
+    const G = buildGraph([{ id: "channel:social", tierContact: 50, chatType: "private" }]);
+    G.setDynamic(
+      "self",
+      "emotion_episodes",
+      JSON.stringify([
+        {
+          id: "hurt",
+          kind: "hurt",
+          valence: -0.6,
+          arousal: 0.45,
+          intensity: 0.8,
+          cause: { type: "feedback", evidenceId: "1", summary: "sharp pushback" },
+          createdAtMs: nowMs,
+          halfLifeMs: 3 * 60 * 60_000,
+          confidence: 0.8,
+        },
+      ]),
+    );
+
+    const t = tension({ tau3: 1.0 });
+    const tensionMap = new Map([["channel:social", t]]);
+    const config = buildIAUSConfig(G, tensionMap, {
+      nowMs,
+      contributions: { P3: { "channel:social": 10 } },
+      deterministic: true,
+    });
+
+    const result = scoreAllCandidates(tensionMap, G, 100, [], config);
+    expect(result).not.toBeNull();
+    const social = result?.scored.find(
+      (entry) => entry.target === "channel:social" && entry.action === "sociability",
+    );
+    expect(social?.considerations.U_emotion_action).toBeLessThan(1.0);
+  });
+});
+
+describe("ADR-261 Wave 3: rhythm timing shadow utility", () => {
+  const nowMs = BASE_NOW_MS;
+
+  it("eligible profile computes shadow utility without changing IAUS score", () => {
+    const G = buildGraph([{ id: "channel:quiet", tierContact: 50, chatType: "private" }]);
+    const tensionMap = new Map([["channel:quiet", tension({ tau1: 1.0, tau3: 1.0 })]]);
+    const baseConfig = buildIAUSConfig(G, tensionMap, {
+      nowMs,
+      contributions: { P1: { "channel:quiet": 10 } },
+      deterministic: true,
+    });
+    const shadowConfig = buildIAUSConfig(G, tensionMap, {
+      ...baseConfig,
+      candidateCtx: buildCandidateCtx(G, nowMs, {
+        getRhythmTimingProfile: () => ({
+          activeNowScore: 0.05,
+          quietNowScore: 0.95,
+          confidence: "high",
+          stale: false,
+        }),
+      }),
+    });
+
+    const base = scoreAllCandidates(tensionMap, G, 100, [], baseConfig);
+    const shadow = scoreAllCandidates(tensionMap, G, 100, [], shadowConfig);
+
+    expect(base).not.toBeNull();
+    expect(shadow).not.toBeNull();
+    if (base && shadow) {
+      expect(shadow.bestV).toBeCloseTo(base.bestV, 8);
+      expect(shadow.candidate.diagnostics?.timingShadow?.reason).toBe("eligible");
+      expect(shadow.candidate.diagnostics?.timingShadow?.utility).toBeLessThan(1);
+      expect(shadow.candidate.diagnostics?.timingShadow?.shadowNetValue).toBeLessThan(shadow.bestV);
+    }
+  });
+
+  it("directed / continuation bypass keeps timing shadow neutral", () => {
+    const G = buildGraph([
+      { id: "channel:directed", tierContact: 50, chatType: "private", pendingDirected: 1 },
+    ]);
+    setObligation(G, "channel:directed", 1, nowMs);
+
+    const tensionMap = new Map([["channel:directed", tension({ tau1: 1.0, tau5: 1.5 })]]);
+    const config = buildIAUSConfig(G, tensionMap, {
+      nowMs,
+      contributions: { P5: { "channel:directed": 10 } },
+      candidateCtx: buildCandidateCtx(G, nowMs, {
+        getRhythmTimingProfile: () => ({
+          activeNowScore: 0,
+          quietNowScore: 1,
+          confidence: "high",
+          stale: false,
+        }),
+      }),
+      deterministic: true,
+    });
+
+    const result = scoreAllCandidates(tensionMap, G, 100, [], config);
+
+    expect(result).not.toBeNull();
+    if (result) {
+      const timing = result.candidate.diagnostics?.timingShadow;
+      expect(result.winnerBypassGates).toBe(true);
+      expect(timing?.reason).toBe("bypass");
+      expect(timing?.utility).toBe(1.0);
+      expect(timing?.shadowNetValue).toBeCloseTo(result.bestV, 8);
+    }
+  });
+
+  it("low confidence, stale, missing profile, and group chat stay neutral", () => {
+    expect(
+      computeTimingShadowUtility({
+        chatType: "private",
+        bypassGates: false,
+        profile: { activeNowScore: 1, quietNowScore: 0, confidence: "low", stale: false },
+      }),
+    ).toMatchObject({ utility: 1.0, applied: false, reason: "low_confidence" });
+
+    expect(
+      computeTimingShadowUtility({
+        chatType: "private",
+        bypassGates: false,
+        profile: { activeNowScore: 1, quietNowScore: 0, confidence: "high", stale: true },
+      }),
+    ).toMatchObject({ utility: 1.0, applied: false, reason: "stale" });
+
+    expect(
+      computeTimingShadowUtility({ chatType: "private", bypassGates: false, profile: null }),
+    ).toMatchObject({ utility: 1.0, applied: false, reason: "missing_profile" });
+
+    expect(
+      computeTimingShadowUtility({
+        chatType: "supergroup",
+        bypassGates: false,
+        profile: { activeNowScore: 1, quietNowScore: 0, confidence: "high", stale: false },
+      }),
+    ).toMatchObject({ utility: 1.0, applied: false, reason: "unsupported_chat_type" });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 16. ADR-186: computeCandidateBypass — @ signal guarantee
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("ADR-186: computeCandidateBypass — @ signal guarantee", () => {

@@ -41,6 +41,7 @@ function safeReadText(path: string): string | null {
 /** ADR-216: --help 替代 man。系统命令 summary 硬编码。 */
 const SYSTEM_COMMAND_SUMMARIES: Record<string, string> = {
   irc: "Telegram system chat client for Alice",
+  album: "Alice group photo album search and send",
   self: "Alice self-management commands",
   "alice-pkg": "Alice OS package manager",
 };
@@ -66,8 +67,8 @@ function readManifestMeta(entry: RegistryEntry): ManifestMeta {
       ? parsed.description.trim()
       : entry.name;
 
-  // ADR-223: 提取 whenToUse（优先 action 级——英文，与 shell manual 一致）
-  // family.whenToUse 可能是中文（旧 Capability Guide 遗留），不用。
+  // ADR-223: 提取 whenToUse（优先 action 级——英文，与 shell manual 一致）。
+  // family.whenToUse 可能是中文（legacy category summary 遗留），不用。
   const whenToUse = parsed?.actions?.[0]?.whenToUse as string | undefined;
 
   return { summary, whenToUse };

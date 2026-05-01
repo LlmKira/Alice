@@ -4,15 +4,15 @@
  * GET  /graph/:entity/:attr → { "value": ... }
  * POST /graph/:entity/:attr → body { "value": ... }
  *
- * entity 格式：self, contact:xxx, channel:xxx
+ * entity 格式：self, contact:<platform>:xxx, channel:<platform>:xxx
  *
  * @see docs/adr/202-engine-api.md
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { EngineApiDeps } from "../server.js";
 
-/** entity 格式白名单：self | contact:数字 | channel:数字（含负号）。 */
-const ENTITY_PATTERN = /^(?:self|contact:-?\d+|channel:-?\d+)$/;
+/** entity 格式白名单：self | contact:<platform>:id | channel:<platform>:id。 */
+const ENTITY_PATTERN = /^(?:self|(?:contact|channel):[a-z][a-z0-9_-]*:.+)$/u;
 
 /** 将 URL 中的 entity 段解析为 graph nodeId。格式不合法返回 null。 */
 function resolveEntityId(entity: string): string | null {

@@ -26,10 +26,10 @@ type Brand<T, B extends string> = T & { readonly [__brand]: B };
 /** Telegram 原生数字 ID（用户正数，频道/超群 -100xxxx）。 */
 export type TelegramId = Brand<number, "TelegramId">;
 
-/** 频道图节点 ID，格式 `channel:<telegramId>`。 */
+/** 频道图节点 ID，格式 `channel:<platform>:<nativeId>`。 */
 export type ChannelNodeId = Brand<string, "ChannelNodeId">;
 
-/** 联系人图节点 ID，格式 `contact:<telegramId>`。 */
+/** 联系人图节点 ID，格式 `contact:<platform>:<nativeId>`。 */
 export type ContactNodeId = Brand<string, "ContactNodeId">;
 
 /** 对话会话图节点 ID，格式 `conversation:<channelId>_<tick>`。 */
@@ -115,11 +115,35 @@ export interface AgentAttrs {
   /** @internal 引擎内部数值，不暴露给 LLM。以 _ 前缀写入图。 */
   _personality_velocity?: number;
   personality_health?: string;
+  /** runtime 最近确认仍在运行的墙钟时间（ms）。用于启动时判断真实进程离线时长。 */
+  runtime_last_seen_ms?: number;
+  /** runtime 优雅退出写入的墙钟时间（ms）。用于启动恢复判定。 */
+  runtime_shutdown_ms?: number;
   // -- Profile --
   display_name?: string;
   bio?: string;
   /** 当前思考目标（thinking 行动写入）。 */
   thinking_target?: string | null;
+  /** Alice 主动选择休息/睡觉到此墙钟时间（ms）。 */
+  resting_until_ms?: number;
+  /** 最近进入 resting 的墙钟时间（ms）。 */
+  resting_since_ms?: number;
+  /** 休息原因，供诊断和 prompt 投影使用。 */
+  resting_reason?: string;
+  /**
+   * ADR-268: append-only self emotion episode ledger, JSON encoded.
+   * Internal graph-backed transition storage; normal prompt must read the projection.
+   */
+  emotion_episodes?: string;
+  /** ADR-268: derived current emotion state, JSON encoded. */
+  emotion_state?: string;
+  /** ADR-268: derived bounded control patch, JSON encoded. */
+  emotion_control?: string;
+  /**
+   * ADR-268: transient repair fact cache for isolated tests/probes without DB.
+   * Production authority is the append-only emotion_repairs table.
+   */
+  emotion_repairs?: string;
 }
 
 /**

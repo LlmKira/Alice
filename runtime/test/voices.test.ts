@@ -5,6 +5,7 @@
  * 目标选择由焦点集 primaryTarget 替代 selectTarget。
  */
 import { describe, expect, it } from "vitest";
+import { recordEmotionEpisode } from "../src/emotion/graph.js";
 import type { TensionVector } from "../src/graph/tension.js";
 import { buildTensionMap } from "../src/graph/tension.js";
 import { WorldModel } from "../src/graph/world-model.js";
@@ -219,6 +220,33 @@ describe("computeLoudness", () => {
     expect(rS.loudness[2]).toBeGreaterThan(rD.loudness[2]);
     // D 偏向时 L[0] (Diligence) 应更大
     expect(rD.loudness[0]).toBeGreaterThan(rS.loudness[0]);
+  });
+
+  it("ADR-268: hurt emotion gives caution an extra bounded bias", () => {
+    const nowMs = tickMs(100);
+    const tensionMap = makeTensionMap([["ch1", { tau1: 1, tau2: 1, tau3: 1, tau5: 1, tau6: 1 }]]);
+    const pv = new PersonalityVector();
+
+    const base = buildTestGraph();
+    const hurt = buildTestGraph();
+    recordEmotionEpisode(hurt, {
+      kind: "hurt",
+      intensity: 0.8,
+      nowMs,
+      cause: { type: "feedback", summary: "sharp correction" },
+    });
+
+    const baseLoudness = computeLoudness(tensionMap, pv, base, 100, {
+      noiseOverride: [0, 0, 0, 0],
+      nowMs,
+    }).loudness;
+    const hurtLoudness = computeLoudness(tensionMap, pv, hurt, 100, {
+      noiseOverride: [0, 0, 0, 0],
+      nowMs,
+    }).loudness;
+
+    expect(hurtLoudness[3]).toBeGreaterThan(baseLoudness[3]);
+    expect(hurtLoudness[2]).toBeLessThan(baseLoudness[2]);
   });
 
   it("焦点集包含 primaryTarget", () => {

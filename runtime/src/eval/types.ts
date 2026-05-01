@@ -193,7 +193,7 @@ export interface StructuralAssertions {
   /** reply 方向性（群聊：true = reply(text, msgId)，false = say(text)） */
   readonly replyDirected?: boolean;
 
-  /** 期望 LLM 通过 man <category> 激活的工具族。 */
+  /** 期望 LLM 使用的工具族。历史字段名保留，实际发现机制为 shell manual + `<command> --help`。 */
   readonly expectedNeeds?: readonly ToolCategory[];
 }
 
@@ -321,7 +321,7 @@ export interface EvalRunResult {
   readonly duration: number;
   /** 错误信息 */
   readonly errors: readonly string[];
-  /** LLM 声明的 needs 类别（累积 union） */
+  /** 历史字段：旧 capability 激活类别（累积 union）。普通 prompt 已改为扁平 shell manual。 */
   readonly needs?: readonly string[];
 }
 

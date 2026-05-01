@@ -6,6 +6,7 @@
 
 import { writeAuditEvent } from "../db/audit.js";
 import {
+  chatIdToContactId,
   PERCEIVE_FACT_DEBOUNCE_MS,
   PERCEIVE_FACT_MSG_THRESHOLD,
   PERCEIVE_FACTS_LIMIT,
@@ -203,9 +204,7 @@ function createPerceiveFacts(
 
     const displayName = safeDisplayName(G, channelId);
     // 推导 contact ID（私聊 channel → contact 对应）
-    const sourceContact = channelId.startsWith("channel:")
-      ? `contact:${channelId.slice("channel:".length)}`
-      : undefined;
+    const sourceContact = chatIdToContactId(channelId) ?? undefined;
 
     G.addFact(factId, {
       content: `Activity: ${count} messages in ${displayName}`,

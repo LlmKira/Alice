@@ -1,0 +1,123 @@
+# Alice Runtime 推荐配置
+#
+# 这里放“人类部署者会理解、会主动修改”的非敏感配置。
+# 密钥、手机号、Telegram hash 等 secret 放在 .env，再通过 *_env 字段引用。
+# 高级控制参数留在代码默认值里；看不懂的参数不应该出现在默认配置里。
+
+[telegram]
+# 从 https://my.telegram.org/apps 获取。属于账号关联凭据，放在 .env。
+api_id_env = "TELEGRAM_API_ID"
+api_hash_env = "TELEGRAM_API_HASH"
+phone_env = "TELEGRAM_PHONE"
+
+# Telegram 用户 ID，用于管理员权限和默认 operator channel 推导。
+admin_env = "TELEGRAM_ADMIN"
+
+# Alice 发送晨报/周报等系统消息的目标。空字符串时使用 TELEGRAM_ADMIN 推导。
+operator_channel_id = ""
+
+[qq]
+# ADR-264/265: QQ 第一接入只走 OneBot v11。
+# 指向 NapCat/LLOneBot 等 OneBot 实现端的 HTTP action API，例如 http://127.0.0.1:3000
+# 空字符串表示禁用 QQ transport；启用后 Alice stable id 仍使用 channel:qq:<群号> / contact:qq:<QQ号>。
+onebot_api_base_url = ""
+
+# OneBot v11 事件 WebSocket。指向 NapCat/LLOneBot 事件端点，例如 ws://127.0.0.1:3001。
+# 空字符串表示禁用 QQ 入站。
+onebot_event_ws_url = ""
+onebot_access_token_env = ""
+onebot_timeout_ms = 10000
+onebot_reconnect_min_ms = 1000
+onebot_reconnect_max_ms = 60000
+
+[[llm.endpoints]]
+name = "ohmygpt-deepseek-v4-flash"
+base_url = "https://api.ohmygpt.com/v1"
+api_key_env = "LLM_API_KEY"
+model = "deepseek-v4-flash"
+
+[[llm.endpoints]]
+name = "ohmygpt-gemini-3-flash-preview"
+base_url = "https://api.ohmygpt.com/v1"
+api_key_env = "LLM_API_KEY"
+model = "vertex-gemini-3-flash-preview"
+
+[llm.routing]
+# 首轮结构化模型组：适合 generateObject、启动检查、总结、未指定用途的通用 LLM 调用。
+# Gemini 可以参与这类“先判断/先分类”的任务；本组是 shuffle 池。
+first_pass = ["ohmygpt-gemini-3-flash-preview", "ohmygpt-deepseek-v4-flash"]
+
+# 后续 tick 工具执行模型组：会生成 shell/CLI 动作并直接影响 Telegram 行为。
+# 记录和质量诊断必须以 llm_model 为准；endpoint name 只用于熔断和传输诊断。
+# 2026-05-01: gemini3-flash 可用于 first_pass 首轮，但不进入 tool_tick 池；
+# 生产样本显示它在 shell/工具参数上更容易失败。
+tool_tick = ["ohmygpt-deepseek-v4-flash"]
+
+# Eval/校准模型组：测试、Ax 优化和离线 replay 使用，避免借用生产首轮策略。
+# 本组按顺序 fallback，方便 eval 结果可复现。
+eval = ["ohmygpt-deepseek-v4-flash", "ohmygpt-gemini-3-flash-preview"]
+
+# 辅助模型组：给应用内部旁路判断、低风险 probe、轻量总结等任务预留。按顺序 fallback。
+auxiliary = ["ohmygpt-deepseek-v4-flash"]
+
+# 内省/反思模型组。未配置时回退到 auxiliary。
+reflect = ["ohmygpt-deepseek-v4-flash"]
+
+[vision]
+# 空字符串表示禁用图片感知；启用时默认复用第一个 provider 的 base_url/key。
+model = "gemini-2.5-flash-lite"
+base_url = "https://api.ohmygpt.com/v1"
+max_per_tick = 5
+
+[tts]
+# base_url 为空表示禁用语音合成。
+base_url = "https://api.minimaxi.com"
+api_key_env = "TTS_API_KEY"
+model = "speech-02-hd"
+voice = "Chinese (Mandarin)_ExplorativeGirl"
+group_id_env = "TTS_GROUP_ID"
+
+[asr]
+# base_url 为空表示禁用语音识别。
+base_url = ""
+api_key_env = "ASR_API_KEY"
+model = "whisper-1"
+
+[services]
+# 外部搜索。空 secret 时禁用 browse。
+exa_api_key_env = "EXA_API_KEY"
+
+# NeteaseCloudMusicApi 兼容端点。空字符串表示禁用音乐推荐。
+music_api_base_url = ""
+
+# YouTube Data API。空 secret 时禁用视频搜索。
+youtube_api_key_env = ""
+
+# 本地视觉辅助服务。通常不用改；服务不可用时会自动降级。
+wd_tagger_url = "http://127.0.0.1:39100"
+anime_classify_url = "http://127.0.0.1:39101"
+
+[time]
+# 用户所在时区，UTC+8 写 8，日本写 9。
+timezone_offset = 8
+
+[dormant]
+# 安静窗口，本地小时。默认 23:00-07:00。
+quiet_window_start = 23
+quiet_window_end = 7
+
+[focus]
+# 推荐：直接写允许 Alice 分配注意力的 Telegram chat ID。
+# 不需要写内部 channel: 前缀；运行时会自动归一化。
+# whitelist = [
+#   "-1001234567890",
+#   "7785440246",
+# ]
+whitelist = []
+
+# 如果 whitelist 为空，也可以从文件读取。
+# 空字符串时自动读取 ALICE_STATE_DIR/focus-whitelist.txt（存在才启用）。
+whitelist_path = ""
+
+[log]
+level = "info"

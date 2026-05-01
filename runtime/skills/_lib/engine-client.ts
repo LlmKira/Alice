@@ -15,7 +15,22 @@ import { request } from "node:http";
 
 // ── Engine API 客户端 ──
 
-const TIMEOUT_MS = 6000;
+// Engine /telegram/send 会先发送 typing indicator，长文本最多等待 8s 再真正发送。
+// 客户端超时必须覆盖这个真实路径，否则会出现“消息已发出但 CLI 记为失败”的幽灵重试。
+const TIMEOUT_MS = 20_000;
+
+export class EngineApiError extends Error {
+  constructor(
+    readonly statusCode: number,
+    readonly method: string,
+    readonly path: string,
+    readonly code: string | null,
+    message: string,
+  ) {
+    super(message);
+    this.name = "EngineApiError";
+  }
+}
 
 /**
  * 底层请求函数。URL 缺失时返回 null（graceful degradation）。
@@ -54,16 +69,26 @@ function engineRequest(
         headers,
       },
       (res) => {
-        if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
-          res.resume(); // drain
-          reject(new Error(`Engine API returned ${res.statusCode} for ${method} ${path}`));
-          return;
-        }
         let data = "";
         res.on("data", (chunk: Buffer) => {
           data += chunk.toString();
         });
         res.on("end", () => {
+          if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
+            let parsed: Record<string, unknown> | null = null;
+            try {
+              parsed = data ? (JSON.parse(data) as Record<string, unknown>) : null;
+            } catch {
+              parsed = null;
+            }
+            const code = typeof parsed?.code === "string" ? parsed.code : null;
+            const message =
+              typeof parsed?.error === "string"
+                ? parsed.error
+                : `Engine API returned ${res.statusCode} for ${method} ${path}`;
+            reject(new EngineApiError(res.statusCode, method, path, code, message));
+            return;
+          }
           try {
             resolve(JSON.parse(data));
           } catch {

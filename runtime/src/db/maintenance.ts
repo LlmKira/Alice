@@ -3,14 +3,24 @@
  * ADR-79 M2: 图 GC（mark-sweep）。
  */
 import { desc, sql } from "drizzle-orm";
+import {
+  getRhythmProfilesUpdatedAtMs,
+  rebuildRhythmProfiles,
+  shouldRebuildRhythmProfiles,
+} from "../diagnostics/rhythm-profile-rebuild.js";
 import { findActiveConversation } from "../graph/queries.js";
 import type { WorldModel } from "../graph/world-model.js";
 import { factRetrievabilityFromNode } from "../mods/relationships.mod.js";
-
 import { createLogger } from "../utils/logger.js";
 import { runAnomalyCheck } from "./anomaly.js";
 import { getDb, getSqlite } from "./connection.js";
 import { actionLog, tickLog } from "./schema.js";
+import {
+  expireLegacyAutoTopicThreads,
+  expireNarrativeOnlyOpenThreads,
+  expireOrphanConversationThreads,
+  expireOverdueThreads,
+} from "./thread-lifecycle.js";
 
 const log = createLogger("maintenance");
 
@@ -209,12 +219,20 @@ export function gcExpiredThreads(G: WorldModel, nowMs: number): number {
 export function runMaintenance(
   currentTick: number,
   G?: WorldModel,
+  options: {
+    rhythmProfileRebuild?: {
+      intervalMs: number;
+      timezoneOffset: number;
+    };
+  } = {},
 ): ReturnType<typeof runAnomalyCheck> {
   const db = getDb();
   const TICK_RETENTION = 5000; // 保留最近 5000 ticks
   const SNAPSHOT_RETENTION = 10; // 保留最近 10 个图快照
 
   const cutoffTick = currentTick - TICK_RETENTION;
+
+  maybeRebuildRhythmProfiles(options.rhythmProfileRebuild);
 
   // ADR-79 M2: 图 GC（即使 cutoffTick <= 0 也运行，GC 有自己的观察窗）
   if (G) {
@@ -223,7 +241,40 @@ export function runMaintenance(
     } catch (e) {
       log.warn("Graph GC failed", e);
     }
-    // ADR-134 D3: 幽灵线程回收
+    // ADR-262 Wave 4D: open threads leave P4 through typed lifecycle events.
+    try {
+      const expiredUnresolved = expireOverdueThreads(G, currentTick, Date.now());
+      if (expiredUnresolved > 0)
+        log.info("Expired unresolved threads", { count: expiredUnresolved });
+    } catch (e) {
+      log.warn("Thread lifecycle expiry failed", e);
+    }
+    try {
+      const expiredAutoTopics = expireLegacyAutoTopicThreads(G, currentTick, Date.now());
+      if (expiredAutoTopics > 0)
+        log.info("Expired legacy auto topic threads", { count: expiredAutoTopics });
+    } catch (e) {
+      log.warn("Legacy auto topic lifecycle expiry failed", e);
+    }
+    try {
+      const expiredOrphanConversations = expireOrphanConversationThreads(
+        G,
+        currentTick,
+        Date.now(),
+      );
+      if (expiredOrphanConversations > 0)
+        log.info("Expired orphan conversation threads", { count: expiredOrphanConversations });
+    } catch (e) {
+      log.warn("Orphan conversation lifecycle expiry failed", e);
+    }
+    try {
+      const repairedPhantoms = expireNarrativeOnlyOpenThreads(G, currentTick, Date.now());
+      if (repairedPhantoms > 0)
+        log.info("Expired narrative-only threads", { count: repairedPhantoms });
+    } catch (e) {
+      log.warn("Thread lifecycle phantom repair failed", e);
+    }
+    // ADR-134 D3: legacy graph-only thread GC remains a fallback after typed lifecycle events.
     try {
       const expiredThreads = gcExpiredThreads(G, Date.now());
       if (expiredThreads > 0) log.info("Expired threads", { count: expiredThreads });
@@ -262,4 +313,34 @@ export function runMaintenance(
 
   // 异常检测（每次维护时运行）
   return runAnomalyCheck(currentTick, G);
+}
+
+function maybeRebuildRhythmProfiles(
+  options: { intervalMs: number; timezoneOffset: number } | undefined,
+): void {
+  if (!options || options.intervalMs <= 0) return;
+
+  const sqlite = getSqlite();
+  const nowMs = Date.now();
+  const updatedAtMs = getRhythmProfilesUpdatedAtMs(sqlite);
+  if (!shouldRebuildRhythmProfiles({ updatedAtMs, nowMs, intervalMs: options.intervalMs })) return;
+
+  try {
+    const result = rebuildRhythmProfiles(sqlite, {
+      nowMs,
+      timezoneOffset: options.timezoneOffset,
+      dryRun: false,
+    });
+    const confident = result.profiles.filter(
+      (profile) => profile.confidence === "medium" || profile.confidence === "high",
+    ).length;
+    log.info("Rhythm profiles rebuilt", {
+      profiles: result.profiles.length,
+      confident,
+      sourceRows: result.stats.rowsRead,
+      timezoneOffset: options.timezoneOffset,
+    });
+  } catch (e) {
+    log.warn("Rhythm profile rebuild failed", e);
+  }
 }

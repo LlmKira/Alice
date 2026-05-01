@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const timeout = 6 * time.Second
+const timeout = 20 * time.Second
 
 // Client is the Engine API client.
 type Client struct {

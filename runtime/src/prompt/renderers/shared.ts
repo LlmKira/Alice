@@ -1,11 +1,10 @@
 import { PromptBuilder } from "../../core/prompt-style.js";
-import { localNow } from "../../telegram/apps/shared.js";
 import type { FeedbackSlot, PresenceSlot, RecapSegment, ThreadSlot } from "../types.js";
 
 export type PromptBlock = readonly string[];
 
-export function renderLocalClock(timezoneOffset: number): string {
-  const now = localNow(timezoneOffset);
+export function renderLocalClock(nowMs: number, timezoneOffset: number): string {
+  const now = new Date(nowMs + timezoneOffset * 60 * 60 * 1000);
   const hour = now.getUTCHours();
   const minute = now.getUTCMinutes();
   const ampm = hour >= 12 ? "PM" : "AM";

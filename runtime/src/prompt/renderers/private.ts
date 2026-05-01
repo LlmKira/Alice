@@ -30,14 +30,14 @@ import {
 
 export function renderPrivate(snapshot: UserPromptSnapshot): string {
   const isBot = snapshot.chatTargetType === "private_bot";
-  const timeStr = renderLocalClock(snapshot.timezoneOffset);
+  const timeStr = renderLocalClock(snapshot.nowMs, snapshot.timezoneOffset);
 
   const introBlock = (() => {
     if (isBot) {
       const targetLabel = snapshot.target
         ? `Interacting with ${snapshot.target.displayName} (bot)`
         : "Interacting with a bot";
-      return rawBlock(`${timeStr}. ${targetLabel}. Current mood: ${snapshot.moodLabel}.`);
+      return rawBlock(`${timeStr}. ${targetLabel}.`);
     }
 
     const targetLabel = snapshot.target
@@ -61,20 +61,21 @@ export function renderPrivate(snapshot: UserPromptSnapshot): string {
       return parts.length > 0 ? `${parts.join(". ")}.` : undefined;
     })();
 
-    return rawBlock(
-      `${timeStr}. ${targetLabel}${relPart}. Current mood: ${snapshot.moodLabel}.${moodPart}`,
-      profileLine,
-    );
+    return rawBlock(`${timeStr}. ${targetLabel}${relPart}.${moodPart}`, profileLine);
   })();
 
   return joinBlocks([
     introBlock,
+    rawBlock(snapshot.emotionProjection),
+    rawBlock(snapshot.emotionStyleHint),
     rawBlock(snapshot.roundHint, snapshot.episodeHint),
     conversationStateBlock(snapshot.presence),
     sectionBlock("Recent activity (private chat — all directed at you)", snapshot.timeline.lines),
+    sectionBlock("Social cases", snapshot.socialCaseLines),
     openTopicsBlock(snapshot.threads),
     ...feedbackBlocks(snapshot.feedback),
     recapBlock(snapshot.conversationRecap),
+    listSectionBlock("Timing", snapshot.timingSignals ?? []),
     listSectionBlock("What's happening", snapshot.situationSignals),
     listSectionBlock("Scheduled", snapshot.scheduledEvents),
     listSectionBlock("Caution", snapshot.riskFlags),

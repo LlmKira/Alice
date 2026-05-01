@@ -49,19 +49,26 @@ export async function handleCmd(
 
   const args = body as Record<string, unknown>;
 
-  // 先尝试 query（只读），再尝试 dispatch（写）
-  if (deps.query) {
+  const kind = deps.resolveCommandKind?.(name);
+
+  if (kind === "query" && deps.query) {
     try {
       const result = await deps.query(name, args);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, result: result ?? null }));
       return;
-    } catch {
-      // query 不认识这个名字 → fallthrough 到 dispatch
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: err instanceof Error ? err.message : "query failed",
+        }),
+      );
+      return;
     }
   }
 
-  if (deps.dispatchInstruction) {
+  if (kind === "instruction" && deps.dispatchInstruction) {
     try {
       const result = await deps.dispatchInstruction(name, args);
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -76,6 +83,12 @@ export async function handleCmd(
       );
       return;
     }
+  }
+
+  if (kind === undefined) {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ code: "unknown_cmd", error: `unknown command: ${name}` }));
+    return;
   }
 
   res.writeHead(501, { "Content-Type": "application/json" });

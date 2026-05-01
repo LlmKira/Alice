@@ -5,7 +5,8 @@
  *
  * TC 循环下 Flow 信号的新定义：
  * - 旧架构下 `watching` = "等中间结果"（intra-episode，被 TC 消解）
- * - TC 下 `watching` = "我还在关注，想继续说/观察展开"（inter-episode 行为状态）
+ * - TC 下 `watching` = "这一轮结束后我还想继续关注这个聊天"（inter-episode 行为状态）
+ * - 同一 tick 内是否继续执行，由 host 根据本地 observations / 错误反馈决定
  *
  * @see docs/adr/233-native-toolcall-bt-hybrid.md
  * @see nanoclaw (Bash tool), pi-mono (BashOperations)
@@ -67,8 +68,9 @@ export const TOOL_SIGNAL: OpenAI.Chat.Completions.ChatCompletionTool = {
       "\n\n" +
       "done: finished (default if you don't call signal).\n" +
       "waiting_reply: you said something and expect their response.\n" +
-      "watching: you said something but have more to say, or something is unfolding — " +
-      "you want to continue in the next turn (stay engaged).\n" +
+      "watching: after this turn, stay engaged with this chat because something is still unfolding " +
+      "or you want to keep the thread warm. Immediate same-tick follow-up is host-controlled.\n" +
+      "resting: you are tired, going to sleep, or leaving Telegram for a while.\n" +
       "fed_up: walk away (closes conversation).\n" +
       "cooling_down: take a break (freezes chat for ~30 min).",
     parameters: {
@@ -76,7 +78,7 @@ export const TOOL_SIGNAL: OpenAI.Chat.Completions.ChatCompletionTool = {
       properties: {
         afterward: {
           type: "string",
-          enum: ["done", "waiting_reply", "watching", "fed_up", "cooling_down"],
+          enum: ["done", "waiting_reply", "watching", "resting", "fed_up", "cooling_down"],
           description: "How the conversation should continue. Default: done.",
         },
       },
@@ -89,7 +91,13 @@ export const TOOL_SIGNAL: OpenAI.Chat.Completions.ChatCompletionTool = {
 export const ADR233_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [TOOL_BASH, TOOL_SIGNAL];
 
 /** Signal 工具的 afterward 值 — 单一来源，其他模块 import 此类型。 */
-export type Afterward = "done" | "waiting_reply" | "watching" | "fed_up" | "cooling_down";
+export type Afterward =
+  | "done"
+  | "waiting_reply"
+  | "watching"
+  | "resting"
+  | "fed_up"
+  | "cooling_down";
 
 /**
  * 从 LLM 响应中提取 tool_use 参数。

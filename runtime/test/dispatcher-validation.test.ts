@@ -48,6 +48,20 @@ const validatedMod = createMod<TestState>("validated", {
       return { success: true, received: args };
     },
   })
+  .instruction("DERIVED_ACTION", {
+    params: z.object({
+      target: z.string().min(1).describe("派生目标"),
+      value: z.string().min(1).describe("值"),
+    }),
+    deriveParams: {
+      target: (cv: Record<string, unknown>) => cv.TARGET_CHAT,
+    },
+    description: "上下文派生参数测试指令",
+    impl(ctx, args) {
+      ctx.state.lastArgs = args;
+      return { success: true, received: args };
+    },
+  })
   .query("typedQuery", {
     params: z.object({
       id: z.number().int().positive().describe("查询 ID"),
@@ -56,6 +70,19 @@ const validatedMod = createMod<TestState>("validated", {
     returns: "{ id: number }",
     impl(_ctx, args) {
       return { id: args.id };
+    },
+  })
+  .query("derivedQuery", {
+    params: z.object({
+      chatId: z.string().min(1).describe("频道 ID"),
+    }),
+    deriveParams: {
+      chatId: (cv: Record<string, unknown>) => cv.TARGET_CHAT,
+    },
+    description: "上下文派生参数测试查询",
+    returns: "{ chatId: string }",
+    impl(_ctx, args) {
+      return { chatId: args.chatId };
     },
   })
   .query("getLastArgs", {
@@ -165,5 +192,27 @@ describe("Dispatcher Zod validation", () => {
     expect(result.success).toBe(true);
     expect(result.received.name).toBe("Alice");
     expect(result.received.score).toBe(85);
+  });
+
+  it("dispatch 在校验前应用 __contextVars 派生参数", () => {
+    const d = createTestDispatcher();
+    const result = d.dispatch("DERIVED_ACTION", {
+      value: "ok",
+      __contextVars: { TARGET_CHAT: "channel:123" },
+    }) as {
+      success: boolean;
+      received: Record<string, unknown>;
+    };
+    expect(result.success).toBe(true);
+    expect(result.received.target).toBe("channel:123");
+    expect(result.received.__contextVars).toBeUndefined();
+  });
+
+  it("query 在校验前应用 __contextVars 派生参数", () => {
+    const d = createTestDispatcher();
+    const result = d.query("derivedQuery", {
+      __contextVars: { TARGET_CHAT: "channel:456" },
+    }) as { chatId: string };
+    expect(result.chatId).toBe("channel:456");
   });
 });

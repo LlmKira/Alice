@@ -27,6 +27,7 @@ alice: $(OUTDIR)
 
 $(SKILLS): $(OUTDIR)
 	$(GOFLAGS) $(GO) build $(LDFLAGS) -o $(OUTDIR)/$@ ./cmd/skills/$@
+	pnpm exec tsx scripts/wrap-skill-bin.ts $(OUTDIR)/$@ $@
 
 clean:
 	rm -rf $(OUTDIR)

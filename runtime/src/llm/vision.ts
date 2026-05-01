@@ -87,6 +87,7 @@ const wdTaggerResponseSchema = z.object({
 
 let _vlmModel: LanguageModel | null = null;
 let _vlmConfigKey = "";
+let _visionAuthDisabledKey = "";
 
 /**
  * 获取 VLM 语言模型实例。
@@ -228,6 +229,17 @@ function isContentFilterError(e: unknown): boolean {
   return /safety|blocked|filter|content_policy|prompt_blocked|RECITATION/i.test(msg);
 }
 
+function isAuthFailure(e: unknown): boolean {
+  if (e == null || typeof e !== "object") {
+    return /unauthorized|forbidden/i.test(String(e));
+  }
+  const obj = e as Record<string, unknown>;
+  const status = obj.statusCode ?? obj.status;
+  if (status === 401 || status === 403) return true;
+  if (obj.cause && isAuthFailure(obj.cause)) return true;
+  return /unauthorized|forbidden/i.test(e instanceof Error ? e.message : String(e));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 贴纸结构化分析缓存 — describeMedia("sticker") 的副产物
 // ═══════════════════════════════════════════════════════════════════════════
@@ -276,6 +288,12 @@ export async function describeMedia(
   config: Config,
 ): Promise<string | undefined> {
   if (!config.visionModel) return undefined;
+
+  const visionConfigKey = `${config.visionBaseUrl}|${config.visionApiKey}|${config.visionModel}`;
+  if (_visionAuthDisabledKey === visionConfigKey) {
+    log.debug("Vision skipped: provider auth disabled", { mediaType });
+    return undefined;
+  }
 
   // 缓存命中
   const cached = getCachedDescription(fileUniqueId);
@@ -356,6 +374,15 @@ export async function describeMedia(
     setCachedDescription(fileUniqueId, mediaType, description);
     return description;
   } catch (e) {
+    if (isAuthFailure(e)) {
+      _visionAuthDisabledKey = visionConfigKey;
+      log.warn("Vision disabled after provider auth failure", {
+        mediaType,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return undefined;
+    }
+
     // 内容安全过滤 → WD Tagger fallback
     if (isContentFilterError(e)) {
       log.info("Vision content filtered, trying WD Tagger fallback", { fileUniqueId, mediaType });

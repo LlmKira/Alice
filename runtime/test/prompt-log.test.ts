@@ -28,7 +28,7 @@ describe("logPromptSnapshot", () => {
       round: 0,
       system: "sys",
       user: "usr",
-      script: "irc tail --count 8\n\nirc reply --ref 3390931 --text \"我也是这么觉得\"",
+      script: 'irc tail --count 8\n\nirc reply --ref 3390931 --text "我也是这么觉得"',
       execution: {
         afterward: "done",
         toolCallCount: 3,
@@ -88,11 +88,13 @@ describe("logPromptSnapshot", () => {
           },
         ],
         commandOutput:
-          "$ irc tail --count 8\n[tail]\n(no messages)\n---\n$ irc reply --ref 3390931 --text \"我也是这么觉得\"\n✓ Replied",
+          '$ irc tail --count 8\n[tail]\n(no messages)\n---\n$ irc reply --ref 3390931 --text "我也是这么觉得"\n✓ Replied',
         thinks: ["前面刷太快了 我先补一下"],
         queryLogs: [],
         instructionErrors: [],
         errors: [],
+        hostContinuedInTick: true,
+        hostContinuationReason: "local_observation_followup",
       },
     });
 
@@ -102,6 +104,8 @@ describe("logPromptSnapshot", () => {
     expect(written).toContain("- assistant turns: 2");
     expect(written).toContain("- bash calls: 2");
     expect(written).toContain("- signal calls: 1");
+    expect(written).toContain("- host continued in tick: yes");
+    expect(written).toContain("- host continuation reason: local_observation_followup");
     expect(written).toContain("### Transcript");
     expect(written).toContain("#### Assistant Round 1");
     expect(written).toContain("#### Assistant Round 2");
@@ -109,5 +113,23 @@ describe("logPromptSnapshot", () => {
     expect(written).toContain("irc tail --count 8");
     expect(written).toContain("##### signal #3 (`call_3`)");
     expect(written).toContain("- afterward: done");
+  });
+
+  it("keeps writing prompt snapshots when DCP shadow is unavailable", () => {
+    logPromptSnapshot({
+      tick: 43,
+      target: "channel:missing-db",
+      voice: "group",
+      round: 0,
+      system: "sys",
+      user: "usr",
+      script: "",
+    });
+
+    expect(fsMock.writeFileSync).toHaveBeenCalledTimes(1);
+    const written = String(fsMock.writeFileSync.mock.calls[0][1]);
+    expect(written).toContain("## DCP Shadow Context");
+    expect(written).toContain("DCP shadow unavailable");
+    expect(written).toContain("## LLM Script");
   });
 });

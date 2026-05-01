@@ -7,7 +7,7 @@
  * Sections（按顺序）：
  * 1. 时间 + 心情 — LLM 感知当前时刻和情绪状态
  * 2. 转发目标 — 联系人（@id + 兴趣）+ 群组（@id + topic），频道核心
- * 3. 消息流（带 #msgId）— 频道核心，msgId 用于 irc forward --ref
+ * 3. 消息流（带 msgId）— 频道核心，msgId 用于 irc forward --ref
  * 4. 内心低语 — 从 facetId 获取的 whisper
  */
 
@@ -23,7 +23,7 @@ import {
 
 export function renderChannel(snapshot: UserPromptSnapshot): string {
   const isOwnedChannel = snapshot.chatTargetType === "channel_owned";
-  const timeStr = renderLocalClock(snapshot.timezoneOffset);
+  const timeStr = renderLocalClock(snapshot.nowMs, snapshot.timezoneOffset);
   const ownedChannelsToShow = isOwnedChannel ? [] : snapshot.ownedChannels;
 
   const shareTargets = [
@@ -34,6 +34,7 @@ export function renderChannel(snapshot: UserPromptSnapshot): string {
       const parts: string[] = [`${contact.ref.displayName} @${contact.ref.id} (${tierInfo})`];
       if (contact.interests.length > 0) parts.push(`— ${contact.interests.join(", ")}`);
       if (contact.bio) parts.push(`[${contact.bio.slice(0, 60)}]`);
+      if (contact.sharedRecently) parts.push("| shared recently");
       return parts.join(" ");
     }),
     ...snapshot.groups.map((group) => {
@@ -55,7 +56,9 @@ export function renderChannel(snapshot: UserPromptSnapshot): string {
   );
 
   return joinBlocks([
-    rawBlock(`${timeStr}. Current mood: ${snapshot.moodLabel}.`),
+    rawBlock(`${timeStr}.`),
+    rawBlock(snapshot.emotionProjection),
+    rawBlock(snapshot.emotionStyleHint),
     listSectionBlock("People you might share with", shareTargets),
     sectionBlock(
       isOwnedChannel
@@ -63,6 +66,7 @@ export function renderChannel(snapshot: UserPromptSnapshot): string {
         : "Recent posts (channel, you can read but not post)",
       snapshot.timeline.lines,
     ),
+    listSectionBlock("Timing", snapshot.timingSignals ?? []),
     listSectionBlock("What's happening", urgentSignals),
     listSectionBlock(
       "From the web",

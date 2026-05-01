@@ -401,6 +401,22 @@ export function effectiveAversion(G: WorldModel, channelId: string, nowMs: numbe
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 信号 9: Resting（Alice 主动离席/睡觉）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Alice 主动选择休息时，普通行动候选应暂停。
+ *
+ * 这是结构化的状态事实，不从“晚安”等文本里猜测。只有 LLM 显式给出
+ * afterward=resting 时写入 self.resting_until_ms。
+ */
+export function isSelfResting(G: WorldModel, nowMs: number): boolean {
+  if (!G.has("self")) return false;
+  const untilMs = Number(G.getAgent("self").resting_until_ms ?? 0);
+  return untilMs > nowMs;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 对话延续信号（共享判定）
 // ═══════════════════════════════════════════════════════════════════════════
 

@@ -153,8 +153,10 @@ const FACETS: readonly PersonaFacet[] = [
     },
     exampleTags: ["low-energy", "drained", "minimal"],
     match: (ctx) => {
-      // api 高 = 已经消耗大量行动预算；p1 高 = 大量积压
-      return Math.max(ctx.normalized.api, ctx.normalized.p1) * 0.7 + 0.1;
+      // drained 是“多线程输入过载”，不是“单个热点很热”。
+      // p1=积压，p4=线程压力；两者同时高才应投影成低能量。
+      const overload = Math.min(ctx.normalized.p1, ctx.normalized.p4);
+      return Math.min(1, 0.05 + overload * overload * 1.1);
     },
   },
 

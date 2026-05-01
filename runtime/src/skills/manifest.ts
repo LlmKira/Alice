@@ -85,6 +85,9 @@ export const CapabilitySchema = z.enum([
   "graph.read",
   "graph.write",
   "engine.selfcheck",
+  "transport.send",
+  "transport.read",
+  "transport.react",
   "telegram.send",
   "telegram.read",
   "telegram.react",
@@ -135,7 +138,7 @@ export const ManifestSchema = z.object({
    *  多个 Skill 可共享同一 familyCategory（如 hitokoto/luck/fabing/kfc 共享 "fun"）。 */
   familyCategory: z.string().optional(),
   capabilities: z.array(CapabilitySchema).default([]),
-  /** 完整 man page 内容（纯文本）。提供时优先使用，否则从 manifest 自动生成。 */
+  /** 完整帮助文本（纯文本）。提供时优先使用，否则从 manifest 自动生成。 */
   manPage: z.string().optional(),
 });
 

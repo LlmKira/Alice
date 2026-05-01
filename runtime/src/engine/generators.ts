@@ -16,8 +16,13 @@
 
 import { eq } from "drizzle-orm";
 import type { Config } from "../config.js";
-import type { getDb } from "../db/connection.js";
+import { type getDb, getSqlite } from "../db/connection.js";
 import { narrativeThreads } from "../db/schema.js";
+import {
+  recordThreadLifecycleEvent,
+  threadDbId,
+  threadP4Contribution,
+} from "../db/thread-lifecycle.js";
 import { safeDisplayName } from "../graph/display.js";
 import type { ThreadWeight } from "../graph/entities.js";
 import type { WorldModel } from "../graph/world-model.js";
@@ -139,16 +144,31 @@ export function resolveThreadInGraph(
   G: WorldModel,
   threadNodeId: string,
   tick: number,
+  nowMs: number,
 ): void {
+  const attrs = G.getThread(threadNodeId);
+  const dbId = threadDbId(threadNodeId);
+  const tx = getSqlite().transaction(() => {
+    recordThreadLifecycleEvent({
+      threadNodeId,
+      tick,
+      occurredAtMs: nowMs,
+      previousStatus: attrs.status,
+      outcome: "resolved",
+      reason: "explicit_resolve_topic",
+      deadlineMs: attrs.deadline_ms ?? null,
+      p4Before: threadP4Contribution(nowMs, attrs.created_ms, attrs.w),
+      metadata: { title: attrs.title ?? threadNodeId },
+    });
+    if (dbId != null) {
+      db.update(narrativeThreads)
+        .set({ status: "resolved", resolvedTick: tick })
+        .where(eq(narrativeThreads.id, dbId))
+        .run();
+    }
+  });
+  tx();
   G.updateThread(threadNodeId, { status: "resolved" });
-  // threadNodeId = "thread_42" → dbId = 42
-  const dbId = Number(threadNodeId.replace("thread_", ""));
-  if (!Number.isNaN(dbId)) {
-    db.update(narrativeThreads)
-      .set({ status: "resolved", resolvedTick: tick })
-      .where(eq(narrativeThreads.id, dbId))
-      .run();
-  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

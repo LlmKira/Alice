@@ -76,6 +76,21 @@ export function parseKeyValueArgs(args: string[]): Record<string, unknown> {
   return body;
 }
 
+function collectContextVarsFromEnv(): Record<string, string> {
+  const contextVars: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith("ALICE_CTX_") || value == null || value === "") continue;
+    contextVars[key.slice("ALICE_CTX_".length)] = value;
+  }
+  return contextVars;
+}
+
+function withContextVars(body: Record<string, unknown>): Record<string, unknown> {
+  const contextVars = collectContextVarsFromEnv();
+  if (Object.keys(contextVars).length === 0) return body;
+  return { ...body, __contextVars: contextVars };
+}
+
 export async function enginePostJson(
   pathname: string,
   body: Record<string, unknown>,
@@ -113,7 +128,7 @@ export async function enginePostJson(
       },
     );
     req.on("error", reject);
-    req.write(JSON.stringify(body));
+    req.write(JSON.stringify(withContextVars(body)));
     req.end();
   });
 }
@@ -141,7 +156,7 @@ export function extractJsonFlag(rawArgs: string[]): { json: boolean; args: strin
 /** 截断长文本，用于确认消息中的预览。 */
 export function truncate(text: string, max = 60): string {
   if (text.length <= max) return text;
-  return text.slice(0, max) + "...";
+  return `${text.slice(0, max)}...`;
 }
 
 /** 渲染成功确认行。`✓ Sent: "hello"` */

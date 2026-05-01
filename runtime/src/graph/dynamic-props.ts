@@ -42,7 +42,7 @@ export function readForwardRegistry(G: WorldModel, channelId: string): ForwardRe
 }
 
 /** 记录一次转发：srcChannel 的 msgId 被转发到 targetName。 */
-export function writeForwardEntry(
+function writeForwardEntry(
   G: WorldModel,
   channelId: string,
   msgId: number,
@@ -53,6 +53,28 @@ export function writeForwardEntry(
   if (!registry[key]) registry[key] = [];
   if (!registry[key].includes(targetName)) registry[key].push(targetName);
   G.setDynamic(channelId, "forwarded_msgs", registry);
+}
+
+/** 记录一次跨聊天分享的完整事实：源消息、目标、以及两端最近分享时间。 */
+export function recordForwardShare(
+  G: WorldModel,
+  params: {
+    fromGraphId: string;
+    msgId: number;
+    toGraphId: string;
+    targetName: string;
+    nowMs?: number;
+  },
+): void {
+  const nowMs = params.nowMs ?? Date.now();
+
+  if (G.has(params.fromGraphId)) {
+    G.setDynamic(params.fromGraphId, "last_shared_ms", nowMs);
+    writeForwardEntry(G, params.fromGraphId, params.msgId, params.targetName);
+  }
+  if (G.has(params.toGraphId)) {
+    G.setDynamic(params.toGraphId, "last_shared_ms", nowMs);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -20,6 +20,7 @@ import type { ContributionItem, ModContext } from "../core/types.js";
 import { readModState, readPressureApi, section } from "../core/types.js";
 import { getDb } from "../db/connection.js";
 import { narrativeBeats, narrativeThreads } from "../db/schema.js";
+import { snoozeThreadLifecycle } from "../db/thread-lifecycle.js";
 import { createThreadInGraph, resolveThreadInGraph, WEIGHT_MAP } from "../engine/generators.js";
 import { resolveDisplayName, safeDisplayName } from "../graph/display.js";
 import { estimateEventMs } from "../pressure/clock.js";
@@ -302,7 +303,7 @@ export const threadsMod = createMod<ThreadsState>("threads", {
       // （与 self_topic_begin → createThreadInGraph 对称）
       const threadNodeId = `thread_${threadId}`;
       if (ctx.graph.has(threadNodeId)) {
-        resolveThreadInGraph(db, ctx.graph, threadNodeId, ctx.tick);
+        resolveThreadInGraph(db, ctx.graph, threadNodeId, ctx.tick, ctx.nowMs);
       } else {
         // 图中无节点（可能已 GC）→ 只更新 DB
         db.update(narrativeThreads)
@@ -349,6 +350,32 @@ export const threadsMod = createMod<ThreadsState>("threads", {
       }
 
       return { success: true, threadId, summaryTick: ctx.tick };
+    },
+  })
+  .instruction("update_topic_lifecycle", {
+    params: z.object({
+      threadId: z.number().int().positive().describe("线程 ID"),
+      outcome: z.enum(["renewed", "snoozed"]).describe("renewed=继续追踪; snoozed=暂缓提醒"),
+      minutes: z.number().int().positive().max(10_080).describe("新的提醒/截止分钟数，最多 7 天"),
+      reason: z.string().min(1).max(300).describe("为什么延长或暂缓"),
+    }),
+    description: "延长或暂缓一个尚未完成的话题线程",
+    affordance: {
+      whenToUse: "The thread is still relevant, but the right next check should happen later",
+      whenNotToUse: "When the thread is complete; use resolve_topic instead",
+      priority: "on-demand",
+      category: "threads",
+    },
+    impl(ctx, args) {
+      return snoozeThreadLifecycle({
+        G: ctx.graph,
+        threadId: Number(args.threadId),
+        tick: ctx.tick,
+        nowMs: ctx.nowMs,
+        minutes: Number(args.minutes),
+        reason: String(args.reason),
+        outcome: args.outcome as "renewed" | "snoozed",
+      });
     },
   })
   .instruction("affect_thread", {
@@ -556,10 +583,15 @@ export const threadsMod = createMod<ThreadsState>("threads", {
 
     const allThreads = rows
       .map((r) => {
-        const createdMs = estimateEventMs({ createdAt: r.createdAt, tick: r.createdTick }, ctx.nowMs, ctx.tick);
-        const lastBeatMs = r.lastBeatTick != null
-          ? estimateEventMs({ tick: r.lastBeatTick }, ctx.nowMs, ctx.tick)
-          : null;
+        const createdMs = estimateEventMs(
+          { createdAt: r.createdAt, tick: r.createdTick },
+          ctx.nowMs,
+          ctx.tick,
+        );
+        const lastBeatMs =
+          r.lastBeatTick != null
+            ? estimateEventMs({ tick: r.lastBeatTick }, ctx.nowMs, ctx.tick)
+            : null;
         return {
           ...r,
           involves: parseInvolves(r.involves),
@@ -614,12 +646,13 @@ export const threadsMod = createMod<ThreadsState>("threads", {
       const isStale = t.relevance < STALE_THRESHOLD;
       const staleTag = isStale ? " [stale]" : "";
       // ADR-241: 计算无活动天数
-      const baseActivityMs = lastBeatMs ?? (typeof t.createdAt === "number" ? t.createdAt : t.createdAt.getTime());
+      const baseActivityMs =
+        lastBeatMs ?? (typeof t.createdAt === "number" ? t.createdAt : t.createdAt.getTime());
       const inactiveMs = ctx.nowMs - baseActivityMs;
       const inactiveDays = Math.round(inactiveMs / (24 * 3600 * 1000));
       const inactiveTag = inactiveDays > 0 ? ` — inactive ${inactiveDays}d` : "";
       m.line(
-        `[#${t.id}] "${t.title}"${sourceTag} (${t.weight}, ${urgencyLabel})${staleTag}${lastAdvanced}${inactiveTag}`
+        `[#${t.id}] "${t.title}"${sourceTag} (${t.weight}, ${urgencyLabel})${staleTag}${lastAdvanced}${inactiveTag}`,
       );
       if (t.tensionFrame) m.kv("frame", t.tensionFrame);
       if (t.deadlineTick != null) {

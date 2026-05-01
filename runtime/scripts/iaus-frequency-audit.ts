@@ -10,6 +10,12 @@
 
 import { resolve } from "node:path";
 import Database from "better-sqlite3";
+import {
+  classifyIausActionRow,
+  emptyEffectCounts,
+  type IausActionCategory,
+  type IausTelegramEffectCounts,
+} from "../src/diagnostics/iaus-action-classifier.js";
 
 const DB_PATH = resolve(import.meta.dirname ?? ".", "../alice.db");
 const db = new Database(DB_PATH, { readonly: true });
@@ -40,6 +46,46 @@ interface ActionRow {
   tick: number;
   action_type: string;
   success: number;
+  tc_command_log: string | null;
+  engagement_outcome: string | null;
+  tc_afterward: string | null;
+}
+
+interface SilenceRow {
+  tick: number;
+  target: string | null;
+  reason: string;
+  silence_level: string | null;
+}
+
+interface DecisionTraceRow {
+  tick: number;
+  phase: string;
+  final_decision: string;
+  payload_json: string;
+}
+
+interface QueueTraceRow {
+  tick: number;
+  enqueue_id: string;
+  fate: string;
+  enqueue_outcome: string;
+  reason_code: string;
+}
+
+interface ActionResultRow {
+  tick: number;
+  enqueue_id: string | null;
+  result: string;
+  failure_code: string;
+  action_type: string;
+}
+
+function tableExists(tableName: string): boolean {
+  const row = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
+    .get(tableName) as { name: string } | undefined;
+  return Boolean(row);
 }
 
 const ticks: TickRow[] = db
@@ -51,14 +97,65 @@ const ticks: TickRow[] = db
   .all() as TickRow[];
 
 const actions: ActionRow[] = db
-  .prepare(`SELECT tick, action_type, success FROM action_log`)
+  .prepare(
+    `SELECT tick, action_type, success, tc_command_log, engagement_outcome, tc_afterward
+     FROM action_log`,
+  )
   .all() as ActionRow[];
+
+let silences: SilenceRow[] = [];
+try {
+  silences = db
+    .prepare(`SELECT tick, target, reason, silence_level FROM silence_log ORDER BY tick`)
+    .all() as SilenceRow[];
+} catch {
+  silences = [];
+}
+
+let decisionTraces: DecisionTraceRow[] = [];
+try {
+  decisionTraces = db
+    .prepare(
+      `SELECT tick, phase, final_decision, payload_json
+       FROM decision_trace
+       WHERE phase = 'evolve' AND final_decision = 'silence'
+       ORDER BY tick`,
+    )
+    .all() as DecisionTraceRow[];
+} catch {
+  decisionTraces = [];
+}
+
+const queueTraces: QueueTraceRow[] = tableExists("queue_trace")
+  ? (db
+      .prepare(
+        `SELECT tick, enqueue_id, enqueue_outcome, fate, reason_code
+         FROM queue_trace ORDER BY tick, id`,
+      )
+      .all() as QueueTraceRow[])
+  : [];
+
+const actionResults: ActionResultRow[] = tableExists("action_result")
+  ? (db
+      .prepare(
+        `SELECT tick, enqueue_id, result, failure_code, action_type
+         FROM action_result ORDER BY tick, id`,
+      )
+      .all() as ActionResultRow[])
+  : [];
 
 const actionByTick = new Map<number, ActionRow[]>();
 for (const a of actions) {
   const arr = actionByTick.get(a.tick) ?? [];
   arr.push(a);
   actionByTick.set(a.tick, arr);
+}
+
+const silenceByTick = new Map<number, SilenceRow[]>();
+for (const s of silences) {
+  const arr = silenceByTick.get(s.tick) ?? [];
+  arr.push(s);
+  silenceByTick.set(s.tick, arr);
 }
 
 // ── 分析 ──────────────────────────────────────────────────────────────
@@ -86,12 +183,55 @@ console.log(
 console.log(`  system1:skip:         ${skipTicks.length} (${pct(skipTicks.length, totalTicks)})`);
 console.log();
 
-// 1b. ADR-195: API vs API_peak 对比
+// 1b. EVOLVE resource/recovery suppressions 可观测性
+const queueBackpressureRows = silences.filter((s) => s.reason === "queue_backpressure");
+const postWakeupRecoveryRows = silences.filter((s) => s.reason === "post_wakeup_recovery");
+const queueBackpressureTicks = new Set(queueBackpressureRows.map((s) => s.tick));
+const queueBackpressureTraces = decisionTraces
+  // silence_log.reason 是沉默原因权威；decision_trace.payload 只提供解释性遥测。
+  .filter((row) => queueBackpressureTicks.has(row.tick))
+  .map((row) => parseDecisionTracePayload(row.payload_json))
+  .filter((payload) => payload !== null);
+const queueSaturations = queueBackpressureTraces
+  .map((payload) => Number(payload.values?.queueSaturation))
+  .filter((v) => Number.isFinite(v));
+const queueActives = queueBackpressureTraces
+  .map((payload) => Number(payload.values?.queueActive))
+  .filter((v) => Number.isFinite(v));
+if (silences.length > 0 || decisionTraces.length > 0) {
+  console.log("§1b. EVOLVE Resource / Recovery Suppressions");
+  console.log("─────────────────────────────────────────────────────────────");
+  console.log(
+    `  queue_backpressure:   ${queueBackpressureRows.length} (${pct(queueBackpressureRows.length, totalTicks)})`,
+  );
+  console.log(
+    `  post_wakeup_recovery: ${postWakeupRecoveryRows.length} (${pct(postWakeupRecoveryRows.length, totalTicks)})`,
+  );
+  const postWakeupTargets = new Set(
+    postWakeupRecoveryRows.map((s) => s.target).filter((target) => target !== null),
+  );
+  if (postWakeupRecoveryRows.length > 0) {
+    console.log(`  recovery 目标数:      ${postWakeupTargets.size}`);
+  }
+  if (queueSaturations.length > 0) {
+    console.log(
+      `  saturation 中位/平均: ${median(queueSaturations).toFixed(3)} / ${mean(queueSaturations).toFixed(3)}`,
+    );
+  }
+  if (queueActives.length > 0) {
+    console.log(
+      `  queue active 中位/平均: ${median(queueActives).toFixed(1)} / ${mean(queueActives).toFixed(1)}`,
+    );
+  }
+  console.log();
+}
+
+// 1c. ADR-195: API vs API_peak 对比
 const peakTicks = ticks.filter((t) => t.api_peak !== null);
 if (peakTicks.length > 0) {
-  const apiPeakValues = peakTicks.map((t) => t.api_peak!);
+  const apiPeakValues = peakTicks.map((t) => Number(t.api_peak));
   const apiValues = peakTicks.map((t) => t.api);
-  console.log("§1b. ADR-195: API vs API_peak 对比");
+  console.log("§1c. ADR-195: API vs API_peak 对比");
   console.log("─────────────────────────────────────────────────────────────");
   console.log(`  采样 tick 数:         ${peakTicks.length}`);
   console.log(
@@ -104,36 +244,44 @@ if (peakTicks.length > 0) {
   console.log();
 }
 
+// 1d. ADR-258 typed observation spine
+if (queueTraces.length > 0 || actionResults.length > 0) {
+  console.log("§1d. ADR-258 Typed Observation Spine");
+  console.log("─────────────────────────────────────────────────────────────");
+  console.log(`  queue_trace rows:     ${queueTraces.length}`);
+  console.log(`  action_result rows:   ${actionResults.length}`);
+  console.log(
+    `  queue fate:           ${formatCounts(countBy(queueTraces.map((row) => row.fate)))}`,
+  );
+  console.log(
+    `  enqueue outcome:      ${formatCounts(countBy(queueTraces.map((row) => row.enqueue_outcome)))}`,
+  );
+  console.log(
+    `  action result:        ${formatCounts(countBy(actionResults.map((row) => row.result)))}`,
+  );
+  const missingTypedFate = enqueueTicks.filter(
+    (tick) => !queueTraces.some((row) => row.tick === tick.tick),
+  ).length;
+  console.log(`  enqueue 缺 typed fate: ${missingTypedFate}`);
+  console.log();
+}
+
 // 2. Enqueue 质量分析
 const enqueueWithAction = enqueueTicks.filter((t) => actionByTick.has(t.tick));
 const enqueueNoAction = enqueueTicks.filter((t) => !actionByTick.has(t.tick));
 
-let llmFailed = 0;
-let llmSilence = 0;
-let realAction = 0;
-let internalAction = 0;
-
-for (const t of enqueueWithAction) {
-  const acts = actionByTick.get(t.tick)!;
-  for (const a of acts) {
-    if (a.action_type === "llm_failed") llmFailed++;
-    else if (a.action_type === "silence") llmSilence++;
-    else if (
-      [
-        "message",
-        "telegram:react",
-        "telegram:mark_read",
-        "telegram:leave_chat",
-        "telegram:send_sticker",
-        "telegram:save_note",
-      ].includes(a.action_type)
-    )
-      realAction++;
-    else internalAction++;
-  }
-}
-
-const totalLLMCalls = llmFailed + llmSilence + realAction + internalAction;
+const enqueueActionSummary = summarizeActions(
+  enqueueWithAction.flatMap((t) => actionByTick.get(t.tick) ?? []),
+);
+const llmFailed = enqueueActionSummary.categories.llm_failure;
+const llmSilence = enqueueActionSummary.categories.llm_silence;
+const telegramSuccessRows = enqueueActionSummary.categories.telegram_success;
+const telegramFailureRows = enqueueActionSummary.categories.telegram_failure;
+const observeOnly = enqueueActionSummary.categories.observe_only;
+const internalAction = enqueueActionSummary.categories.internal_action;
+const telegramSuccesses = enqueueActionSummary.telegramSuccesses;
+const telegramFailures = enqueueActionSummary.telegramFailures;
+const totalLLMCalls = enqueueActionSummary.totalRows;
 
 console.log("§2. LLM 调用质量");
 console.log("─────────────────────────────────────────────────────────────");
@@ -146,12 +294,24 @@ console.log(`    LLM 失败:           ${llmFailed} (${pct(llmFailed, totalLLMCa
 console.log(
   `    LLM 选择沉默:       ${llmSilence} (${pct(llmSilence, totalLLMCalls)}) ← IAUS 认为值得，LLM 否决`,
 );
-console.log(`    真实 Telegram 行动:  ${realAction} (${pct(realAction, totalLLMCalls)})`);
+console.log(
+  `    Telegram 成功行:    ${telegramSuccessRows} (${pct(telegramSuccessRows, totalLLMCalls)})`,
+);
+console.log(
+  `    Telegram 失败行:    ${telegramFailureRows} (${pct(telegramFailureRows, totalLLMCalls)})`,
+);
+console.log(`    Observe-only:       ${observeOnly} (${pct(observeOnly, totalLLMCalls)})`);
 console.log(`    内部行动:           ${internalAction} (${pct(internalAction, totalLLMCalls)})`);
 console.log();
-console.log(`  ⚡ 有效利用率 = 真实行动 / LLM 调用 = ${pct(realAction, totalLLMCalls)}`);
+console.log(`  Telegram 成功副作用:  ${telegramSuccesses}`);
+console.log(`  Telegram 失败副作用:  ${telegramFailures}`);
+console.log(`  Telegram 成功类型:    ${formatEffectCounts(enqueueActionSummary.successEffects)}`);
+console.log(`  Telegram 失败类型:    ${formatEffectCounts(enqueueActionSummary.failureEffects)}`);
 console.log(
-  `  ⚡ IAUS-LLM 校准偏差 = LLM 沉默 / (LLM 沉默 + 真实行动) = ${pct(llmSilence, llmSilence + realAction)}`,
+  `  ⚡ 有效利用率 = Telegram 成功行 / LLM 调用 = ${pct(telegramSuccessRows, totalLLMCalls)}`,
+);
+console.log(
+  `  ⚡ IAUS-LLM 校准偏差 = LLM 沉默 / (LLM 沉默 + Telegram 成功行) = ${pct(llmSilence, llmSilence + telegramSuccessRows)}`,
 );
 console.log();
 
@@ -170,26 +330,9 @@ for (const b of nvBuckets) {
   const inBucket = enqueueTicks.filter(
     (t) => t.net_value !== null && t.net_value >= b.min && t.net_value < b.max,
   );
-  // 统计该 bucket 中有多少产生了真实行动
-  let bucketReal = 0;
-  let bucketSilence = 0;
-  let bucketFailed = 0;
-  for (const t of inBucket) {
-    const acts = actionByTick.get(t.tick);
-    if (!acts) continue;
-    for (const a of acts) {
-      if (a.action_type === "silence") bucketSilence++;
-      else if (a.action_type === "llm_failed") bucketFailed++;
-      else if (
-        ["message", "telegram:react", "telegram:mark_read", "telegram:leave_chat"].includes(
-          a.action_type,
-        )
-      )
-        bucketReal++;
-    }
-  }
+  const bucketSummary = summarizeActions(inBucket.flatMap((t) => actionByTick.get(t.tick) ?? []));
   console.log(
-    `  ${b.label.padEnd(20)} ${String(inBucket.length).padStart(4)} enqueue → ${bucketReal} 行动 / ${bucketSilence} 沉默 / ${bucketFailed} 失败`,
+    `  ${b.label.padEnd(20)} ${String(inBucket.length).padStart(4)} enqueue → ${bucketSummary.telegramSuccesses} TG成功 / ${bucketSummary.categories.llm_silence} 沉默 / ${bucketSummary.categories.llm_failure} LLM失败 / ${bucketSummary.telegramFailures} TG失败`,
   );
 }
 console.log();
@@ -206,7 +349,7 @@ const storms: Array<{ start: number; len: number }> = [];
 for (let i = 0; i < enqueueTicks.length; i++) {
   const t = enqueueTicks[i];
   const acts = actionByTick.get(t.tick);
-  const isFailed = acts?.some((a) => a.action_type === "llm_failed") ?? false;
+  const isFailed = acts?.some((a) => classifyIausActionRow(a).category === "llm_failure") ?? false;
 
   if (isFailed) {
     if (stormStart < 0) stormStart = t.tick;
@@ -239,26 +382,18 @@ const modes = ["wakeup", "patrol", "conversation", "consolidation"];
 for (const m of modes) {
   const modeTicks = ticks.filter((t) => t.mode === m);
   const modeEnqueue = modeTicks.filter((t) => t.gate_verdict === "enqueue");
+  const modeQueueBackpressure = modeTicks.filter((t) =>
+    silenceByTick.get(t.tick)?.some((s) => s.reason === "queue_backpressure"),
+  );
+  const modePostWakeupRecovery = modeTicks.filter((t) =>
+    silenceByTick.get(t.tick)?.some((s) => s.reason === "post_wakeup_recovery"),
+  );
   if (modeTicks.length === 0) continue;
 
-  let modeRealAction = 0;
-  let modeLLMSilence = 0;
-  for (const t of modeEnqueue) {
-    const acts = actionByTick.get(t.tick);
-    if (!acts) continue;
-    for (const a of acts) {
-      if (a.action_type === "silence") modeLLMSilence++;
-      else if (
-        ["message", "telegram:react", "telegram:mark_read", "telegram:leave_chat"].includes(
-          a.action_type,
-        )
-      )
-        modeRealAction++;
-    }
-  }
+  const modeSummary = summarizeActions(modeEnqueue.flatMap((t) => actionByTick.get(t.tick) ?? []));
 
   console.log(
-    `  ${m.padEnd(16)} ${modeTicks.length} ticks → ${modeEnqueue.length} enqueue (${pct(modeEnqueue.length, modeTicks.length)}) → ${modeRealAction} 行动 / ${modeLLMSilence} 沉默`,
+    `  ${m.padEnd(16)} ${modeTicks.length} ticks → ${modeEnqueue.length} enqueue (${pct(modeEnqueue.length, modeTicks.length)}) → ${modeSummary.telegramSuccesses} TG成功 / ${modeSummary.categories.llm_silence} 沉默 / ${modeQueueBackpressure.length} queue_backpressure / ${modePostWakeupRecovery.length} post_wakeup_recovery`,
   );
 }
 console.log();
@@ -269,27 +404,16 @@ console.log("──────────────────────�
 const thresholds = [0.0, 0.3, 0.5, 0.6, 0.7];
 for (const threshold of thresholds) {
   const wouldEnqueue = enqueueTicks.filter((t) => (t.net_value ?? 0) >= threshold);
-  let simReal = 0;
-  let simSilence = 0;
-  let simFailed = 0;
-  for (const t of wouldEnqueue) {
-    const acts = actionByTick.get(t.tick);
-    if (!acts) continue;
-    for (const a of acts) {
-      if (a.action_type === "silence") simSilence++;
-      else if (a.action_type === "llm_failed") simFailed++;
-      else if (
-        ["message", "telegram:react", "telegram:mark_read", "telegram:leave_chat"].includes(
-          a.action_type,
-        )
-      )
-        simReal++;
-    }
-  }
-  const simTotal = simReal + simSilence + simFailed;
-  const efficiency = simTotal > 0 ? ((simReal / simTotal) * 100).toFixed(1) : "N/A";
+  const simSummary = summarizeActions(wouldEnqueue.flatMap((t) => actionByTick.get(t.tick) ?? []));
+  const simTotal =
+    simSummary.categories.telegram_success +
+    simSummary.categories.telegram_failure +
+    simSummary.categories.llm_silence +
+    simSummary.categories.llm_failure;
+  const efficiency =
+    simTotal > 0 ? ((simSummary.categories.telegram_success / simTotal) * 100).toFixed(1) : "N/A";
   console.log(
-    `  NV ≥ ${threshold.toFixed(1)}: ${wouldEnqueue.length} enqueue → ${simReal} 行动 / ${simSilence} 沉默 / ${simFailed} 失败 | 效率 ${efficiency}%`,
+    `  NV ≥ ${threshold.toFixed(1)}: ${wouldEnqueue.length} enqueue → ${simSummary.telegramSuccesses} TG成功 / ${simSummary.categories.llm_silence} 沉默 / ${simSummary.categories.llm_failure} LLM失败 / ${simSummary.telegramFailures} TG失败 | 效率 ${efficiency}%`,
   );
 }
 console.log();
@@ -297,23 +421,37 @@ console.log();
 // 7. 每 target 的 LLM 调用频率
 console.log("§7. Per-target LLM 调用频率（Top 10）");
 console.log("─────────────────────────────────────────────────────────────");
-const targetCounts = new Map<string, { enqueue: number; real: number; silence: number }>();
+const targetCounts = new Map<
+  string,
+  {
+    enqueue: number;
+    telegramSuccessRows: number;
+    telegramSuccesses: number;
+    telegramFailureRows: number;
+    telegramFailures: number;
+    silence: number;
+    llmFailures: number;
+  }
+>();
 for (const t of enqueueTicks) {
   const key = t.target ?? "(no target)";
-  const entry = targetCounts.get(key) ?? { enqueue: 0, real: 0, silence: 0 };
+  const entry = targetCounts.get(key) ?? {
+    enqueue: 0,
+    telegramSuccessRows: 0,
+    telegramSuccesses: 0,
+    telegramFailureRows: 0,
+    telegramFailures: 0,
+    silence: 0,
+    llmFailures: 0,
+  };
   entry.enqueue++;
-  const acts = actionByTick.get(t.tick);
-  if (acts) {
-    for (const a of acts) {
-      if (a.action_type === "silence") entry.silence++;
-      else if (
-        ["message", "telegram:react", "telegram:mark_read", "telegram:leave_chat"].includes(
-          a.action_type,
-        )
-      )
-        entry.real++;
-    }
-  }
+  const summary = summarizeActions(actionByTick.get(t.tick) ?? []);
+  entry.telegramSuccessRows += summary.categories.telegram_success;
+  entry.telegramSuccesses += summary.telegramSuccesses;
+  entry.telegramFailureRows += summary.categories.telegram_failure;
+  entry.telegramFailures += summary.telegramFailures;
+  entry.silence += summary.categories.llm_silence;
+  entry.llmFailures += summary.categories.llm_failure;
   targetCounts.set(key, entry);
 }
 
@@ -321,9 +459,11 @@ const sortedTargets = [...targetCounts.entries()]
   .sort((a, b) => b[1].enqueue - a[1].enqueue)
   .slice(0, 10);
 for (const [target, stats] of sortedTargets) {
-  const eff = stats.real + stats.silence > 0 ? pct(stats.real, stats.real + stats.silence) : "N/A";
+  const denominator =
+    stats.telegramSuccessRows + stats.telegramFailureRows + stats.silence + stats.llmFailures;
+  const eff = denominator > 0 ? pct(stats.telegramSuccessRows, denominator) : "N/A";
   console.log(
-    `  ${target.padEnd(30)} ${String(stats.enqueue).padStart(4)} enqueue → ${stats.real} 行动 / ${stats.silence} 沉默 (效率 ${eff})`,
+    `  ${target.padEnd(30)} ${String(stats.enqueue).padStart(4)} enqueue → ${stats.telegramSuccessRows} TG成功行/${stats.telegramSuccesses} 副作用 / ${stats.telegramFailureRows} TG失败行/${stats.telegramFailures} 副作用 / ${stats.silence} 沉默 / ${stats.llmFailures} LLM失败 (成功行效率 ${eff})`,
   );
 }
 console.log();
@@ -374,4 +514,87 @@ function median(arr: number[]): number {
 
 function mean(arr: number[]): number {
   return arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+}
+
+function countBy(values: string[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const value of values) counts[value] = (counts[value] ?? 0) + 1;
+  return counts;
+}
+
+function formatCounts(counts: Record<string, number>): string {
+  const parts = Object.entries(counts).filter(([, count]) => count > 0);
+  if (parts.length === 0) return "none";
+  return parts.map(([key, count]) => `${key}:${count}`).join(", ");
+}
+
+type CategoryCounts = Record<IausActionCategory, number>;
+
+interface ActionSummary {
+  totalRows: number;
+  categories: CategoryCounts;
+  telegramSuccesses: number;
+  telegramFailures: number;
+  successEffects: IausTelegramEffectCounts;
+  failureEffects: IausTelegramEffectCounts;
+}
+
+function summarizeActions(rows: ActionRow[]): ActionSummary {
+  const categories: CategoryCounts = {
+    telegram_success: 0,
+    telegram_failure: 0,
+    llm_silence: 0,
+    llm_failure: 0,
+    observe_only: 0,
+    internal_action: 0,
+  };
+  const successEffects = emptyEffectCounts();
+  const failureEffects = emptyEffectCounts();
+  let telegramSuccesses = 0;
+  let telegramFailures = 0;
+
+  for (const row of rows) {
+    const classified = classifyIausActionRow(row);
+    categories[classified.category]++;
+    telegramSuccesses += classified.telegramSuccesses;
+    telegramFailures += classified.telegramFailures;
+    mergeEffectCounts(successEffects, classified.successEffects);
+    mergeEffectCounts(failureEffects, classified.failureEffects);
+  }
+
+  return {
+    totalRows: rows.length,
+    categories,
+    telegramSuccesses,
+    telegramFailures,
+    successEffects,
+    failureEffects,
+  };
+}
+
+function mergeEffectCounts(
+  target: IausTelegramEffectCounts,
+  source: IausTelegramEffectCounts,
+): void {
+  for (const effect of Object.keys(target) as Array<keyof IausTelegramEffectCounts>) {
+    target[effect] += source[effect];
+  }
+}
+
+function formatEffectCounts(counts: IausTelegramEffectCounts): string {
+  const parts = Object.entries(counts).filter(([, count]) => count > 0);
+  if (parts.length === 0) return "none";
+  return parts.map(([effect, count]) => `${effect}:${count}`).join(", ");
+}
+
+function parseDecisionTracePayload(payloadJson: string): {
+  values?: Record<string, unknown>;
+} | null {
+  try {
+    const parsed = JSON.parse(payloadJson) as unknown;
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed as { values?: Record<string, unknown> };
+  } catch {
+    return null;
+  }
 }

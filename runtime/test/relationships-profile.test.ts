@@ -73,6 +73,36 @@ describe("relationships.mod — note_active_hour", () => {
     expect(ctx.state.contactProfiles["contact:1"].interests).toEqual([]);
     expect(ctx.state.contactProfiles["contact:1"].activeHours).toHaveLength(24);
   });
+
+  it("把 @id 归一化到 contact:id，避免写入不可读 profile key", () => {
+    const ctx = makeCtx();
+    ctx.graph.addContact("contact:7691227179");
+
+    const result = instructions.note_active_hour.impl(ctx as unknown as ModContext, {
+      contactId: "@7691227179",
+      hour: 18,
+    }) as { success: boolean; contactId: string };
+
+    expect(result.success).toBe(true);
+    expect(result.contactId).toBe("contact:7691227179");
+    expect(ctx.state.contactProfiles["contact:7691227179"]).toBeDefined();
+    expect(ctx.state.contactProfiles["@7691227179"]).toBeUndefined();
+  });
+
+  it("接受 display_name 并写入规范 contact key", () => {
+    const ctx = makeCtx();
+    ctx.graph.addContact("contact:42", { display_name: "Rin" });
+
+    const result = instructions.note_active_hour.impl(ctx as unknown as ModContext, {
+      contactId: "Rin",
+      hour: 22,
+    }) as { success: boolean; contactId: string };
+
+    expect(result.success).toBe(true);
+    expect(result.contactId).toBe("contact:42");
+    expect(ctx.state.contactProfiles["contact:42"].activeHours[22]).toBeCloseTo(0.1, 4);
+    expect(ctx.state.contactProfiles.Rin).toBeUndefined();
+  });
 });
 
 // -- tag_interest (ADR-208: BeliefStore + 结晶管线) -------------------------
@@ -256,6 +286,38 @@ describe("relationships.mod — contactProfile with profile", () => {
     };
 
     expect(result.profile).toBeNull();
+  });
+
+  it("读取画像时迁移旧 @id key 到 contact:id", () => {
+    const ctx = makeCtx({
+      contactProfiles: {
+        "@7691227179": {
+          activeHours: (() => {
+            const h = new Array(24).fill(0);
+            h[18] = 0.1;
+            return h;
+          })(),
+          interests: [],
+          lastUpdatedTick: 50,
+          previousPeakHour: null,
+          scheduleShift: null,
+          portrait: null,
+          portraitTick: null,
+          traits: {},
+        },
+      },
+    });
+    ctx.graph.addContact("contact:7691227179");
+
+    // biome-ignore lint/style/noNonNullAssertion: test
+    const query = relationshipsMod.queries!.contact_profile;
+    const result = query.impl(ctx as unknown as ModContext, {
+      contactId: "contact:7691227179",
+    }) as { profile: ContactProfile | null };
+
+    expect(result.profile?.activeHours[18]).toBeCloseTo(0.1, 4);
+    expect(ctx.state.contactProfiles["contact:7691227179"]).toBeDefined();
+    expect(ctx.state.contactProfiles["@7691227179"]).toBeUndefined();
   });
 });
 
@@ -678,5 +740,41 @@ describe("relationships.mod — 活跃模式变化检测 (scheduleShift)", () =>
     // 6 <= 12 && 22 > 12 → "shifted earlier (possible early bird pattern)"
     expect(profile.scheduleShift).toBe("shifted earlier (possible early bird pattern)");
     expect(profile.previousPeakHour).toBe(6);
+  });
+});
+
+describe("relationships.mod — trait crystallization", () => {
+  it("self sense 只写 BeliefStore 时也能创建 ContactProfile 并结晶", () => {
+    const tick = TIER_EVAL_INTERVAL;
+    const nowMs = tick * 60_000;
+    const graph = new WorldModel();
+    graph.tick = tick;
+    graph.addContact("contact:1", { tier: 150 });
+
+    const impressionCounts: Record<string, number> = {};
+    for (let i = 0; i < 5; i++) {
+      graph.beliefs.update("contact:1", "trait:warmth", 0.9, "semantic", nowMs + i);
+      impressionCounts["contact:1::trait:warmth"] =
+        (impressionCounts["contact:1::trait:warmth"] ?? 0) + 1;
+    }
+
+    const ctx = {
+      graph,
+      state: {
+        targetNodeId: null,
+        contactProfiles: {} as Record<string, ContactProfile>,
+        tierTrackers: {},
+      },
+      tick,
+      nowMs: nowMs + 5,
+      getModState: (name: string) => (name === "observer" ? { impressionCounts } : undefined),
+      dispatch: () => undefined,
+    };
+
+    relationshipsMod.onTickEnd?.(ctx as unknown as ModContext);
+
+    expect(ctx.state.contactProfiles["contact:1"]).toBeDefined();
+    expect(ctx.state.contactProfiles["contact:1"].traits.warmth).toBeDefined();
+    expect(ctx.state.contactProfiles["contact:1"].traits.warmth.value).toBeGreaterThan(0);
   });
 });

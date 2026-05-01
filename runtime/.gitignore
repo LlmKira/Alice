@@ -5,6 +5,7 @@ node_modules/
 dist/bin/
 
 # 运行时文件
+execution-grain
 *.db
 *.db-journal
 .env

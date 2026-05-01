@@ -6,6 +6,7 @@
  * 替代 v4 的全局 tanh(Pi/κi) + 激活函数映射。
  */
 
+import { readEmotionControlPatch } from "../emotion/graph.js";
 import { DEFAULT_VOICE_COOLDOWN, voiceFatigue } from "../engine/deliberation.js";
 import type { TensionVector } from "../graph/tension.js";
 import type { WorldModel } from "../graph/world-model.js";
@@ -146,12 +147,13 @@ export function computeLoudness(
 
   // ADR-181: mood ±30% 调制——mood>0 利好 Sociability、抑制 Caution；反向亦然
   const MOOD_DELTA = 0.3;
-  const selfMood = readSelfMood(G);
+  const selfMood = readSelfMood(G, nowMs);
+  const emotionControl = readEmotionControlPatch(G, nowMs);
   const PSI: Record<VoiceAction, number> = {
     diligence: 1.0,
     curiosity: 1.0,
-    sociability: 1 + MOOD_DELTA * selfMood,
-    caution: 1 - MOOD_DELTA * selfMood,
+    sociability: 1 + MOOD_DELTA * selfMood + emotionControl.voiceBias.sociability,
+    caution: 1 - MOOD_DELTA * selfMood + emotionControl.voiceBias.caution,
   };
 
   const loudness = VOICE_ORDER.map((v, i) => {

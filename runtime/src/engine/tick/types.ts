@@ -11,6 +11,8 @@
  */
 
 // Re-export sandbox types for tick pipeline consumers
+import type { ScriptExecutionResult } from "../../core/script-execution.js";
+
 export type { ScriptExecutionResult } from "../../core/script-execution.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -22,17 +24,17 @@ export type { ScriptExecutionResult } from "../../core/script-execution.js";
  *
  * - sensor: 基础感知器——压力场/图的必要输入，签名始终可见
  * - core: 核心交互工具——始终可见（send_message, react, search...）
- * - capability: 能力工具——通过 man <category> 激活后可见
- * - on-demand: 按需工具——仅通过 man <category> 激活后可见
+ * - capability: 能力工具——在 shell manual 中扁平可见，可用 `<command> --help` 查详情
+ * - on-demand: 按需工具——默认不进 shell manual，只通过明确场景/特性门控暴露
  */
 export type AffordancePriority = "sensor" | "core" | "capability" | "on-demand";
 
 /**
- * 工具族类别 — LLM 通过 man <category> 激活的工具族标签。
+ * 工具族类别 — 用于 shell manual 分组、能力元数据和特性门控。
  *
  * sensor/core 工具无需 category（始终可见）。
- * capability 工具必须指定 category，通过 man <category> 激活后可见。
- * on-demand 工具仅通过 man <category> 激活后可见。
+ * capability 工具必须指定 category，并在 shell manual 中扁平展示。
+ * on-demand 工具仅在明确场景/特性门控允许时展示。
  */
 export type ToolCategory =
   // App 工具
@@ -59,7 +61,7 @@ export type ToolCategory =
   | "moderation"
   | "group_admin"
   | "account"
-  // 高级指令（通过 man <category> 激活）
+  // 高级指令族
   | "social"
   | "threads"
   | "mood"
@@ -115,7 +117,7 @@ export function unregisterToolCategory(category: string): void {
  * Affordance 声明基础字段 — 所有 priority 变体共享。
  */
 interface AffordanceBase {
-  /** 何时使用此工具（写入 Capability Guide，LLM 可读）。 */
+  /** 何时使用此工具（写入 shell manual / legacy category summary，LLM 可读）。 */
   whenToUse: string;
   /** 何时不使用此工具。 */
   whenNotToUse: string;
@@ -136,13 +138,13 @@ export interface CoreAffordance extends AffordanceBase {
   priority: "core";
 }
 
-/** 能力工具 — 通过 man <category> 激活后可见。category 必填。 */
+/** 能力工具 — shell manual 中扁平可见。category 必填，用于分组和 whenToUse 元数据。 */
 export interface CapabilityAffordance extends AffordanceBase {
   priority: "capability";
   category: ToolCategory;
 }
 
-/** 按需工具 — 仅通过 man <category> 激活后可见（moderation, group_admin...）。 */
+/** 按需工具 — 仅在明确场景/特性门控允许时展示（moderation, group_admin...）。 */
 export interface OnDemandAffordance extends AffordanceBase {
   priority: "on-demand";
   category?: ToolCategory;
@@ -151,12 +153,14 @@ export interface OnDemandAffordance extends AffordanceBase {
 /**
  * Affordance 声明 — 每个 LLM 可见工具的可发现性元数据（discriminated union）。
  *
- * SAA（Stigmergic Affordance Architecture）两层过滤：
+ * SAA（Stigmergic Affordance Architecture）可见性分层：
  * 1. sensor/core 工具始终可见
- * 2. capability 工具由 man <category> 激活
- * 3. on-demand 工具仅通过 man <category> 激活后可见
+ * 2. capability 工具进入扁平 shell manual，并通过 category 元数据辅助说明
+ * 3. on-demand 工具只在明确场景/特性门控允许时展示
  *
  * @see docs/adr/142-action-space-architecture/README.md §Architecture
+ * @see docs/adr/216-cli-help-unification.md
+ * @see docs/adr/223-flat-tool-visibility.md
  */
 export type AffordanceDeclaration =
   | SensorAffordance
@@ -198,7 +202,7 @@ export interface TickBudget {
  *
  * 每次 engagement 创建一个 Blackboard，tick 循环内读写。
  * 不可变部分（pressures/voice/target/features）为创建时设置的初始值。
- * 可变部分（observations/errors/preparedCategories/...）在 tick 步进中累积。
+ * 可变部分（observations/execution/preparedCategories/...）在 tick 步进中累积。
  */
 export interface Blackboard {
   // ── 不可变初始值 ──
@@ -210,18 +214,40 @@ export interface Blackboard {
 
   // ── 可变累积（tick 步进中更新）──
   observations: string[];
-  errors: string[];
+  execution: ScriptExecutionResult;
+  /** 历史字段：旧 capability 激活记录。普通 prompt 已改为扁平 shell manual。 */
   preparedCategories: Set<ToolCategory>;
-  thinks: string[];
-  queryLogs: Array<{ fn: string; result: string }>;
 
   // ── 预算 ──
   budget: TickBudget;
+  /** 最近一次 LLM 调用失败分类。只用于反馈弧区分基础设施故障和模型无效输出。 */
+  failureKind?: import("./callLLM.js").TickFailureKind;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tick 结果
 // ═══════════════════════════════════════════════════════════════════════════
+
+/** host 在同一 tick 内立即续轮的原因。 */
+export type IntraTickContinuationReason = "local_observation_followup" | "error_recovery" | "none";
+
+/** ADR-235 + ADR-247: tick 级可观测性元数据。 */
+export interface TickTcMeta {
+  toolCallCount: number;
+  budgetExhausted: boolean;
+  afterward: string;
+  /** tick 入口选中的 endpoint/provider 名，只用于传输和熔断诊断。 */
+  provider?: string;
+  /** tick 入口选中的稳定模型 ID；模型轮换和质量诊断以此字段为准。 */
+  model?: string;
+  /** 聚合的 $ cmd\noutput 块（截断到 4KB）。 */
+  commandLog: string;
+  /**
+   * host 在同一 tick 内触发的续轮原因序列。
+   * 只记录真正发生的续轮，不记录 "none"。
+   */
+  hostContinuationTrace?: IntraTickContinuationReason[];
+}
 
 /** tick 循环退出原因。 */
 export type TickOutcome =
@@ -229,9 +255,10 @@ export type TickOutcome =
   | "waiting_reply"
   | "watching"
   | "empty"
+  | "resting"
   | "fed_up"
   | "cooling_down"
-  /** ADR-232: episode 内 TC 续轮预算耗尽（maxSteps 内 watching 消耗完）。 */
+  /** 预留：episode 内续轮预算耗尽。当前实现仍折叠为 terminal。 */
   | "tc_budget_exhausted";
 
 /**
@@ -240,26 +267,20 @@ export type TickOutcome =
  */
 export interface TickResult {
   outcome: TickOutcome;
-  thinks: string[];
-  queryLogs: Array<{ fn: string; result: string }>;
   observations: string[];
-  errors: string[];
-  instructionErrors: string[];
+  execution: ScriptExecutionResult;
   stepsUsed: number;
+  /** 历史字段：旧 capability 激活记录。普通 prompt 已改为扁平 shell manual。 */
   preparedCategories: ToolCategory[];
   duration: number;
   /** ADR-215: LLM 最后一步输出的认知残留（来自 TickStepSchema.residue）。 */
   llmResidue?: import("../../llm/schemas.js").LLMResidue;
-  /** @deprecated ADR-233: TC 循环已接管续轮，episodeRounds 不再使用，保留为 0 */
+  /** episode 内 block 续轮次数（host 触发的额外轮数，如本地 follow-up / 自纠）。 */
   episodeRounds: number;
   /** ADR-235: TC 循环可观测性元数据。 */
-  tcMeta?: {
-    toolCallCount: number;
-    budgetExhausted: boolean;
-    afterward: string;
-    /** 聚合的 $ cmd\noutput 块（截断到 4KB）。 */
-    commandLog: string;
-  };
+  tcMeta?: TickTcMeta;
+  /** LLM 调用失败的基础设施/模型边界分类。 */
+  failureKind?: import("./callLLM.js").TickFailureKind;
 }
 
 /**

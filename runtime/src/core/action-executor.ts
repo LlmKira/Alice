@@ -10,11 +10,8 @@
  * - FeedbackGap + checkFeedbackGap（基于 completedActions 重写）
  */
 
-import { createLogger } from "../utils/logger.js";
 import type { ScriptExecutionResult } from "./script-execution.js";
 import { hasCompletedSend } from "./script-execution.js";
-
-const log = createLogger("action-executor");
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ActionRuntimeConfig — tick 管线运行时配置
@@ -65,12 +62,6 @@ export function checkFeedbackGap(result: ScriptExecutionResult): FeedbackGap {
   const hasObserveMood = false;
   const hasRateOutcome = false;
   const isMissing = hasSendMessage && !hasObserveMood;
-
-  if (isMissing) {
-    log.warn("Feedback gap: send_message without self feel", {
-      completedActions: result.completedActions.length,
-    });
-  }
 
   return { hasSendMessage, hasObserveMood, hasRateOutcome, isMissing };
 }

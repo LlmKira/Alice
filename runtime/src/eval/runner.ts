@@ -20,15 +20,16 @@
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { generateText } from "ai";
-import { type Config, loadConfig } from "../config.js";
+import { type Config, getLlmProviderByRoute, loadConfig } from "../config.js";
+import { mergeScriptExecutionResults } from "../core/script-execution.js";
 import { extractRuntimeConfig } from "../engine/act/runtime-config.js";
 import { collectAllTools } from "../engine/tick/affordance-filter.js";
 import { createBlackboard } from "../engine/tick/blackboard.js";
 import { type TickDeps, tick } from "../engine/tick/tick.js";
 import type { FeatureFlags, TickResult, ToolCategory } from "../engine/tick/types.js";
 import type { WorldModel } from "../graph/world-model.js";
-import { getAvailableProvider, initProviders } from "../llm/client.js";
-import { normalizeScript } from "../llm/schemas.js";
+import { getEvalProvider, initProviders } from "../llm/client.js";
+import { parseTickStep } from "../llm/schemas.js";
 import { TELEGRAM_ACTIONS } from "../telegram/actions/index.js";
 import { createLogger } from "../utils/logger.js";
 import { buildAblationPrompt } from "./ablation.js";
@@ -50,6 +51,11 @@ const log = createLogger("eval");
 
 // ── Eval LLM 调用 ─────────────────────────────────────────────────────────
 
+type EvalLLMResult = {
+  script: string;
+  afterward: "done" | "waiting_reply" | "watching" | "resting" | "fed_up" | "cooling_down";
+};
+
 /**
  * Eval 专用 LLM 调用 — 与 callTickLLM 逻辑一致，
  * 但允许 temperature 覆盖 + 不写审计日志。
@@ -61,9 +67,9 @@ async function evalCallLLM(
   user: string,
   temperature: number,
   timeout: number,
-): Promise<{ script: string } | null> {
+): Promise<EvalLLMResult | null> {
   try {
-    const { provider, model } = getAvailableProvider();
+    const { provider, model } = getEvalProvider();
     const { text } = await generateText({
       model: provider(model),
       system,
@@ -71,9 +77,8 @@ async function evalCallLLM(
       temperature,
       abortSignal: AbortSignal.timeout(timeout),
     });
-    const script = normalizeScript(text);
-    if (!script) return null;
-    return { script };
+    const step = parseTickStep(text);
+    return { script: step.script, afterward: step.afterward };
   } catch (e) {
     log.error("Eval LLM call failed", e);
     return null;
@@ -127,7 +132,7 @@ function buildEvalTickDeps(
       const result = await evalCallLLM(system, user, temperature, timeout);
       if (!result) return null;
       return {
-        afterward: "done" as const,
+        afterward: result.afterward,
         toolCallCount: 1,
         budgetExhausted: false,
         rawScript: result.script,
@@ -135,11 +140,15 @@ function buildEvalTickDeps(
         logs: [result.script],
         errors: [],
         instructionErrors: [],
+        errorCodes: [],
         duration: 0,
         thinks: [],
         queryLogs: [],
+        observations: [],
         completedActions: [],
         silenceReason: null,
+        llmProvider: "eval",
+        llmModel: "eval",
       };
     },
 
@@ -209,11 +218,8 @@ function mockAppResults(actions: Array<{ fn: string; args?: Record<string, unkno
 function mergeTickResults(r1: TickResult, r2: TickResult): TickResult {
   return {
     outcome: r2.outcome,
-    thinks: [...r1.thinks, ...r2.thinks],
-    queryLogs: [...r1.queryLogs, ...r2.queryLogs],
     observations: [...r1.observations, ...r2.observations],
-    errors: [...r1.errors, ...r2.errors],
-    instructionErrors: [...r1.instructionErrors, ...r2.instructionErrors],
+    execution: mergeScriptExecutionResults([r1.execution, r2.execution]),
     stepsUsed: r1.stepsUsed + r2.stepsUsed,
     preparedCategories: [
       ...new Set([...r1.preparedCategories, ...r2.preparedCategories]),
@@ -294,20 +300,26 @@ async function runScenarioOnce(
       // 保存 round 1 数据（board arrays 与 result 共享引用，必须先拷贝）
       const r1: TickResult = {
         ...result,
-        thinks: [...result.thinks],
-        queryLogs: [...result.queryLogs],
         observations: [...result.observations],
-        errors: [...result.errors],
-        instructionErrors: [...result.instructionErrors],
+        execution: {
+          logs: [...result.execution.logs],
+          errors: [...result.execution.errors],
+          instructionErrors: [...result.execution.instructionErrors],
+          errorCodes: [...result.execution.errorCodes],
+          duration: result.execution.duration,
+          thinks: [...result.execution.thinks],
+          queryLogs: [...result.execution.queryLogs],
+          observations: [...result.execution.observations],
+          completedActions: [...result.execution.completedActions],
+          silenceReason: result.execution.silenceReason,
+        },
         preparedCategories: [...result.preparedCategories],
       };
 
-      // 重置 board 可变状态（保留 preparedCategories — round 2 需要已激活的能力工具）
+      // 重置 board 可变状态（保留 preparedCategories — 兼容旧 eval 断言）
       const appObs = mockAppResults([]);
       board.observations = appObs;
-      board.thinks = [];
-      board.queryLogs = [];
-      board.errors = [];
+      board.execution = mergeScriptExecutionResults([]);
       board.budget.usedSteps = 0;
 
       // Round 2
@@ -343,11 +355,12 @@ async function runScenarioOnce(
     return {
       scenarioId: scenario.id,
       runIndex,
-      script: result.thinks.join("\n") || null,
+      script: result.execution.thinks.join("\n") || null,
       steps: result.stepsUsed,
       structural,
       duration: Date.now() - start,
-      errors: result.errors,
+      errors: result.execution.errors,
+      // `needs` 是旧 eval 输出字段名；值来自 legacy preparedCategories。
       needs: result.preparedCategories as string[],
     };
   } catch (e) {
@@ -474,7 +487,7 @@ export async function runEvalSuite(
     cache[scenario.id] = {
       pass: agg.passAtK,
       timestamp: new Date().toISOString(),
-      model: config.providerName ?? runtimeConfig.providers[0]?.model,
+      model: config.providerName ?? getLlmProviderByRoute(runtimeConfig, "eval")?.model,
       passRate: agg.passRate,
     };
     saveCache(cache);
@@ -520,7 +533,8 @@ export async function runEvalSuite(
   }
 
   return {
-    model: config.providerName ?? runtimeConfig.providers[0]?.model ?? "unknown",
+    model:
+      config.providerName ?? getLlmProviderByRoute(runtimeConfig, "eval")?.model ?? "unknown",
     timestamp: new Date().toISOString(),
     totalScenarios: filtered.length,
     runsPerScenario: config.runs,

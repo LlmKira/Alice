@@ -16,7 +16,7 @@ import { getDb } from "../db/connection.js";
 import { deferredOutcomeLog } from "../db/schema.js";
 import { resolveContactAndChannel } from "../graph/constants.js";
 import type { WorldModel } from "../graph/world-model.js";
-import { computeExternalFeedback } from "../mods/observer.mod.js";
+import { computeExternalFeedback } from "../mods/observer/external-feedback.js";
 import { createLogger } from "../utils/logger.js";
 
 const log = createLogger("deferred-outcome");

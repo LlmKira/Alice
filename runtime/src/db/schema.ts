@@ -1,5 +1,9 @@
 /**
  * Drizzle ORM schema：graph_nodes, graph_edges, tick_log, action_log, mod_states 等。
+ *
+ * 表级数据语义的单一登记表在 `schema-classification.ts`。
+ * 新增表时必须先补 `TABLE_CLASSIFICATIONS` 和 ADR-248 data-map，再写迁移。
+ * @see docs/adr/248-dcp-reference-implementation-plan/data-map.md
  */
 import { index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
@@ -85,10 +89,16 @@ export const actionLog = sqliteTable(
     tcToolCallCount: integer("tc_tool_call_count"),
     /** ADR-235: 是否触及 TC_MAX_TOOL_CALLS 预算上限。 */
     tcBudgetExhausted: integer("tc_budget_exhausted", { mode: "boolean" }),
-    /** ADR-235: signal 工具的 afterward 值（done/waiting_reply/watching/fed_up/cooling_down）。 */
+    /** ADR-235: signal 工具的 afterward 值（done/waiting_reply/watching/resting/fed_up/cooling_down）。 */
     tcAfterward: text("tc_afterward"),
     /** ADR-235: 聚合的 $ cmd\noutput 块（截断到 4KB）。 */
     tcCommandLog: text("tc_command_log"),
+    /** ADR-247: host 同一 tick 内触发续轮的原因序列 JSON。 */
+    tcHostContinuationTrace: text("tc_host_continuation_trace"),
+    /** tick 入口实际选中的 LLM provider 名。 */
+    llmProvider: text("llm_provider"),
+    /** tick 入口实际选中的模型 ID。 */
+    llmModel: text("llm_model"),
     createdAt: integer("created_at", { mode: "timestamp" })
       .notNull()
       .$defaultFn(() => new Date()),
@@ -135,6 +145,283 @@ export const silenceLog = sqliteTable(
   (t) => [index("idx_silence_log_tick").on(t.tick)],
 );
 
+/**
+ * ADR-248 W1: Decision Trace 审计事实。
+ *
+ * 记录 EVOLVE/ACT 在某个 tick 看到什么、选择什么、为什么停止或继续。
+ * 这是 append-only audit fact，不允许作为 gate/pressure/control 的输入。
+ * @see docs/adr/248-dcp-reference-implementation-plan/README.md
+ */
+export const decisionTrace = sqliteTable(
+  "decision_trace",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    tick: integer("tick").notNull(),
+    /** evolve | act */
+    phase: text("phase").notNull(),
+    target: text("target"),
+    /** 可选关联 action_log.id；EVOLVE 沉默/入队前可为空。 */
+    actionLogId: integer("action_log_id"),
+    /** enqueue | silence | defer | execute | continue | stop | fail */
+    finalDecision: text("final_decision").notNull(),
+    reason: text("reason").notNull(),
+    /** JSON: DecisionTracePayload，审计细节，不是控制契约。 */
+    payloadJson: text("payload_json").notNull().default("{}"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    index("idx_decision_trace_tick").on(t.tick),
+    index("idx_decision_trace_action_log").on(t.actionLogId),
+    index("idx_decision_trace_phase_tick").on(t.phase, t.tick),
+  ],
+);
+
+/**
+ * ADR-258 Wave 1: typed observation spine — tick boundary.
+ *
+ * Append-only diagnostic authority for what IAUS saw at a tick boundary.
+ * @see docs/adr/258-iaus-health-curve-validation/README.md
+ */
+export const tickTrace = sqliteTable(
+  "tick_trace",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    tick: integer("tick").notNull(),
+    occurredAtMs: integer("occurred_at_ms").notNull(),
+    pressureVectorJson: text("pressure_vector_json").notNull(),
+    schedulerPhase: text("scheduler_phase").notNull(),
+    selectedCandidateId: text("selected_candidate_id"),
+    silenceMarker: text("silence_marker"),
+    sampleStatus: text("sample_status").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("idx_tick_trace_tick").on(t.tick),
+    index("idx_tick_trace_candidate").on(t.selectedCandidateId),
+    index("idx_tick_trace_silence").on(t.silenceMarker),
+  ],
+);
+
+/** ADR-258 Wave 1: typed observation spine — candidate/silence authority. */
+export const candidateTrace = sqliteTable(
+  "candidate_trace",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    candidateId: text("candidate_id").notNull(),
+    tick: integer("tick").notNull(),
+    targetNamespace: text("target_namespace").notNull(),
+    targetId: text("target_id"),
+    actionType: text("action_type").notNull(),
+    normalizedConsiderationsJson: text("normalized_considerations_json").notNull().default("{}"),
+    deltaP: real("delta_p"),
+    socialCost: real("social_cost"),
+    netValue: real("net_value"),
+    bottleneck: text("bottleneck"),
+    gatePlane: text("gate_plane").notNull(),
+    selected: integer("selected", { mode: "boolean" }).notNull().default(false),
+    candidateRank: integer("candidate_rank"),
+    silenceReason: text("silence_reason").notNull(),
+    retainedImpulseJson: text("retained_impulse_json"),
+    sampleStatus: text("sample_status").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("idx_candidate_trace_candidate").on(t.candidateId),
+    index("idx_candidate_trace_tick").on(t.tick),
+    index("idx_candidate_trace_silence").on(t.silenceReason),
+  ],
+);
+
+/** ADR-258 Wave 1: typed observation spine — queue fate authority. */
+export const queueTrace = sqliteTable(
+  "queue_trace",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    queueTraceId: text("queue_trace_id").notNull(),
+    tick: integer("tick").notNull(),
+    candidateId: text("candidate_id").notNull(),
+    enqueueId: text("enqueue_id").notNull(),
+    enqueueOutcome: text("enqueue_outcome").notNull(),
+    fate: text("fate").notNull(),
+    queueDepth: integer("queue_depth"),
+    activeCount: integer("active_count"),
+    saturation: real("saturation"),
+    supersededByEnqueueId: text("superseded_by_enqueue_id"),
+    reasonCode: text("reason_code").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("idx_queue_trace_event").on(t.queueTraceId),
+    index("idx_queue_trace_enqueue").on(t.enqueueId),
+    index("idx_queue_trace_candidate").on(t.candidateId),
+    index("idx_queue_trace_fate").on(t.fate),
+  ],
+);
+
+/** ADR-258 Wave 1: typed observation spine — executor result authority. */
+export const actionResult = sqliteTable(
+  "action_result",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    actionId: text("action_id").notNull(),
+    tick: integer("tick").notNull(),
+    enqueueId: text("enqueue_id"),
+    candidateId: text("candidate_id"),
+    actionLogId: integer("action_log_id"),
+    targetNamespace: text("target_namespace").notNull(),
+    targetId: text("target_id"),
+    actionType: text("action_type").notNull(),
+    result: text("result").notNull(),
+    failureCode: text("failure_code").notNull(),
+    externalMessageId: text("external_message_id"),
+    completedActionRefsJson: text("completed_action_refs_json").notNull().default("[]"),
+    /** ADR-266 Wave 4: ScriptExecutionResult.observations 的 typed execution facts。 */
+    executionObservationsJson: text("execution_observations_json").notNull().default("[]"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("idx_action_result_action").on(t.actionId),
+    index("idx_action_result_enqueue").on(t.enqueueId),
+    index("idx_action_result_action_log").on(t.actionLogId),
+    index("idx_action_result_result").on(t.result),
+  ],
+);
+
+/**
+ * ADR-259 Wave 1: shadow focus transition evidence.
+ *
+ * Append-only diagnostic fact. It records structured execution-boundary evidence
+ * only; it must not authorize sends or feed IAUS control. Evidence can come from
+ * rejected cross-chat sends, remote observations, or forwarded share edges.
+ * @see docs/adr/259-focus-trajectory-closed-loop/README.md §Wave 1
+ */
+export const focusTransitionShadow = sqliteTable(
+  "focus_transition_shadow",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    transitionShadowId: text("transition_shadow_id").notNull(),
+    tick: integer("tick").notNull(),
+    actionId: text("action_id").notNull(),
+    actionLogId: integer("action_log_id"),
+    candidateId: text("candidate_id"),
+    sourceTarget: text("source_target"),
+    currentChatId: text("current_chat_id").notNull(),
+    requestedChatId: text("requested_chat_id").notNull(),
+    sourceCommand: text("source_command").notNull(),
+    transitionClass: text("transition_class").notNull(),
+    evidenceStatus: text("evidence_status").notNull(),
+    payloadJson: text("payload_json").notNull().default("{}"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("idx_focus_transition_shadow_id").on(t.transitionShadowId),
+    index("idx_focus_transition_shadow_action").on(t.actionId),
+    index("idx_focus_transition_shadow_requested").on(t.requestedChatId),
+    index("idx_focus_transition_shadow_tick").on(t.tick),
+  ],
+);
+
+/**
+ * ADR-259 Wave 3: explicit / blocked read-only focus transition request.
+ *
+ * Append-only request fact. It records that Alice asked to observe/switch to
+ * another chat, or tried an active cross-chat send that was blocked. It must
+ * not authorize sends, switch the active chat, or feed IAUS / retarget gates in
+ * Wave 3.
+ * @see docs/adr/259-focus-trajectory-closed-loop/wave-3-readonly-intent-audit.md
+ */
+export const focusTransitionIntent = sqliteTable(
+  "focus_transition_intent",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    intentId: text("intent_id").notNull(),
+    tick: integer("tick").notNull(),
+    sourceChatId: text("source_chat_id").notNull(),
+    requestedChatId: text("requested_chat_id").notNull(),
+    intentKind: text("intent_kind").notNull(),
+    reason: text("reason").notNull(),
+    sourceCommand: text("source_command").notNull().default("self.attention-pull"),
+    payloadJson: text("payload_json").notNull().default("{}"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("idx_focus_transition_intent_id").on(t.intentId),
+    index("idx_focus_transition_intent_requested").on(t.requestedChatId),
+    index("idx_focus_transition_intent_tick").on(t.tick),
+  ],
+);
+
+/** ADR-258 Wave 1: typed observation spine — fact writeback authority. */
+export const factMutation = sqliteTable(
+  "fact_mutation",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    mutationId: text("mutation_id").notNull(),
+    actionId: text("action_id"),
+    sourceTick: integer("source_tick"),
+    factNamespace: text("fact_namespace").notNull(),
+    entityNamespace: text("entity_namespace").notNull(),
+    entityId: text("entity_id"),
+    mutationKind: text("mutation_kind").notNull(),
+    beforeSummary: text("before_summary"),
+    afterSummary: text("after_summary"),
+    deltaJson: text("delta_json"),
+    authorityTable: text("authority_table").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("idx_fact_mutation_id").on(t.mutationId),
+    index("idx_fact_mutation_action").on(t.actionId),
+    index("idx_fact_mutation_tick").on(t.sourceTick),
+    index("idx_fact_mutation_kind").on(t.mutationKind),
+  ],
+);
+
+/** ADR-258 Wave 1: typed observation spine — pressure release authority. */
+export const pressureDelta = sqliteTable(
+  "pressure_delta",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    pressureDeltaId: text("pressure_delta_id").notNull(),
+    sourceTick: integer("source_tick").notNull(),
+    relatedCandidateId: text("related_candidate_id"),
+    relatedActionId: text("related_action_id"),
+    windowStartTick: integer("window_start_tick").notNull(),
+    windowEndTick: integer("window_end_tick").notNull(),
+    windowSizeTicks: integer("window_size_ticks").notNull(),
+    pressureBefore: real("pressure_before").notNull(),
+    pressureAfter: real("pressure_after").notNull(),
+    dimension: text("dimension").notNull(),
+    releaseClassification: text("release_classification").notNull(),
+    classificationReason: text("classification_reason").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("idx_pressure_delta_id").on(t.pressureDeltaId),
+    index("idx_pressure_delta_source").on(t.sourceTick),
+    index("idx_pressure_delta_action").on(t.relatedActionId),
+    index("idx_pressure_delta_dimension").on(t.dimension),
+  ],
+);
+
 /** 人格向量快照。 */
 export const personalitySnapshots = sqliteTable("personality_snapshots", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -145,16 +432,59 @@ export const personalitySnapshots = sqliteTable("personality_snapshots", {
     .$defaultFn(() => new Date()),
 });
 
+/**
+ * ADR-248 W3: Canonical event fact stream.
+ *
+ * 平台事件被解析后的稳定事实形态。append-only；当前先由测试/helper 写入，
+ * 后续再接 Telegram ingress。projection/rendering 从该事实流重放。
+ * @see docs/adr/248-dcp-reference-implementation-plan/README.md
+ */
+export const canonicalEvents = sqliteTable(
+  "canonical_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    kind: text("kind").notNull(),
+    tick: integer("tick").notNull(),
+    occurredAtMs: integer("occurred_at_ms"),
+    channelId: text("channel_id"),
+    contactId: text("contact_id"),
+    directed: integer("directed", { mode: "boolean" }).notNull().default(false),
+    novelty: real("novelty"),
+    /** 事实来源：message_log / telegram / runtime / action_result。 */
+    source: text("source"),
+    /** 来源内稳定 ID。Telegram ingress 使用平台事件身份。 */
+    sourceId: text("source_id"),
+    payloadJson: text("payload_json").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    index("idx_canonical_events_tick").on(t.tick),
+    index("idx_canonical_events_kind_tick").on(t.kind, t.tick),
+    index("idx_canonical_events_channel_tick").on(t.channelId, t.tick),
+    uniqueIndex("idx_canonical_events_source").on(t.source, t.sourceId),
+  ],
+);
+
 /** 消息日志：收到和发出的消息。 */
 export const messageLog = sqliteTable(
   "message_log",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     tick: integer("tick").notNull(),
+    /** 多平台来源。当前首批为 telegram / qq。 */
+    platform: text("platform").notNull().default("telegram"),
     chatId: text("chat_id").notNull(),
-    /** Telegram 原始消息 ID（用于 reply directed 检测）。 */
+    /** UI-local numeric ref used by current chat tools. Null when unavailable or non-numeric. */
     msgId: integer("msg_id"),
-    /** 回复目标消息的 Telegram message ID。用于回复链逸散上下文（ADR-97）。 */
+    /** 平台原生聊天 ID。Telegram 为 chat id，QQ 为群号/QQ号。 */
+    nativeChatId: text("native_chat_id"),
+    /** 平台原生消息 ID。可为数字或字符串，不参与 Telegram-only reply API。 */
+    nativeMsgId: text("native_msg_id"),
+    /** 跨平台稳定消息 ID：message:<platform>:<nativeChatId>:<nativeMsgId>。 */
+    stableMessageId: text("stable_message_id"),
+    /** 回复目标的当前聊天可见数字 ref。用于回复链逸散上下文（ADR-97）。 */
     replyToMsgId: integer("reply_to_msg_id"),
     senderId: text("sender_id"),
     senderName: text("sender_name"),
@@ -172,7 +502,250 @@ export const messageLog = sqliteTable(
     index("idx_message_log_chat").on(t.chatId),
     index("idx_message_log_chat_tick").on(t.chatId, t.tick),
     index("idx_message_log_chat_msg").on(t.chatId, t.msgId),
+    index("idx_message_log_platform_native").on(t.platform, t.nativeChatId, t.nativeMsgId),
+    index("idx_message_log_stable_message").on(t.stableMessageId),
     index("idx_message_log_sender").on(t.senderId),
+  ],
+);
+
+/**
+ * ADR-260: 群聊照片相册资产投影。
+ * source_chat_id/source_msg_id 是发送权威；file_unique_id 只负责去重和语义合并。
+ * @see docs/adr/260-group-photo-album-affordance/README.md
+ */
+export const albumPhotos = sqliteTable(
+  "album_photos",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    assetId: text("asset_id").notNull().unique(),
+    fileUniqueId: text("file_unique_id").notNull().unique(),
+    sourceChatId: integer("source_chat_id").notNull(),
+    sourceMsgId: integer("source_msg_id").notNull(),
+    mediaType: text("media_type").notNull().default("photo"),
+    captionText: text("caption_text"),
+    description: text("description"),
+    wdTagsJson: text("wd_tags_json"),
+    ocrText: text("ocr_text"),
+    visibilityScope: text("visibility_scope").notNull().default("group"),
+    sourceStatus: text("source_status").notNull().default("available"),
+    lastFailureCode: text("last_failure_code"),
+    observedAtMs: integer("observed_at_ms").notNull(),
+    lastIndexedAtMs: integer("last_indexed_at_ms").notNull(),
+    sourceMissingAtMs: integer("source_missing_at_ms"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("idx_album_photos_asset").on(t.assetId),
+    uniqueIndex("idx_album_photos_file_unique").on(t.fileUniqueId),
+    index("idx_album_photos_source").on(t.sourceChatId, t.sourceMsgId),
+    index("idx_album_photos_status").on(t.sourceStatus),
+    index("idx_album_photos_observed").on(t.observedAtMs),
+  ],
+);
+
+/** ADR-260: 相册发送结果事实，append-only。 */
+export const albumUsage = sqliteTable(
+  "album_usage",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    assetId: text("asset_id").notNull(),
+    targetChatId: integer("target_chat_id").notNull(),
+    actionLogId: integer("action_log_id"),
+    sentMsgId: integer("sent_msg_id"),
+    sendMode: text("send_mode").notNull(),
+    failureCode: text("failure_code"),
+    usedAtMs: integer("used_at_ms").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    index("idx_album_usage_asset").on(t.assetId),
+    index("idx_album_usage_target").on(t.targetChatId),
+    index("idx_album_usage_used").on(t.usedAtMs),
+  ],
+);
+
+/**
+ * ADR-261: 可重建节律画像投影。
+ * 从 message_log / canonical_events 这类事实源重建；不作为历史活跃事实权威。
+ * @see docs/adr/261-rhythm-profile-projection.md
+ */
+export const rhythmProfiles = sqliteTable(
+  "rhythm_profiles",
+  {
+    entityId: text("entity_id").primaryKey(),
+    entityType: text("entity_type").notNull(),
+    sourceWindowStartMs: integer("source_window_start_ms").notNull(),
+    sourceWindowEndMs: integer("source_window_end_ms").notNull(),
+    sampleCount: integer("sample_count").notNull(),
+    bucketCount: integer("bucket_count").notNull(),
+    activeBucketCount: integer("active_bucket_count").notNull().default(0),
+    observedSpanHours: real("observed_span_hours").notNull().default(0),
+    observedDays: integer("observed_days").notNull().default(0),
+    timezoneOffsetHours: real("timezone_offset_hours").notNull().default(0),
+    enabledPeriodsJson: text("enabled_periods_json").notNull().default("[]"),
+    activeNowScore: real("active_now_score").notNull(),
+    quietNowScore: real("quiet_now_score").notNull(),
+    unusualActivityScore: real("unusual_activity_score").notNull(),
+    peakWindowsJson: text("peak_windows_json").notNull().default("[]"),
+    quietWindowsJson: text("quiet_windows_json").notNull().default("[]"),
+    confidence: text("confidence").notNull(),
+    stale: integer("stale", { mode: "boolean" }).notNull().default(false),
+    diagnosticsJson: text("diagnostics_json").notNull().default("{}"),
+    updatedAtMs: integer("updated_at_ms").notNull(),
+  },
+  (t) => [
+    index("idx_rhythm_profiles_type").on(t.entityType),
+    index("idx_rhythm_profiles_confidence").on(t.confidence),
+    index("idx_rhythm_profiles_updated").on(t.updatedAtMs),
+  ],
+);
+
+/**
+ * ADR-255: 群聊介入结果证据。
+ * 一条 Alice 出站消息最多评价一次；graph social_reception 只是后续状态投影。
+ * @see docs/adr/255-intervention-outcome-truth-model/README.md
+ */
+export const interventionOutcomeEvidence = sqliteTable(
+  "intervention_outcome_evidence",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    tick: integer("tick"),
+    channelId: text("channel_id").notNull(),
+    aliceMessageLogId: integer("alice_message_log_id").notNull(),
+    aliceMsgId: integer("alice_msg_id"),
+    aliceMessageAtMs: integer("alice_message_at_ms").notNull(),
+    evaluatedAtMs: integer("evaluated_at_ms").notNull(),
+    outcome: text("outcome").notNull(),
+    signal: real("signal"),
+    afterMessageCount: integer("after_message_count").notNull(),
+    replyToAliceCount: integer("reply_to_alice_count").notNull(),
+    hostileMatchCount: integer("hostile_match_count").notNull(),
+    sourceMessageLogIdsJson: text("source_message_log_ids_json").notNull().default("[]"),
+    previousReception: real("previous_reception"),
+    nextReception: real("next_reception"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("idx_intervention_outcome_evidence_alice_message_log").on(t.aliceMessageLogId),
+    index("idx_intervention_outcome_evidence_channel_time").on(t.channelId, t.aliceMessageAtMs),
+    index("idx_intervention_outcome_evidence_outcome").on(t.outcome),
+  ],
+);
+
+/**
+ * ADR-268: Alice self emotion episode fact ledger.
+ *
+ * Append-only authority for self affect episodes. Graph `emotion_state` is only
+ * a rebuildable current projection/cache derived from this fact stream.
+ * @see docs/adr/268-emotion-episode-state/README.md
+ */
+export const emotionEvents = sqliteTable(
+  "emotion_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    eventId: text("event_id").notNull(),
+    kind: text("kind").notNull(),
+    valence: real("valence").notNull(),
+    arousal: real("arousal").notNull(),
+    intensity: real("intensity").notNull(),
+    targetId: text("target_id"),
+    causeType: text("cause_type").notNull(),
+    causeJson: text("cause_json").notNull(),
+    createdAtMs: integer("created_at_ms").notNull(),
+    halfLifeMs: integer("half_life_ms").notNull(),
+    confidence: real("confidence").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("idx_emotion_events_event").on(t.eventId),
+    index("idx_emotion_events_created").on(t.createdAtMs),
+    index("idx_emotion_events_kind_created").on(t.kind, t.createdAtMs),
+    index("idx_emotion_events_target_created").on(t.targetId, t.createdAtMs),
+  ],
+);
+
+/**
+ * ADR-268: Alice self emotion repair fact ledger.
+ *
+ * Append-only repair accelerators. These rows reduce derived effective
+ * intensity for matching active episodes; they never mutate the episode facts.
+ * @see docs/adr/268-emotion-episode-state/README.md
+ */
+export const emotionRepairs = sqliteTable(
+  "emotion_repairs",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    repairId: text("repair_id").notNull(),
+    repairKind: text("repair_kind").notNull(),
+    emotionKind: text("emotion_kind"),
+    targetId: text("target_id"),
+    strength: real("strength").notNull(),
+    causeType: text("cause_type").notNull(),
+    causeJson: text("cause_json").notNull(),
+    createdAtMs: integer("created_at_ms").notNull(),
+    confidence: real("confidence").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("idx_emotion_repairs_repair").on(t.repairId),
+    index("idx_emotion_repairs_created").on(t.createdAtMs),
+    index("idx_emotion_repairs_kind_created").on(t.repairKind, t.createdAtMs),
+    index("idx_emotion_repairs_target_created").on(t.targetId, t.createdAtMs),
+  ],
+);
+
+/**
+ * ADR-262: Alice-centered social event facts.
+ *
+ * Append-only authority for interpersonal case facts. Current social case state
+ * (`repairState`, venue debt, boundary status) is a projection and must be
+ * rebuilt from this table rather than stored here.
+ * @see docs/adr/262-social-case-management/README.md
+ */
+export const socialEvents = sqliteTable(
+  "social_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    eventId: text("event_id").notNull(),
+    // Stable case-file handle. Facts without this are legacy relation-scoped events.
+    caseId: text("case_id"),
+    kind: text("kind").notNull(),
+    actorId: text("actor_id").notNull(),
+    targetId: text("target_id"),
+    affectedRelationA: text("affected_relation_a").notNull(),
+    affectedRelationB: text("affected_relation_b").notNull(),
+    affectedRelationKey: text("affected_relation_key").notNull(),
+    venueId: text("venue_id").notNull(),
+    visibility: text("visibility").notNull(),
+    witnessesJson: text("witnesses_json").notNull().default("[]"),
+    severity: real("severity").notNull(),
+    confidence: real("confidence").notNull(),
+    evidenceMsgIdsJson: text("evidence_msg_ids_json").notNull().default("[]"),
+    causesJson: text("causes_json").notNull().default("[]"),
+    occurredAtMs: integer("occurred_at_ms").notNull(),
+    repairsEventId: text("repairs_event_id"),
+    boundaryText: text("boundary_text"),
+    contentText: text("content_text"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("idx_social_events_event").on(t.eventId),
+    index("idx_social_events_case_time").on(t.caseId, t.occurredAtMs),
+    index("idx_social_events_relation_time").on(t.affectedRelationKey, t.occurredAtMs),
+    index("idx_social_events_kind").on(t.kind),
+    index("idx_social_events_venue_time").on(t.venueId, t.occurredAtMs),
   ],
 );
 
@@ -187,7 +760,10 @@ export const narrativeThreads = sqliteTable(
     title: text("title").notNull(),
     tensionFrame: text("tension_frame"), // 叙事张力的框架描述
     tensionStake: text("tension_stake"), // 赌注/重要性描述
-    status: text("status").notNull().default("open"), // open|active|resolved|abandoned
+    // 叙事读模型投影: open|active|resolved|abandoned|expired_unresolved。
+    // 图线程状态可用 "expired" 表示内存压力投影已离开 P4-open；
+    // narrative 状态保留明确的生命周期结果。
+    status: text("status").notNull().default("open"),
     weight: text("weight").notNull().default("minor"), // trivial|minor|major|critical
     /** ADR-190: 线程来源，区分系统线程和对话线程。 */
     source: text("source").default("conversation"), // "conversation" | "system"
@@ -208,6 +784,41 @@ export const narrativeThreads = sqliteTable(
       .$defaultFn(() => new Date()),
   },
   (t) => [index("idx_narrative_threads_status").on(t.status)],
+);
+
+/**
+ * ADR-262 Wave 4D: 线程生命周期事实。
+ *
+ * append-only authority: 记录线程为什么离开或延长 open 生命周期。
+ * `narrative_threads.status` 和图线程 attrs 都是这些事件的投影。
+ * 图 `expired` 表示“不再贡献 P4-open”；narrative `expired_unresolved`
+ * 表示“没有 resolving action，但已离开 open 生命周期”。
+ * @see docs/adr/262-social-case-management/README.md
+ */
+export const threadLifecycleEvent = sqliteTable(
+  "thread_lifecycle_event",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    threadNodeId: text("thread_node_id").notNull(),
+    threadId: integer("thread_id"),
+    tick: integer("tick").notNull(),
+    occurredAtMs: integer("occurred_at_ms").notNull(),
+    previousStatus: text("previous_status").notNull(),
+    outcome: text("outcome").notNull(),
+    reason: text("reason").notNull(),
+    deadlineMs: integer("deadline_ms"),
+    snoozeUntilMs: integer("snooze_until_ms"),
+    p4Before: real("p4_before"),
+    metadataJson: text("metadata_json").notNull().default("{}"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    index("idx_thread_lifecycle_event_thread").on(t.threadNodeId),
+    index("idx_thread_lifecycle_event_outcome").on(t.outcome),
+    index("idx_thread_lifecycle_event_tick").on(t.tick),
+  ],
 );
 
 /**

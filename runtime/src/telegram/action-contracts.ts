@@ -125,7 +125,9 @@ export const listStickersContract = resultContract(
     for (const s of data.slice(0, 15)) {
       m.line(`${s.shortName} — "${s.title}" (${s.count} stickers)`);
     }
-    m.line("→ Use `irc sticker --keyword <keyword>` to send — just describe the emotion you want.");
+    m.line(
+      "→ Use `irc sticker --keyword <keyword>` with palette dimensions: happy, sad, angry, surprised, shy, tired, love, scared, wave, hug, cry, laugh, sleep, eat, dance, thumbsup, facepalm, peek.",
+    );
     return m.build();
   },
 );
@@ -143,7 +145,7 @@ export const getStickerSetContract = resultContract(
       m.line(`${s.emoji}`);
     }
     m.line(
-      "→ Use `irc sticker --keyword <keyword>` — describe the emotion you want (e.g. '开心大笑').",
+      "→ Use `irc sticker --keyword <keyword>` with a palette dimension such as happy, shy, laugh, hug, wave, or peek.",
     );
     return m.build();
   },

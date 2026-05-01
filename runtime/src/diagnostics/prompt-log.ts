@@ -9,7 +9,7 @@
  * - 完整 system prompt
  * - 完整 user prompt
  * - LLM 生成的脚本（rawScript）
- * - TC 循环执行结果（afterward / tool calls / transcript / thinks / instructionErrors / errors / command output）
+ * - 执行结果（afterward / 调用计数 / transcript / thinks / instructionErrors / errors / command output）
  *
  * 用途：事后诊断 prompt 工程问题——看 LLM 看到了什么、产出了什么。
  *
@@ -19,8 +19,10 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { TCAssistantRoundTrace } from "../engine/tick/tc-loop.js";
+import type { IntraTickContinuationReason } from "../engine/tick/types.js";
 import type { Afterward } from "../llm/tools.js";
 import { createLogger } from "../utils/logger.js";
+import { renderDcpShadowContext } from "./dcp-shadow.js";
 
 const log = createLogger("prompt-log");
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -43,7 +45,7 @@ export interface PromptSnapshot {
   user: string;
   /** LLM 生成的脚本（rawScript，null = LLM 调用失败）。 */
   script: string | null;
-  /** TC 循环执行数据（LLM 调用成功时存在）。 */
+  /** 执行数据（LLM 调用成功时存在）。 */
   execution?: {
     afterward: Afterward;
     toolCallCount: number;
@@ -58,6 +60,8 @@ export interface PromptSnapshot {
     queryLogs: Array<{ fn: string; result: string }>;
     instructionErrors: string[];
     errors: string[];
+    hostContinuedInTick?: boolean;
+    hostContinuationReason?: IntraTickContinuationReason;
   };
 }
 
@@ -131,6 +135,10 @@ export function logPromptSnapshot(snapshot: PromptSnapshot): void {
     // User prompt
     parts.push("## User Prompt", "", "```", snapshot.user, "```", "");
 
+    // ADR-248: DCP shadow context for prompt diagnostics only.
+    // @see docs/adr/248-dcp-reference-implementation-plan/README.md §Implementation Log
+    parts.push(...renderDcpShadowContext(snapshot.target));
+
     // LLM script
     if (snapshot.script === null) {
       parts.push("## LLM Script", "", "**LLM 调用失败**", "");
@@ -150,6 +158,12 @@ export function logPromptSnapshot(snapshot: PromptSnapshot): void {
       if (ex.assistantTurnCount != null) parts.push(`- assistant turns: ${ex.assistantTurnCount}`);
       if (ex.bashCallCount != null) parts.push(`- bash calls: ${ex.bashCallCount}`);
       if (ex.signalCallCount != null) parts.push(`- signal calls: ${ex.signalCallCount}`);
+      if (ex.hostContinuedInTick != null) {
+        parts.push(`- host continued in tick: ${ex.hostContinuedInTick ? "yes" : "no"}`);
+      }
+      if (ex.hostContinuedInTick && ex.hostContinuationReason) {
+        parts.push(`- host continuation reason: ${ex.hostContinuationReason}`);
+      }
       if (ex.budgetExhausted) parts.push("- **budget exhausted**");
       parts.push("");
 

@@ -20,6 +20,9 @@ export function createClient(config: Config): TelegramClient {
     apiId: config.telegramApiId,
     apiHash: config.telegramApiHash,
     storage: "alice.session",
+    // mtcute 默认注册 SIGINT/SIGTERM exit hook，会和 Alice 自己的异步 shutdown
+    // 竞争关闭 session DB。由 runtime/src/index.ts 统一调用 destroyClient()。
+    storageOptions: { cleanup: false },
   });
 
   return _client;
@@ -63,13 +66,12 @@ export async function startClient(client: TelegramClient, phone: string): Promis
 
 /**
  * 优雅关闭。
- * try/catch: dispatcher.destroy() 可能已关闭底层连接，
- * 后续 client.destroy() 的 session save 会抛 "database connection not open"。
- * 此处静默忽略——shutdown 路径上不值得因为 session save 失败而阻塞。
+ * try/catch: shutdown 路径上不值得因为 client 清理失败而阻塞退出。
  */
 export async function destroyClient(): Promise<void> {
   try {
     if (_dispatcher) {
+      _dispatcher.unbind();
       await _dispatcher.destroy();
       _dispatcher = null;
     }

@@ -21,6 +21,7 @@ import {
   MAX_CONCURRENT_ENGAGEMENTS,
   SWITCH_COST_MS,
   selectNextEngagement,
+  watchPlanFromOutcome,
 } from "../src/engine/act/scheduler.js";
 import { ActionQueue, type ActionQueueItem } from "../src/engine/action-queue.js";
 import type { PressureDims } from "../src/utils/math.js";
@@ -62,10 +63,10 @@ function makeSlot(
 
 /** 创建一个 mock ActiveWatcher（不执行真实观察）。 */
 function mockWatcher(
-  kind: "waiting_reply" | "watching" = "waiting_reply",
+  plan: "reply_window" | "linger_window" = "reply_window",
 ): EngagementSlot["watcher"] {
   return {
-    kind,
+    plan,
     handle: { await: () => Promise.resolve({ type: "timeout", elapsed: 0 }), cancel: () => {} },
     promise: new Promise(() => {}), // 永不 resolve
     timeout: 60_000,
@@ -82,9 +83,9 @@ describe("ADR-130: selectNextEngagement", () => {
     expect(next?.urgency).toBe(8);
   });
 
-  it("跳过 waiting/watching/done 的 slot", () => {
+  it("跳过 runtime watch / done 的 slot", () => {
     const slots = [
-      makeSlot("channel:a", 10, "waiting"),
+      makeSlot("channel:a", 10, "reply_watch"),
       makeSlot("channel:b", 5, "done"),
       makeSlot("channel:c", 3, "ready"),
     ];
@@ -95,7 +96,7 @@ describe("ADR-130: selectNextEngagement", () => {
   });
 
   it("所有 slot 都不是 ready 时返回 null", () => {
-    const slots = [makeSlot("channel:a", 10, "waiting"), makeSlot("channel:b", 5, "watching")];
+    const slots = [makeSlot("channel:a", 10, "reply_watch"), makeSlot("channel:b", 5, "linger_watch")];
 
     expect(selectNextEngagement(slots)).toBeNull();
   });
@@ -114,8 +115,8 @@ describe("ADR-130: selectNextEngagement", () => {
 });
 
 describe("ADR-130: checkWatchers", () => {
-  it("无活跃 watcher 的 waiting slot 标记为 done", () => {
-    const slot = makeSlot("channel:a", 5, "waiting");
+  it("无活跃 watcher 的 runtime watch slot 标记为 done", () => {
+    const slot = makeSlot("channel:a", 5, "reply_watch");
     // slot.watcher 默认就是 null
 
     const slots = [slot];
@@ -124,14 +125,14 @@ describe("ADR-130: checkWatchers", () => {
     expect(slot.state).toBe("done");
   });
 
-  it("有活跃 watcher 的 waiting slot 保持不变", () => {
-    const slot = makeSlot("channel:a", 5, "waiting");
+  it("有活跃 watcher 的 runtime watch slot 保持不变", () => {
+    const slot = makeSlot("channel:a", 5, "reply_watch");
     slot.watcher = mockWatcher();
 
     const slots = [slot];
     checkWatchers(slots);
 
-    expect(slot.state).toBe("waiting");
+    expect(slot.state).toBe("reply_watch");
   });
 
   it("ready 和 done 的 slot 不受影响", () => {
@@ -143,6 +144,16 @@ describe("ADR-130: checkWatchers", () => {
 
     expect(readySlot.state).toBe("ready");
     expect(doneSlot.state).toBe("done");
+  });
+});
+
+describe("ADR-130: watch plan mapping", () => {
+  it("waiting_reply → reply_window", () => {
+    expect(watchPlanFromOutcome("waiting_reply")).toBe("reply_window");
+  });
+
+  it("watching → linger_window", () => {
+    expect(watchPlanFromOutcome("watching")).toBe("linger_window");
   });
 });
 
@@ -211,11 +222,11 @@ describe("ADR-130: 交错调度行为", () => {
     const r1 = selectNextEngagement(slots);
     expect(r1?.item.target).toBe("channel:a");
 
-    // 模拟 channel:a 进入 expect_reply → waiting
-    r1!.state = "waiting";
+    // 模拟 channel:a 进入 expect_reply → reply_watch
+    r1!.state = "reply_watch";
     r1!.watcher = mockWatcher();
 
-    // 第二轮：跳过 waiting 的 channel:a，选择次紧急的 channel:c
+    // 第二轮：跳过 runtime watch 中的 channel:a，选择次紧急的 channel:c
     const r2 = selectNextEngagement(slots);
     expect(r2?.item.target).toBe("channel:c");
 
@@ -227,21 +238,21 @@ describe("ADR-130: 交错调度行为", () => {
     expect(r3?.item.target).toBe("channel:b");
   });
 
-  it("expect_reply 释放调度权：waiting slot 被跳过", () => {
-    const waiting = makeSlot("channel:a", 10, "waiting");
+  it("expect_reply 释放调度权：reply_watch slot 被跳过", () => {
+    const waiting = makeSlot("channel:a", 10, "reply_watch");
     waiting.watcher = mockWatcher();
     const ready = makeSlot("channel:b", 2, "ready");
 
     const next = selectNextEngagement([waiting, ready]);
-    // 即使 channel:a 紧急度更高，但它在 waiting，所以选择 channel:b
+    // 即使 channel:a 紧急度更高，但它处于 runtime watch，所以选择 channel:b
     expect(next?.item.target).toBe("channel:b");
   });
 
-  it("所有 slot waiting → 无可调度的 engagement", () => {
-    const a = makeSlot("channel:a", 10, "waiting");
+  it("所有 slot 都在 runtime watch → 无可调度的 engagement", () => {
+    const a = makeSlot("channel:a", 10, "reply_watch");
     a.watcher = mockWatcher();
-    const b = makeSlot("channel:b", 5, "waiting");
-    b.watcher = mockWatcher();
+    const b = makeSlot("channel:b", 5, "linger_watch");
+    b.watcher = mockWatcher("linger_window");
 
     expect(selectNextEngagement([a, b])).toBeNull();
   });

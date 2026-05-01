@@ -53,7 +53,11 @@ function makeDbRecord(
   } = {},
 ) {
   return {
+    platform: "telegram",
     msgId,
+    nativeChatId: "123",
+    nativeMsgId: String(msgId),
+    stableMessageId: `message:telegram:123:${msgId}`,
     tick: msgId,
     senderId: opts.senderId ?? null,
     senderName: opts.senderName ?? "User",

@@ -22,8 +22,10 @@ import type { Config } from "../../config.js";
 // applyFeedbackArc 不再被调用。Wave B 将清理。
 import type { Dispatcher } from "../../core/dispatcher.js";
 import { getDb } from "../../db/connection.js";
+import { writeQueueTrace } from "../../db/observation-spine.js";
 import { PRESSURE_TYPICAL_SCALES } from "../../graph/constants.js";
 import type { WorldModel } from "../../graph/world-model.js";
+import { ChatTarget } from "../../prompt/types.js";
 import type { EventBuffer } from "../../telegram/events.js";
 import { isGroupOutboundBlocked } from "../../telegram/membership-guard.js";
 import { createLogger } from "../../utils/logger.js";
@@ -33,6 +35,7 @@ import { fetchRecentMessages } from "../act/messages.js";
 import {
   awaitAnyWakeup,
   checkWatchers,
+  type DeferredTurnOutcome,
   type EngagementSlot,
   initSlot,
   MAX_CONCURRENT_ENGAGEMENTS,
@@ -40,16 +43,18 @@ import {
   SWITCH_COST_MS,
   selectNextEngagement,
   startWatcher,
-  type WatchKind,
+  watchPlanFromOutcome,
 } from "../act/scheduler.js";
 import type { ActionQueue, ActionQueueItem } from "../action-queue.js";
 import { measureClosureDepth } from "../closure-depth.js";
 import { commitActEvents } from "../consciousness.js";
 import { runTickSubcycle } from "../tick/bridge.js";
-import { ChatTarget } from "../../prompt/types.js";
 import { processResult } from "./feedback-arc.js";
 
 const log = createLogger("react:orchestrator");
+
+/** afterward=resting 的最小结构化离席窗口。更长的夜间节律由 dormant FSM 接管。 */
+const RESTING_DURATION_MS = 30 * 60 * 1000;
 
 // ── ActContext: 行动循环上下文（与旧 loop.ts 兼容）────────────────────────
 
@@ -128,6 +133,7 @@ async function finalizeSlot(ctx: ActContext, slot: EngagementSlot): Promise<void
         subcycles: session.subcycle,
         durationMs: session.elapsed,
         outcome: session.outcome,
+        failureKind: session.failureKind,
       },
       session.lastTcMeta,
     );
@@ -236,6 +242,20 @@ export async function startReActLoop(ctx: ActContext): Promise<void> {
           }
         }
         if (item.target) ctx.queue.markComplete(item.target);
+        if (item.observation) {
+          const metrics = ctx.queue.getMetrics();
+          writeQueueTrace({
+            tick,
+            candidateId: item.observation.candidateId,
+            enqueueId: item.observation.enqueueId,
+            enqueueOutcome: "accepted",
+            fate: "expired",
+            queueDepth: metrics.queued,
+            activeCount: metrics.active,
+            saturation: metrics.saturation,
+            reasonCode: "stale_pressure_snapshot",
+          });
+        }
         continue;
       }
 
@@ -246,10 +266,38 @@ export async function startReActLoop(ctx: ActContext): Promise<void> {
         if (await isGroupOutboundBlocked(ctx.client, ctx.G, item.target, rawId)) {
           log.info("Engagement skipped: not a group member", { target: item.target });
           ctx.queue.markComplete(item.target);
+          if (item.observation) {
+            const metrics = ctx.queue.getMetrics();
+            writeQueueTrace({
+              tick,
+              candidateId: item.observation.candidateId,
+              enqueueId: item.observation.enqueueId,
+              enqueueOutcome: "accepted",
+              fate: "dropped",
+              queueDepth: metrics.queued,
+              activeCount: metrics.active,
+              saturation: metrics.saturation,
+              reasonCode: "membership_blocked",
+            });
+          }
           continue;
         }
       }
 
+      if (item.observation) {
+        const metrics = ctx.queue.getMetrics();
+        writeQueueTrace({
+          tick,
+          candidateId: item.observation.candidateId,
+          enqueueId: item.observation.enqueueId,
+          enqueueOutcome: "accepted",
+          fate: "executed",
+          queueDepth: metrics.queued,
+          activeCount: metrics.active,
+          saturation: metrics.saturation,
+          reasonCode: "slot_created",
+        });
+      }
       const slot = await initSlot(ctx, item);
       active.push(slot);
       log.info("Engagement slot created", {
@@ -261,13 +309,13 @@ export async function startReActLoop(ctx: ActContext): Promise<void> {
 
     if (active.length === 0) continue;
 
-    // ── 2. 检查 waiting/watching 的 slot 是否有事件唤醒 ──
+    // ── 2. 检查 watch slot 是否有事件唤醒 ──
     checkWatchers(active);
 
     // ── 3. 选择下一个 ready 的 engagement ──
     const next = selectNextEngagement(active);
     if (!next) {
-      // 所有 slot 都在 waiting/watching — await 任意一个唤醒
+      // 所有 slot 都在 runtime watch 中 — await 任意一个唤醒
       await awaitAnyWakeup(active, ctx.queue);
       // 唤醒后继续循环（checkWatchers 会更新状态）
       // 清理 done 的 slot
@@ -346,12 +394,12 @@ export async function startReActLoop(ctx: ActContext): Promise<void> {
     // ADR-204: 意识流事件 emit（执行级）
     try {
       // ADR-214 Wave A: SubcycleResult 不再有 actions/instructions。
-      // 传递空数组维持 consciousness 接口。completedActions 暂未传递（SubcycleResult 无此字段）。
+      // shell-native 副作用通过 execution.completedActions 传递。
       commitActEvents(
         getDb(),
         tick,
         Date.now(),
-        { instructions: [], actions: [] },
+        { instructions: [], actions: [], completedActions: sub.execution.completedActions },
         next.item.target ?? null,
       );
     } catch (e) {
@@ -368,11 +416,40 @@ export async function startReActLoop(ctx: ActContext): Promise<void> {
     if (
       sub.outcome === "terminal" ||
       sub.outcome === "empty" ||
+      sub.outcome === "resting" ||
       sub.outcome === "fed_up" ||
       sub.outcome === "cooling_down"
     ) {
       if (sub.outcome === "empty") {
         next.session.outcome = "llm_failed";
+      } else if (sub.outcome === "resting") {
+        next.session.outcome = "resting";
+        const now = Date.now();
+        if (ctx.G.has("self")) {
+          ctx.G.updateAgent("self", {
+            resting_since_ms: now,
+            resting_until_ms: now + RESTING_DURATION_MS,
+            resting_reason: "afterward=resting",
+          });
+        }
+        if (next.targetChannelId) {
+          const { findActiveConversation } = await import("../../graph/queries.js");
+          const convId = findActiveConversation(ctx.G, next.targetChannelId);
+          if (convId && ctx.G.has(convId)) {
+            ctx.G.updateConversation(convId, {
+              state: "closing",
+              turn_state: "closed",
+              closing_since_ms: now,
+            });
+            log.info("resting: conversation → closing", {
+              target: next.targetChannelId,
+              convId,
+            });
+          }
+          if (ctx.G.has(next.targetChannelId)) {
+            ctx.G.updateChannel(next.targetChannelId, { pending_directed: 0 });
+          }
+        }
       } else if (sub.outcome === "fed_up" || sub.outcome === "cooling_down") {
         next.session.outcome = sub.outcome;
         // 告别承诺：将 target 的活跃 conversation 转为 closing + turn_state: closed。
@@ -407,9 +484,9 @@ export async function startReActLoop(ctx: ActContext): Promise<void> {
       }
       next.state = "done";
     } else if (sub.outcome === "waiting_reply" || sub.outcome === "watching") {
-      // ADR-130: waiting_reply/watching 非阻塞化
-      // 将 slot 标记为 waiting/watching，scheduler 跳过它处理其他 engagement
-      startWatcher(ctx, next, sub.outcome as WatchKind);
+      // ADR-130: deferred afterward 非阻塞化
+      // LLM 的 afterward 是对话语义；scheduler 内部转换成 runtime watch plan。
+      startWatcher(ctx, next, watchPlanFromOutcome(sub.outcome as DeferredTurnOutcome));
       log.info(`Engagement ${sub.outcome}`, {
         target: next.item.target,
         subcycle: next.session.subcycle,

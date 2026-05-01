@@ -11,8 +11,8 @@
  */
 
 import type { ActionRuntimeConfig } from "../../core/action-executor.js";
-import { executeShellScript } from "../../core/shell-executor.js";
 import { getDb } from "../../db/connection.js";
+import { type AvailableProvider, selectProviderForTick } from "../../llm/client.js";
 import { TELEGRAM_ACTIONS } from "../../telegram/actions/index.js";
 import { hasPaletteEntries } from "../../telegram/apps/sticker-palette.js";
 import type { PressureDims } from "../../utils/math.js";
@@ -74,14 +74,12 @@ function deriveFeatureFlags(ctx: ActContext): FeatureFlags {
 function toSubcycleResult(result: TickResult): SubcycleResult {
   return {
     outcome: result.outcome,
-    thinks: result.thinks,
-    queryLogs: result.queryLogs,
-    instructionErrors: result.instructionErrors,
+    execution: result.execution,
     duration: result.duration,
-    errors: result.errors,
     roundsUsed: result.stepsUsed,
     episodeRounds: result.episodeRounds,
     tcMeta: result.tcMeta,
+    failureKind: result.failureKind,
   };
 }
 
@@ -89,16 +87,10 @@ function toSubcycleResult(result: TickResult): SubcycleResult {
 // TickDeps 组装
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * 从 ActContext 组装 TickDeps。
- *
- * 每个 dep 是对现有模块函数的薄包装，确保签名对齐 TickDeps 接口。
- * ADR-169: 包含 resolveQueries — 查询动作 inline 解析的完整闭环。
- */
 function buildTickDeps(): TickDeps {
   return {
-    callLLM: async (system, user, tick, target, voice, contextVars) => {
-      return callTickLLM(system, user, tick, target, voice, contextVars);
+    callLLM: async (system, user, tick, target, voice, contextVars, selectedProvider) => {
+      return callTickLLM(system, user, tick, target, voice, contextVars, selectedProvider);
     },
 
     // ADR-214 Wave A: resolveQueries 已删除。
@@ -116,6 +108,7 @@ function buildTickDeps(): TickDeps {
 type TickRunContext = TickPromptContext & {
   client: unknown;
   runtimeConfig: ActionRuntimeConfig;
+  llmProvider: AvailableProvider;
 };
 
 /** tick() 运行所需的全部预备产物。 */
@@ -160,6 +153,7 @@ function buildTickRunContext(
   currentTick: number,
   messages: MessageRecord[],
   observations: string[],
+  llmProvider: AvailableProvider,
 ): TickRunContext {
   return {
     G: ctx.G,
@@ -173,6 +167,7 @@ function buildTickRunContext(
     round: 0,
     client: ctx.client,
     runtimeConfig: extractRuntimeConfig(ctx.config),
+    llmProvider,
   };
 }
 
@@ -199,8 +194,16 @@ export async function runTickSubcycle(
   _session: EngagementSession,
 ): Promise<SubcycleResult> {
   const { board, allTools, deps } = prepareTickRun(ctx, item, contextVars ?? {});
+  const llmProvider = selectProviderForTick();
 
-  const tickCtx = buildTickRunContext(ctx, item, currentTick, liveMessages, board.observations);
+  const tickCtx = buildTickRunContext(
+    ctx,
+    item,
+    currentTick,
+    liveMessages,
+    board.observations,
+    llmProvider,
+  );
   const result = await tick(board, allTools, deps, tickCtx);
   // ADR-215: 将 LLM residue 透传到 ActionQueueItem → processResult 消费
   if (result.llmResidue) item.llmResidue = result.llmResidue;

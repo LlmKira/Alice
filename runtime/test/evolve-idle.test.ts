@@ -6,9 +6,12 @@
  * - 有行动时不触发 idle
  * - idle 触发后 lastActionTick 重置
  */
+import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config.js";
-import { closeDb, initDb } from "../src/db/connection.js";
+import { closeDb, getDb, initDb } from "../src/db/connection.js";
+import { listDecisionTraces } from "../src/db/decision-trace.js";
+import { candidateTrace, queueTrace, tickTrace } from "../src/db/schema.js";
 
 // ADR-190: isAnyProviderHealthy() 门控——测试无 LLM provider，需 mock 为 true。
 vi.mock("../src/llm/client.js", () => ({
@@ -19,12 +22,13 @@ beforeEach(() => initDb(":memory:"));
 afterEach(() => closeDb());
 
 import type { Dispatcher } from "../src/core/dispatcher.js";
-import { ActionQueue } from "../src/engine/action-queue.js";
+import { ActionQueue, type ActionQueueItem } from "../src/engine/action-queue.js";
 import { createDeliberationState } from "../src/engine/deliberation.js";
 import { type EvolveState, evolveTick } from "../src/engine/evolve.js";
 import { WorldModel } from "../src/graph/world-model.js";
 import { AdaptiveKappa } from "../src/pressure/aggregate.js";
 import { EventBuffer } from "../src/telegram/events.js";
+import type { PressureDims } from "../src/utils/math.js";
 import { TickClock } from "../src/utils/time.js";
 import { PersonalityVector } from "../src/voices/personality.js";
 
@@ -110,6 +114,80 @@ function buildIdleState(
   };
 }
 
+function makeQueuedItem(target: string, pressure = 1): ActionQueueItem {
+  const dims: PressureDims = [pressure, 0, 0, 0, 0, 0];
+  return {
+    enqueueTick: 1,
+    action: "sociability",
+    target,
+    pressureSnapshot: dims,
+    contributions: {},
+  };
+}
+
+function fillQueueToBackpressureThreshold(queue: ActionQueue): void {
+  const targetDepth = Math.ceil(ActionQueue.MAX_DEPTH * 0.8);
+  for (let i = 0; i < targetDepth; i++) {
+    queue.enqueue(makeQueuedItem(`channel:queued-${i}`));
+  }
+}
+
+function buildProactiveIausState(): EvolveState {
+  const now = Date.now();
+  const state = buildIdleState({ lastActionMs: now, idleThreshold: 999 });
+  state.config.actionRateFloor = 0.0;
+  state.config.rateCap = { private: 100, group: 100, channel: 100, bot: 0 };
+  state.config.s10LeakProb = 0;
+  state.config.eta = 0;
+  state.config.iausDeterministic = true;
+
+  state.G.addContact("contact:252", {
+    tier: 5,
+    last_active_ms: now - 7 * 86_400_000,
+  });
+  state.G.addChannel("channel:252", {
+    unread: 0,
+    tier_contact: 5,
+    chat_type: "private",
+    pending_directed: 0,
+    last_directed_ms: 0,
+    last_activity_ms: now - 7 * 86_400_000,
+    consecutive_outgoing: 0,
+  });
+  state.G.addRelation("self", "monitors", "channel:252");
+  return state;
+}
+
+function buildDirectedIausState(): EvolveState {
+  const now = Date.now();
+  const state = buildIdleState({ lastActionMs: now, idleThreshold: 999 });
+  state.config.actionRateFloor = 0.0;
+  state.config.rateCap = { private: 100, group: 100, channel: 100, bot: 0 };
+  state.config.s10LeakProb = 0;
+  state.config.eta = 0;
+  state.config.iausDeterministic = true;
+
+  state.G.addChannel("channel:253", {
+    unread: 50,
+    tier_contact: 5,
+    chat_type: "private",
+    pending_directed: 5,
+    last_directed_ms: now,
+    last_incoming_ms: now,
+    last_activity_ms: now,
+    consecutive_outgoing: 0,
+  });
+  state.G.addRelation("self", "monitors", "channel:253");
+  state.buffer.push({
+    type: "new_message",
+    channelId: "channel:253",
+    isDirected: true,
+    tick: 1,
+    novelty: 0.8,
+  });
+  return state;
+}
+
 // -- 测试 -------------------------------------------------------------------
 
 describe("★A1+A3 空闲自启动", () => {
@@ -126,6 +204,16 @@ describe("★A1+A3 空闲自启动", () => {
     // 验证入队的是声部竞争结果（空图下 action 由 ε 噪声决定，target 为 null）
     const item = await state.queue.dequeue();
     expect(item).toMatchObject({ target: null });
+
+    const traces = listDecisionTraces({ tick: 1, phase: "evolve" });
+    const enqueueTrace = traces.find((trace) => trace.finalDecision === "enqueue");
+    expect(enqueueTrace).toBeDefined();
+    expect(enqueueTrace?.payload.selectedAction).toBe(item?.action);
+
+    const tickRow = getDb().select().from(tickTrace).where(eq(tickTrace.tick, 1)).get();
+    const queueRow = getDb().select().from(queueTrace).where(eq(queueTrace.tick, 1)).get();
+    expect(tickRow?.selectedCandidateId).toBe(item?.observation?.candidateId);
+    expect(queueRow?.candidateId).toBe(tickRow?.selectedCandidateId);
   });
 
   it("idle 触发后 lastActionMs 重置", () => {
@@ -509,6 +597,145 @@ describe("★A1+A3 空闲自启动", () => {
 });
 
 // ADR-81: gateReflectionGuarantee 测试已移除（Reflection 声部已消除）。
+
+describe("ADR-252: IAUS queue backpressure", () => {
+  it("未饱和时同一个普通 proactive IAUS 目标可以入队", () => {
+    const state = buildProactiveIausState();
+
+    const triggered = evolveTick(state);
+
+    expect(triggered).toBe(true);
+    expect(state.queue.length).toBe(1);
+    expect(state.queue.isTargetActive("channel:252")).toBe(true);
+  });
+
+  it("入队 tick 记录落选 IAUS 候选，给 social-cost 反事实提供真实分母", () => {
+    const state = buildProactiveIausState();
+
+    const triggered = evolveTick(state);
+
+    expect(triggered).toBe(true);
+    const rows = getDb()
+      .select({
+        selected: candidateTrace.selected,
+        silenceReason: candidateTrace.silenceReason,
+        gatePlane: candidateTrace.gatePlane,
+        candidateRank: candidateTrace.candidateRank,
+        deltaP: candidateTrace.deltaP,
+        socialCost: candidateTrace.socialCost,
+        netValue: candidateTrace.netValue,
+        bottleneck: candidateTrace.bottleneck,
+      })
+      .from(candidateTrace)
+      .where(eq(candidateTrace.tick, 1))
+      .all();
+
+    expect(rows.some((row) => row.selected)).toBe(true);
+    const losing = rows.filter((row) => !row.selected);
+    expect(losing.length).toBeGreaterThan(0);
+    expect(losing.every((row) => row.silenceReason === "lost_candidate")).toBe(true);
+    expect(losing.every((row) => row.gatePlane === "iaus_competition")).toBe(true);
+    expect(losing.every((row) => row.candidateRank !== null)).toBe(true);
+    expect(losing.every((row) => typeof row.deltaP === "number")).toBe(true);
+    expect(losing.every((row) => typeof row.socialCost === "number")).toBe(true);
+    expect(losing.every((row) => typeof row.netValue === "number")).toBe(true);
+    expect(losing.every((row) => typeof row.bottleneck === "string")).toBe(true);
+  });
+
+  it("队列饱和时抑制非 bypass IAUS 赢家且不入队", () => {
+    const state = buildProactiveIausState();
+    fillQueueToBackpressureThreshold(state.queue);
+    const beforeMetrics = state.queue.getMetrics();
+
+    const triggered = evolveTick(state);
+
+    expect(beforeMetrics.saturation).toBeGreaterThanOrEqual(0.8);
+    expect(triggered).toBe(false);
+    expect(state.queue.getMetrics()).toMatchObject(beforeMetrics);
+    expect(state.queue.isTargetActive("channel:252")).toBe(false);
+    expect(state.recentActions).toHaveLength(0);
+
+    const traces = listDecisionTraces({ tick: 1, phase: "evolve" });
+    const silenceTrace = traces.find((trace) => trace.finalDecision === "silence");
+    expect(silenceTrace?.payload.reason).toBe("queue_backpressure");
+    expect(silenceTrace?.payload.values).toMatchObject({
+      queueActive: beforeMetrics.active,
+      queueSaturation: beforeMetrics.saturation,
+      queueBackpressureThreshold: 0.8,
+    });
+  });
+
+  it("队列饱和时不抑制 directed bypass IAUS 赢家", () => {
+    const state = buildDirectedIausState();
+    fillQueueToBackpressureThreshold(state.queue);
+    const beforeLength = state.queue.length;
+
+    const triggered = evolveTick(state);
+
+    expect(triggered).toBe(true);
+    expect(state.queue.length).toBe(beforeLength + 1);
+    expect(state.queue.isTargetActive("channel:253")).toBe(true);
+  });
+});
+
+describe("post-wakeup recovery target spread control", () => {
+  it("恢复窗口内超过目标预算时抑制普通 proactive 新目标", () => {
+    const state = buildProactiveIausState();
+    state.mode = "patrol";
+    state.wakeupRecoveryUntilMs = Date.now() + 600_000;
+    state.wakeupEngagedTargets = new Set(["channel:open-a", "channel:open-b"]);
+
+    const triggered = evolveTick(state);
+
+    expect(triggered).toBe(false);
+    expect(state.queue.length).toBe(0);
+    expect(state.recentActions).toHaveLength(0);
+
+    const traces = listDecisionTraces({ tick: 1, phase: "evolve" });
+    const silenceTrace = traces.find((trace) => trace.finalDecision === "silence");
+    expect(silenceTrace?.payload.reason).toBe("post_wakeup_recovery");
+    expect(silenceTrace?.target).toBe("channel:252");
+  });
+
+  it("恢复窗口内允许继续已接触目标", () => {
+    const state = buildProactiveIausState();
+    state.mode = "patrol";
+    state.wakeupRecoveryUntilMs = Date.now() + 600_000;
+    state.wakeupEngagedTargets = new Set(["channel:252", "channel:open-b"]);
+
+    const triggered = evolveTick(state);
+
+    expect(triggered).toBe(true);
+    expect(state.queue.length).toBe(1);
+    expect(state.queue.isTargetActive("channel:252")).toBe(true);
+  });
+
+  it("恢复窗口内不抑制 directed bypass 赢家", () => {
+    const state = buildDirectedIausState();
+    state.mode = "patrol";
+    state.wakeupRecoveryUntilMs = Date.now() + 600_000;
+    state.wakeupEngagedTargets = new Set(["channel:open-a", "channel:open-b"]);
+
+    const triggered = evolveTick(state);
+
+    expect(triggered).toBe(true);
+    expect(state.queue.length).toBe(1);
+    expect(state.queue.isTargetActive("channel:253")).toBe(true);
+  });
+
+  it("恢复窗口结束后允许普通 proactive 新目标", () => {
+    const state = buildProactiveIausState();
+    state.mode = "patrol";
+    state.wakeupRecoveryUntilMs = Date.now() - 1;
+    state.wakeupEngagedTargets = new Set(["channel:open-a", "channel:open-b"]);
+
+    const triggered = evolveTick(state);
+
+    expect(triggered).toBe(true);
+    expect(state.queue.length).toBe(1);
+    expect(state.queue.isTargetActive("channel:252")).toBe(true);
+  });
+});
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ADR-136: proactive cooldown → C_sat σ_cool 连续惩罚

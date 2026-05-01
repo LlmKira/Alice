@@ -20,6 +20,7 @@ import { execFileSync } from "node:child_process";
 let _knownCommands = new Set<string>([
   // 内置系统命令（始终可用）
   "irc",
+  "album",
   "self",
   "alice-pkg",
   // shell 内建
@@ -46,8 +47,9 @@ let _knownCommands = new Set<string>([
   "cut",
   "date",
   "sleep",
-  "man",
 ]);
+
+let _knownSubcommands = new Map<string, Set<string>>();
 
 /** 从 CommandCatalog 注入额外命令名（启动时调用）。 */
 export function registerKnownCommands(names: Iterable<string>): void {
@@ -56,9 +58,15 @@ export function registerKnownCommands(names: Iterable<string>): void {
   }
 }
 
+/** 从真实 CLI 定义注入子命令名（启动时调用）。 */
+export function registerKnownSubcommands(command: string, names: Iterable<string>): void {
+  _knownSubcommands.set(command, new Set(names));
+}
+
 /** 重置（测试用）。 */
 export function resetKnownCommands(): void {
-  _knownCommands = new Set(["irc", "self", "engine", "alice-pkg"]);
+  _knownCommands = new Set(["irc", "album", "self", "engine", "alice-pkg"]);
+  _knownSubcommands = new Map<string, Set<string>>();
 }
 
 /** 获取当前已知命令集（测试/调试用）。 */
@@ -68,7 +76,15 @@ export function getKnownCommands(): ReadonlySet<string> {
 
 // ── 验证逻辑 ──────────────────────────────────────────────────────────────
 
+export type ValidationErrorCode =
+  | "no_executable"
+  | "shell_syntax"
+  | "invalid_message_ref"
+  | "unknown_subcommand"
+  | "unknown_command";
+
 export interface ValidationError {
+  code: ValidationErrorCode;
   line: number;
   message: string;
 }
@@ -91,6 +107,7 @@ export function validateScript(script: string): ValidationResult {
   //    防止 LLM 输出纯自然语言或只有注释 → 浪费 Docker 执行
   if (!hasExecutableCommand(script)) {
     errors.push({
+      code: "no_executable",
       line: 1,
       message: "Script has no executable commands — only comments or empty lines",
     });
@@ -107,8 +124,10 @@ export function validateScript(script: string): ValidationResult {
 
   // 2. 命令名校验（仅在语法正确时检查，避免噪音）
   if (syntaxErrors.length === 0) {
+    errors.push(...checkIrcMessageRefs(script));
     const cmdErrors = checkCommandNames(script);
     errors.push(...cmdErrors);
+    errors.push(...checkSubcommandNames(script));
   }
 
   const valid = errors.length === 0;
@@ -147,6 +166,7 @@ function checkBashSyntax(script: string): ValidationError[] {
       const match = line.match(/line (\d+): (.+)/);
       if (match) {
         errors.push({
+          code: "shell_syntax",
           line: Number.parseInt(match[1], 10),
           message: `syntax error: ${match[2]}`,
         });
@@ -155,11 +175,53 @@ function checkBashSyntax(script: string): ValidationError[] {
 
     // 如果没能解析出结构化错误，至少返回原始 stderr
     if (errors.length === 0 && stderr.trim()) {
-      errors.push({ line: 1, message: `syntax error: ${stderr.trim().slice(0, 200)}` });
+      errors.push({
+        code: "shell_syntax",
+        line: 1,
+        message: `syntax error: ${stderr.trim().slice(0, 200)}`,
+      });
     }
 
     return errors;
   }
+}
+
+function checkIrcMessageRefs(script: string): ValidationError[] {
+  const errors: ValidationError[] = [];
+  const lines = splitLinesWithQuoteState(script);
+
+  for (let i = 0; i < lines.length; i++) {
+    const { line, startsInQuote } = lines[i];
+    if (startsInQuote) continue;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    if (/(^|[\s;])--ref(?:=|\s+)#?(?:latest|last|recent)\b/i.test(line)) {
+      errors.push({
+        code: "invalid_message_ref",
+        line: i + 1,
+        message:
+          "invalid --ref alias; use a visible current-chat msgId such as 12099, never latest",
+      });
+    }
+    if (/(^|[\s;])--ref(?:=|\s+)#\d+\b/.test(line)) {
+      errors.push({
+        code: "invalid_message_ref",
+        line: i + 1,
+        message:
+          "bare --ref #msgId starts a shell comment; use --ref 12099 without #, or quote '#12099'",
+      });
+    }
+    if (/(^|[\s;])--ref(?:=|\s+)(?:['"]?\$|\$\()/i.test(line)) {
+      errors.push({
+        code: "invalid_message_ref",
+        line: i + 1,
+        message: "--ref must be a literal visible msgId, not a shell variable or parsed CLI output",
+      });
+    }
+  }
+
+  return errors;
 }
 
 // ── 命令名校验 ──────────────────────────────────────────────────────────
@@ -171,10 +233,12 @@ function checkBashSyntax(script: string): ValidationError[] {
 /** 命令名校验：每个非注释非空行的首 token 是否已知。 */
 function checkCommandNames(script: string): ValidationError[] {
   const errors: ValidationError[] = [];
-  const lines = script.split("\n");
+  const lines = splitLinesWithQuoteState(script);
 
   for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
+    const { line, startsInQuote } = lines[i];
+    if (startsInQuote) continue;
+    const trimmed = line.trim();
     // 跳过空行、注释、shebang
     if (!trimmed || trimmed.startsWith("#")) continue;
 
@@ -193,11 +257,86 @@ function checkCommandNames(script: string): ValidationError[] {
       const msg = suggestion
         ? `unknown command '${firstToken}', did you mean '${suggestion}'?`
         : `unknown command '${firstToken}'`;
-      errors.push({ line: i + 1, message: msg });
+      errors.push({ code: "unknown_command", line: i + 1, message: msg });
     }
   }
 
   return errors;
+}
+
+function checkSubcommandNames(script: string): ValidationError[] {
+  const errors: ValidationError[] = [];
+  const lines = splitLinesWithQuoteState(script);
+
+  for (let i = 0; i < lines.length; i++) {
+    const { line, startsInQuote } = lines[i];
+    if (startsInQuote) continue;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(trimmed)) continue;
+
+    const tokens = trimmed.split(/\s+/);
+    const command = tokens[0];
+    const known = _knownSubcommands.get(command);
+    if (!known) continue;
+
+    const subcommand = tokens[1];
+    if (!subcommand || subcommand.startsWith("-")) continue;
+    if (known.has(subcommand)) continue;
+
+    const suggestion = findClosest(subcommand, known);
+    const msg = suggestion
+      ? `unknown ${command} subcommand '${subcommand}', did you mean '${suggestion}'?`
+      : `unknown ${command} subcommand '${subcommand}'`;
+    errors.push({ code: "unknown_subcommand", line: i + 1, message: msg });
+  }
+
+  return errors;
+}
+
+interface ScriptLineState {
+  line: string;
+  startsInQuote: boolean;
+}
+
+function splitLinesWithQuoteState(script: string): ScriptLineState[] {
+  const result: ScriptLineState[] = [];
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+
+  for (const line of script.split("\n")) {
+    result.push({ line, startsInQuote: quote !== null });
+
+    for (const ch of line) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+
+      if (quote === "'") {
+        if (ch === "'") quote = null;
+        continue;
+      }
+
+      if (quote === '"') {
+        if (ch === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (ch === '"') quote = null;
+        continue;
+      }
+
+      if (ch === "#") break;
+      if (ch === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (ch === "'" || ch === '"') quote = ch;
+    }
+  }
+
+  return result;
 }
 
 const SHELL_KEYWORDS = new Set([

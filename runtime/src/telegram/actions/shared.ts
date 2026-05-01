@@ -93,9 +93,14 @@ export const ALLOWED_REACTIONS = new Set([
   "😡",
 ]);
 
+/** Telegram reaction 比较前的 Unicode 归一化。 */
+export function normalizeReactionEmoji(emoji: string): string {
+  return emoji.trim().replace(/\uFE0F/g, "");
+}
+
 /** Zod schema：coerce + 白名单验证。沙箱录入阶段即拦截非法 emoji。 */
 export const TelegramReactionSchema = z.preprocess(
-  (v) => (v == null ? "" : String(v)),
+  (v) => (v == null ? "" : normalizeReactionEmoji(String(v))),
   z.string().refine((s) => ALLOWED_REACTIONS.has(s), {
     message: "Not a valid Telegram reaction emoji",
   }),

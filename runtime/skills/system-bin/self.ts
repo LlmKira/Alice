@@ -9,6 +9,7 @@
  */
 
 import { defineCommand, runMain } from "citty";
+import { resolveTarget } from "../../src/system/chat-client.ts";
 import {
   enginePostJson,
   extractJsonFlag,
@@ -20,6 +21,22 @@ import {
 /** kebab-case → snake_case。 */
 function toSnake(kebab: string): string {
   return kebab.replace(/-/g, "_");
+}
+
+function isFailureResult(value: unknown): value is { success: false; error?: unknown } {
+  return (
+    value != null &&
+    typeof value === "object" &&
+    (value as Record<string, unknown>).success === false
+  );
+}
+
+async function prepareCommandBody(command: string, body: Record<string, unknown>) {
+  if (command !== "attention_pull" && command !== "switch_chat") return body;
+  const rawTo = body.to;
+  if (typeof rawTo !== "string" && typeof rawTo !== "number") return body;
+  const resolved = await resolveTarget(String(rawTo));
+  return { ...body, to: String(resolved) };
 }
 
 /**
@@ -106,7 +123,7 @@ const main = defineCommand({
 
     // rawArgs 第一个是 command，其余是 --key value 参数
     const kvArgs = cleaned.slice(1).filter((a) => a !== "--help" && a !== "-h");
-    const body = parseKeyValueArgs(kvArgs);
+    const body = await prepareCommandBody(snakeCmd, parseKeyValueArgs(kvArgs));
 
     // ADR-217: 统一端点，Engine 侧区分 query/instruction
     const response = (await enginePostJson(`/cmd/${snakeCmd}`, body)) as {
@@ -114,6 +131,13 @@ const main = defineCommand({
     };
 
     // ADR-235: 默认人类可读，--json 保留原始格式
+    if (isFailureResult(response.result)) {
+      const rendered = json ? renderBridgeResult(response.result) : renderHuman(response.result);
+      process.stderr.write(`${rendered}\n`);
+      process.exitCode = 1;
+      return;
+    }
+
     if (json) {
       console.log(renderBridgeResult(response.result));
     } else {

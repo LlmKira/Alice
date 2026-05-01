@@ -16,7 +16,6 @@ import {
   isRiskNegligible,
   OBLIGATION_THRESHOLDS,
 } from "../pressure/signal-decay.js";
-import { decayFactor } from "../utils/math.js";
 import type { FocalSet } from "../voices/focus.js";
 import type { VoiceAction } from "../voices/personality.js";
 
@@ -35,8 +34,6 @@ export interface System1Decision {
 export interface System1Options {
   /** S10: Diligence mark_read 条件匹配时泄漏到 System 2 的概率。 */
   leakProb?: number;
-  /** ADR-110: mood severity 判定的衰减半衰期（秒），与 config.moodHalfLife 对齐。 */
-  moodDecayHalfLife?: number;
   /** 对话延续信号：target 有活跃对话且 turn_state = alice_turn。
    *  为 true 时 Diligence 无条件升级 System 2——隐式回复不应被 digest 吞掉。 */
   isConversationContinuation?: boolean;
@@ -65,7 +62,7 @@ export function trySystem1(
   options?: System1Options,
 ): System1Decision {
   if (action === "caution") {
-    return tryCautionSkip(focalSets.caution, G, tick, options?.moodDecayHalfLife, options?.nowMs);
+    return tryCautionSkip(focalSets.caution, G, tick, options?.nowMs);
   }
 
   if (action === "diligence") {
@@ -84,23 +81,16 @@ export function trySystem1(
 
 // -- Caution skip -----------------------------------------------------------
 
-/** mood severity 超过此阈值 → 升级 System 2。 */
-const MOOD_SEVERITY_THRESHOLD = 0.5;
-/** ADR-110: mood decay 半衰期（秒）。默认值仅作 fallback，实际应从 config 传入。 */
-const DEFAULT_MOOD_DECAY_HALFLIFE = 3600;
-
 /**
- * Caution skip: 焦点集内所有实体风险 ≤ low，无高 mood severity，且没有 alice_turn 对话。
+ * Caution skip: 焦点集内所有实体风险 ≤ low，且没有 alice_turn 对话。
  *
  * 有 alice_turn 对话 → 可能需要 LLM 评估是否回复 → 升级 System 2。
  * 有高风险实体 → 需要 LLM 评估风险 → 升级 System 2。
- * 有高 mood severity → 需要 LLM 判断情绪应对 → 升级 System 2。
  */
 function tryCautionSkip(
   focalSet: FocalSet,
   G: WorldModel,
   _tick: number,
-  moodDecayHalfLife?: number,
   nowMs?: number,
 ): System1Decision {
   // 空焦点集 → 安全跳过
@@ -111,31 +101,14 @@ function tryCautionSkip(
   for (const eid of focalSet.entities) {
     if (!G.has(eid)) continue;
 
-    // risk_level 和 mood_valence 是 channel 属性，非 channel 实体跳过
+    // risk_level 是 channel 属性，非 channel 实体跳过
     if (G.getNodeType(eid) !== "channel") continue;
-    const attrs = G.getChannel(eid);
 
     // 高风险 → 升级 System 2
     // ADR-126: 使用 effectiveRisk 替代 isLowRisk 布尔判断
     // 陈旧的风险评级不再无条件强制 System 2 升级
     if (!isRiskNegligible(G, eid, nowMs ?? Date.now())) {
       return { handled: false };
-    }
-
-    // 高 mood severity → 升级 System 2（S8/H3 修复）
-    // ADR-110: 使用墙钟 ms 计算 mood 衰减
-    const valence = attrs.mood_valence;
-    if (valence != null) {
-      const moodShiftMs = Number(attrs.mood_shift_ms ?? 0);
-      const moodAgeS =
-        moodShiftMs > 0 ? Math.max(0, ((nowMs ?? Date.now()) - moodShiftMs) / 1000) : 0;
-      const halfLifeS = moodDecayHalfLife ?? DEFAULT_MOOD_DECAY_HALFLIFE;
-      if (
-        moodAgeS > 0 &&
-        Math.abs(valence * decayFactor(moodAgeS, halfLifeS)) > MOOD_SEVERITY_THRESHOLD
-      ) {
-        return { handled: false };
-      }
     }
   }
 

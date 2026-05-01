@@ -10,10 +10,12 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { WorldModel } from "../graph/world-model.js";
+import { createTelegramTransportAdapter, type TransportAdapter } from "../platform/transport.js";
 import { ALICE_ENGINE_PORT } from "../runtime-paths.js";
 import { loadRegistry, mergeRegistryWithBuiltIns, type Registry } from "../skills/registry.js";
 import { createLogger } from "../utils/logger.js";
 import { checkCapability, withRequestLog } from "./middleware.js";
+import { handleAlbum } from "./routes/album.js";
 import { handleChatTail } from "./routes/chat.js";
 import { handleCmd } from "./routes/cmd.js";
 import { handleConfigGet } from "./routes/config.js";
@@ -23,7 +25,7 @@ import { handleGraphGet, handleGraphSet } from "./routes/graph.js";
 import { handleLlmSummarize, handleLlmSynthesize } from "./routes/llm.js";
 import { handleMetaCommands } from "./routes/meta.js";
 import { handleQuery } from "./routes/query.js";
-import { handleResolveName } from "./routes/resolve.js";
+import { handleResolveName, handleResolveTarget } from "./routes/resolve.js";
 import {
   handleSkillInfo,
   handleSkillInstall,
@@ -36,6 +38,7 @@ import {
   handleSkillUpgrades,
 } from "./routes/skills.js";
 import { handleTelegramForward } from "./routes/telegram.js";
+import { handleTransport } from "./routes/transport.js";
 
 const log = createLogger("engine-api");
 
@@ -53,6 +56,8 @@ export interface EngineApiDeps {
   registry?: Registry;
   /** true = strict（无 header / 未知 skill → 403），false/undefined = lenient。 */
   strictCapabilities?: boolean;
+  /** Neutral IM transport adapters keyed by platform. */
+  transportAdapters?: Record<string, TransportAdapter>;
   /** Telegram 消息转发回调（irc forward: 跨聊天转发 + 可选评论）。 */
   telegramForward?: (params: {
     fromChatId: number;
@@ -60,6 +65,13 @@ export interface EngineApiDeps {
     toChatId: number;
     comment?: string;
   }) => Promise<{ forwardedMsgId: number | null; commentMsgId?: number | null }>;
+  /** ADR-260: Telegram group photo album send callback. */
+  telegramAlbumSend?: (params: {
+    assetId: string;
+    targetChatId: number;
+    caption?: string;
+    replyTo?: number;
+  }) => Promise<{ msgId: number | null; sendMode: string; assetId: string }>;
   /** Telegram 文本发送回调（irc say/reply）。 */
   telegramSend?: (params: {
     chatId: number;
@@ -102,7 +114,7 @@ export interface EngineApiDeps {
     text: string;
     emotion?: string;
     replyTo?: number;
-  }) => Promise<{ msgId: number | null }>;
+  }) => Promise<{ msgId: number | null; deliveredAs?: "voice" | "text"; fallbackReason?: string }>;
   /** Dispatcher syscall bridge. */
   dispatchInstruction?: (
     instruction: string,
@@ -110,6 +122,8 @@ export interface EngineApiDeps {
   ) => Promise<unknown> | unknown;
   /** Dispatcher query bridge. */
   query?: (name: string, args: Record<string, unknown>) => Promise<unknown> | unknown;
+  /** Dispatcher command kind resolver for /cmd routing. */
+  resolveCommandKind?: (name: string) => "query" | "instruction" | undefined;
   /** Mod 定义列表（供 /meta/commands 端点生成命令目录）。 */
   getMods?: () => readonly import("../core/types.js").ModDefinition[];
   /** TCP 端口号。0 = OS 自动分配。 */
@@ -129,6 +143,9 @@ export interface EngineApiDeps {
  * - GET  /graph/:entity/:attr
  * - POST /graph/:entity/:attr
  * - POST /telegram/forward
+ * - POST /transport/send
+ * - POST /transport/read
+ * - POST /transport/react
  * - GET  /skills/search?query=...
  * - GET  /skills/list
  * - GET  /skills/info/:name
@@ -233,6 +250,29 @@ export function routeRequest(
     return handleTelegramForward(segments[1], req, res, deps);
   }
 
+  // --- transport ---
+  if (resource === "transport" && method === "POST" && segments.length === 2) {
+    const transportDeps: EngineApiDeps = deps.transportAdapters?.telegram
+      ? deps
+      : {
+          ...deps,
+          transportAdapters: {
+            ...deps.transportAdapters,
+            telegram: createTelegramTransportAdapter({
+              send: deps.telegramSend,
+              markRead: deps.telegramMarkRead,
+              react: deps.telegramReact,
+            }),
+          },
+        };
+    return handleTransport(segments[1], req, res, transportDeps);
+  }
+
+  // --- album ---
+  if (resource === "album" && segments.length === 2) {
+    return handleAlbum(segments[1], req, res, deps);
+  }
+
   // --- skills ---
   if (resource === "skills") {
     if (method === "GET" && segments[1] === "search") {
@@ -291,7 +331,7 @@ export function routeRequest(
     return handleMetaCommands(res, deps);
   }
 
-  // --- resolve (ADR-237: 名称解析) ---
+  // --- resolve (ADR-237 name, ADR-265 target refs) ---
   if (
     resource === "resolve" &&
     method === "POST" &&
@@ -299,6 +339,14 @@ export function routeRequest(
     segments[1] === "name"
   ) {
     return handleResolveName(req, res, deps);
+  }
+  if (
+    resource === "resolve" &&
+    method === "POST" &&
+    segments.length === 2 &&
+    segments[1] === "target"
+  ) {
+    return handleResolveTarget(req, res, deps);
   }
 
   res.writeHead(404, { "Content-Type": "application/json" });

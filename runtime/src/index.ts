@@ -36,14 +36,26 @@ import { type ActContext, startActLoop } from "./engine/act/index.js";
 import { ActionQueue } from "./engine/action-queue.js";
 import { createDeliberationState } from "./engine/deliberation.js";
 import { initEpisodeState } from "./engine/episode.js";
-import { type EvolveState, startEvolveLoop } from "./engine/evolve.js";
+import { type EvolveState, POST_WAKEUP_RECOVERY_MS, startEvolveLoop } from "./engine/evolve.js";
+import {
+  decideStartupMode,
+  latestRuntimeSeenMs,
+  POST_RESTART_RECOVERY_MIN_OFFLINE_MS,
+} from "./engine/startup-mode.js";
 import { startEngineApi } from "./engine-api/server.js";
-import { ALICE_SELF, ensureChannelId } from "./graph/constants.js";
+import { ALICE_SELF, telegramChannelId } from "./graph/constants.js";
+import { recordForwardShare } from "./graph/dynamic-props.js";
 import { buildTensionMap } from "./graph/tension.js";
-import { getAvailableProvider, initProviders } from "./llm/client.js";
+import type { WorldModel } from "./graph/world-model.js";
+import { initProviders, selectProviderForFirstPass } from "./llm/client.js";
 import { closeGroupCache, initGroupCache } from "./llm/group-cache.js";
 import { closeMediaCache, initMediaCache } from "./llm/media-cache.js";
 import { onBreakerStateChange } from "./llm/resilience.js";
+import { createOneBotTransportAdapter } from "./platform/onebot.js";
+import {
+  type OneBotReceiverController,
+  startOneBotEventReceiver,
+} from "./platform/onebot-receiver.js";
 import { AdaptiveKappa, computeAllPressures, createPressureHistory } from "./pressure/aggregate.js";
 import {
   ALICE_DB_PATH,
@@ -65,6 +77,7 @@ import {
   setTyping,
 } from "./telegram/actions.js";
 import { bindAdminCommands } from "./telegram/admin.js";
+import { sendAlbumPhoto } from "./telegram/album-send.js";
 import {
   getAvailableKeywords,
   resolveByEmoji,
@@ -73,6 +86,7 @@ import {
 } from "./telegram/apps/sticker-palette.js";
 import { buildInitialGraph } from "./telegram/bootstrap.js";
 import { createClient, createDispatcher, destroyClient, startClient } from "./telegram/client.js";
+import { isTelegramActionError, TelegramActionError } from "./telegram/errors.js";
 import { bindEvents, cacheOutgoingMsg, EventBuffer, warmOutgoingCache } from "./telegram/events.js";
 import { cleanupPhantomContacts } from "./telegram/mapper.js";
 import { initAdminNotify, notifyAdmin } from "./telegram/notify-admin.js";
@@ -83,6 +97,13 @@ import { PersonalityVector } from "./voices/personality.js";
 import { selectAction } from "./voices/selection.js";
 
 const log = createLogger("alice");
+const RUNTIME_HEARTBEAT_INTERVAL_MS = 30 * 1000;
+
+function recordRuntimeHeartbeat(G: WorldModel, nowMs = Date.now()): void {
+  if (!G.has(ALICE_SELF)) return;
+  G.updateAgent(ALICE_SELF, { runtime_last_seen_ms: nowMs });
+  flushGraph(G);
+}
 
 async function main() {
   log.info("Alice Runtime starting...");
@@ -193,6 +214,7 @@ async function main() {
   });
   const buffer = new EventBuffer();
   const queue = new ActionQueue();
+  let oneBotReceiver: OneBotReceiverController | null = null;
   const noveltyHistory: number[] = [];
   const recentEventCounts: number[] = [];
   const recentActions: EvolveState["recentActions"] = [];
@@ -227,12 +249,26 @@ async function main() {
     () => selfUsername,
     client,
   );
+  if (config.qqOneBotEventWsUrl) {
+    oneBotReceiver = startOneBotEventReceiver({
+      url: config.qqOneBotEventWsUrl,
+      accessToken: config.qqOneBotAccessToken,
+      selfId,
+      selfDisplayName: self.username ?? "Alice",
+      getTick: () => clock.tick,
+      buffer,
+      reconnectMinMs: config.qqOneBotReconnectMinMs,
+      reconnectMaxMs: config.qqOneBotReconnectMaxMs,
+    });
+    log.info("OneBot event receiver started");
+  }
 
   // EVOLVE 状态
   // ADR-33/110: lastActionTick → lastActionMs。
   // 尝试从图中任意节点读取 last_alice_action_ms（墙钟直读）；
   // 不存在时回退到 tick 差值估算；全无则用 Date.now()。
-  let estimatedLastActionMs = Date.now();
+  const startupNowMs = Date.now();
+  let estimatedLastActionMs = startupNowMs;
   if (lastActionTick > 0) {
     // 搜索图中最近的 last_alice_action_ms（任一 channel/contact 节点）
     let bestMs = 0;
@@ -241,19 +277,48 @@ async function main() {
       if (ms > bestMs) bestMs = ms;
     }
     estimatedLastActionMs =
-      bestMs > 0 ? bestMs : Date.now() - (G.tick - lastActionTick) * config.dtMax;
+      bestMs > 0 ? bestMs : startupNowMs - (G.tick - lastActionTick) * config.dtMax;
   }
 
-  // ADR-190: Wakeup Mode — 长时间离线后渐进恢复，避免批量发送
-  const offlineDurationS = (Date.now() - estimatedLastActionMs) / 1000;
-  const initialMode =
-    offlineDurationS > config.wakeupOfflineThresholdS ? ("wakeup" as const) : ("patrol" as const);
+  const lastRuntimeSeenMs =
+    G.has(ALICE_SELF) && G.getAgent(ALICE_SELF).runtime_last_seen_ms != null
+      ? G.getAgent(ALICE_SELF).runtime_last_seen_ms
+      : 0;
+  const lastRuntimeShutdownMs =
+    G.has(ALICE_SELF) && G.getAgent(ALICE_SELF).runtime_shutdown_ms != null
+      ? G.getAgent(ALICE_SELF).runtime_shutdown_ms
+      : 0;
+  const runtimeSeenMs = latestRuntimeSeenMs({
+    lastSeenMs: lastRuntimeSeenMs,
+    shutdownMs: lastRuntimeShutdownMs,
+  });
+  const startupMode = decideStartupMode({
+    runtimeOfflineMs: runtimeSeenMs > 0 ? startupNowMs - runtimeSeenMs : 0,
+    actionSilenceMs: startupNowMs - estimatedLastActionMs,
+    wakeupOfflineThresholdS: config.wakeupOfflineThresholdS,
+    postRestartRecoveryMinOfflineMs: POST_RESTART_RECOVERY_MIN_OFFLINE_MS,
+  });
+  const { initialMode, shouldUsePostRestartRecovery } = startupMode;
   if (initialMode === "wakeup") {
-    log.info("Entering wakeup mode — long offline detected", {
-      offlineDurationS: Math.round(offlineDurationS),
+    log.info("Entering wakeup mode — long runtime offline detected", {
+      runtimeOfflineS: Math.round(startupMode.runtimeOfflineS),
+      actionSilenceS: Math.round(startupMode.actionSilenceS),
       thresholdS: config.wakeupOfflineThresholdS,
     });
+  } else if (shouldUsePostRestartRecovery) {
+    log.info("Entering post-restart recovery window", {
+      recoveryMs: POST_WAKEUP_RECOVERY_MS,
+      runtimeOfflineS: Math.round(startupMode.runtimeOfflineS),
+      actionSilenceS: Math.round(startupMode.actionSilenceS),
+    });
+  } else {
+    log.info("Entering patrol mode after short restart", {
+      runtimeOfflineS: Math.round(startupMode.runtimeOfflineS),
+      actionSilenceS: Math.round(startupMode.actionSilenceS),
+      recoveryMinOfflineS: POST_RESTART_RECOVERY_MIN_OFFLINE_MS / 1000,
+    });
   }
+  recordRuntimeHeartbeat(G, startupNowMs);
 
   const evolveState: EvolveState = {
     G,
@@ -277,7 +342,7 @@ async function main() {
     // Agent Mode FSM — ADR-190: 根据离线时长决定初始模态
     mode: initialMode,
     focusTarget: undefined,
-    modeEnteredMs: Date.now(),
+    modeEnteredMs: startupNowMs,
     adaptiveKappa: new AdaptiveKappa(config.kappa),
     channelRateEma: new Map(),
     // ADR-191: spike 信号数据源（perceiveTick 产物）
@@ -289,9 +354,13 @@ async function main() {
     // ADR-190: Wakeup 状态
     wakeupTicksElapsed: 0,
     wakeupEngagedTargets: new Set(),
+    // Runtime restart also resets queue/engagement context; use the same recovery control loop.
+    wakeupRecoveryUntilMs: shouldUsePostRestartRecovery
+      ? startupNowMs + POST_WAKEUP_RECOVERY_MS
+      : undefined,
     lastAPI: 0,
     lastAPIPeak: 0,
-    lastFlushMs: Date.now(),
+    lastFlushMs: startupNowMs,
     currentDt: 0,
     // ADR-190: LLM 失败指数退避初始状态
     llmBackoff: { consecutiveFailures: 0, lastFailureMs: 0 },
@@ -393,13 +462,9 @@ async function main() {
   // D5: 初始化 provider fallback 链（ADR-123 §D5）
   initProviders(config);
 
-  // ADR-233: 初始化 OpenAI 客户端（TC 循环用原生 tool_use）
-  const { initOpenAIClients } = await import("./engine/tick/callLLM.js");
-  initOpenAIClients(config);
-
-  // ADR-226: 初始化 Reflect Provider（clustering 用 cheap model）
-  const { initReflectClient } = await import("./engine/clustering.js");
-  initReflectClient(config);
+  // ADR-263: group reception Ax shadow judge 只做旁路诊断，不接管 evidence/control。
+  const { initGroupReceptionShadowJudge } = await import("./mods/observer/group-reception.js");
+  initGroupReceptionShadowJudge(config);
 
   // S-EA: 启动 Engine API（TCP）
   // Skill CLI 脚本通过 TCP 读取 config / graph 属性。
@@ -416,6 +481,15 @@ async function main() {
     },
     G,
     getTick: () => clock.tick,
+    transportAdapters: config.qqOneBotApiBaseUrl
+      ? {
+          qq: createOneBotTransportAdapter({
+            apiBaseUrl: config.qqOneBotApiBaseUrl,
+            accessToken: config.qqOneBotAccessToken,
+            timeoutMs: config.qqOneBotTimeoutMs,
+          }),
+        }
+      : undefined,
     telegramSend: async ({ chatId, text, replyTo }) => {
       const rawChatId = typeof chatId === "number" ? chatId : Number(chatId);
       // Typing indicator + 自然延迟（对齐 action-executor 行为）。
@@ -432,7 +506,7 @@ async function main() {
       const msgId = await sendText(client, rawChatId, text, { replyToMsgId: replyTo });
       // 显式取消 typing 定时器（mtcute 5s 自动续发，不取消会残留）
       setTyping(client, rawChatId, true).catch(() => {});
-      const graphId = ensureChannelId(`channel:${rawChatId}`);
+      const graphId = telegramChannelId(rawChatId);
       if (msgId != null && graphId) {
         cacheOutgoingMsg(graphId, msgId);
       }
@@ -446,7 +520,7 @@ async function main() {
     telegramMarkRead: async (chatId) => {
       const rawChatId = typeof chatId === "number" ? chatId : Number(chatId);
       await markRead(client, rawChatId);
-      const graphId = ensureChannelId(`channel:${rawChatId}`);
+      const graphId = telegramChannelId(rawChatId);
       if (graphId && G.has(graphId)) {
         G.setDynamic(graphId, "unread", 0);
         G.setDynamic(graphId, "mentions_alice", false);
@@ -457,7 +531,7 @@ async function main() {
     telegramReact: async ({ chatId, msgId, emoji }) => {
       const rawChatId = typeof chatId === "number" ? chatId : Number(chatId);
       await sendReaction(client, rawChatId, msgId, emoji);
-      const graphId = ensureChannelId(`channel:${rawChatId}`);
+      const graphId = telegramChannelId(rawChatId);
       if (graphId) {
         dispatcher.dispatch("DECLARE_ACTION", { target: graphId, isMessage: false });
       }
@@ -481,7 +555,7 @@ async function main() {
       } catch {
         // typing 失败不阻断发送
       }
-      const graphId = ensureChannelId(`channel:${rawChatId}`);
+      const graphId = telegramChannelId(rawChatId);
       const db = getDb();
       // 多层解析：维度关键词 → emoji → raw fileId
       let fileId: string | null = resolveLabel(db, keyword, graphId ?? undefined);
@@ -489,7 +563,10 @@ async function main() {
       if (!fileId && keyword.startsWith("CAACAgI")) fileId = keyword;
       if (!fileId) {
         const available = getAvailableKeywords(db);
-        throw new Error(`No sticker matches "${keyword}". Valid: ${available}`);
+        throw new TelegramActionError(
+          "invalid_sticker_keyword",
+          `No sticker matches "${keyword}". Valid: ${available}`,
+        );
       }
       const msgId = await sendSticker(client, rawChatId, fileId);
       setTyping(client, rawChatId, true).catch(() => {});
@@ -502,7 +579,7 @@ async function main() {
     // TTS 语音消息：textToSpeech → sendVoice → fallback sendText
     telegramVoice: async ({ chatId, text, emotion, replyTo }) => {
       const rawChatId = typeof chatId === "number" ? chatId : Number(chatId);
-      const graphId = ensureChannelId(`channel:${rawChatId}`);
+      const graphId = telegramChannelId(rawChatId);
       const { isTTSEnabled, textToSpeech } = await import("./llm/tts.js");
       const { sendVoice } = await import("./telegram/actions.js");
       const ttsConfig = {
@@ -539,52 +616,86 @@ async function main() {
       }
       const audioBuffer = await textToSpeech(text.slice(0, 1000), ttsConfig, validEmotion);
       let sentMsgId: number | undefined;
+      let deliveredAs: "voice" | "text" = "voice";
+      let fallbackReason: string | undefined;
       if (audioBuffer) {
-        sentMsgId = await sendVoice(client, rawChatId, audioBuffer, { replyToMsgId: replyTo });
+        try {
+          sentMsgId = await sendVoice(client, rawChatId, audioBuffer, { replyToMsgId: replyTo });
+        } catch (error) {
+          if (!isTelegramActionError(error) || error.code !== "voice_messages_forbidden") {
+            throw error;
+          }
+          log.warn("Voice messages forbidden, falling back to text", { chatId: rawChatId });
+          sentMsgId =
+            (await sendText(client, rawChatId, text, { replyToMsgId: replyTo })) ?? undefined;
+          deliveredAs = "text";
+          fallbackReason = "voice_messages_forbidden";
+        }
       } else {
         // TTS 合成失败 → 回退为文本消息
         log.warn("TTS synthesis failed, falling back to text", { chatId: rawChatId });
         sentMsgId =
           (await sendText(client, rawChatId, text, { replyToMsgId: replyTo })) ?? undefined;
+        deliveredAs = "text";
+        fallbackReason = "tts_synthesis_failed";
       }
       setTyping(client, rawChatId, true).catch(() => {});
       if (sentMsgId != null && graphId) {
         cacheOutgoingMsg(graphId, sentMsgId);
         dispatcher.dispatch("SEND_MESSAGE", {
           chatId: graphId,
-          text: `(voice: ${text.slice(0, 50)})`,
+          text: deliveredAs === "text" ? text : `(voice: ${text.slice(0, 50)})`,
         });
         dispatcher.dispatch("DECLARE_ACTION", { target: graphId });
       }
-      return { msgId: sentMsgId ?? null };
+      return { msgId: sentMsgId ?? null, deliveredAs, fallbackReason };
     },
     // ADR-206 W8: 跨聊天转发 + 可选附加评论
     telegramForward: async ({ fromChatId, msgId, toChatId, comment }) => {
       const fwdMsgId = await forwardMessage(client, fromChatId, msgId, toChatId);
-      const toGraphId = ensureChannelId(`channel:${toChatId}`);
+      const toGraphId = telegramChannelId(toChatId);
       if (fwdMsgId != null && toGraphId) {
         cacheOutgoingMsg(toGraphId, fwdMsgId);
         dispatcher.dispatch("DECLARE_ACTION", { target: toGraphId });
       }
       // 附加评论：转发成功后，以 reply 形式发送评论
       let commentMsgId: number | null = null;
-      if (comment && comment.trim() && fwdMsgId != null) {
+      if (comment?.trim() && fwdMsgId != null) {
         commentMsgId =
           (await sendText(client, toChatId, comment, { replyToMsgId: fwdMsgId })) ?? null;
         if (commentMsgId != null && toGraphId) {
           cacheOutgoingMsg(toGraphId, commentMsgId);
         }
       }
-      // 追踪分享时间（频率限制用 + 全景 "shared recently" 用）
-      const fromGraphId = ensureChannelId(`channel:${fromChatId}`);
-      if (fromGraphId && G.has(fromGraphId)) {
-        G.setDynamic(fromGraphId, "last_shared_ms", Date.now());
-      }
-      // ADR-208 W1: 目标节点也写 last_shared_ms — 全景通过 privateCh 读取
-      if (toGraphId && G.has(toGraphId)) {
-        G.setDynamic(toGraphId, "last_shared_ms", Date.now());
+      const fromGraphId = telegramChannelId(fromChatId);
+      if (fwdMsgId != null && fromGraphId && toGraphId) {
+        const targetName =
+          G.has(toGraphId) && G.getDynamic(toGraphId, "display_name")
+            ? String(G.getDynamic(toGraphId, "display_name"))
+            : String(toChatId);
+        recordForwardShare(G, {
+          fromGraphId,
+          msgId,
+          toGraphId,
+          targetName,
+        });
       }
       return { forwardedMsgId: fwdMsgId ?? null, commentMsgId };
+    },
+    telegramAlbumSend: async ({ assetId, targetChatId, caption, replyTo }) => {
+      return sendAlbumPhoto(client, {
+        assetId,
+        targetChatId,
+        caption,
+        replyTo,
+        onSent: (msgId) => {
+          const graphId = telegramChannelId(targetChatId);
+          if (graphId) {
+            cacheOutgoingMsg(graphId, msgId);
+            dispatcher.dispatch("DECLARE_ACTION", { target: graphId });
+          }
+        },
+      });
     },
     // ADR-204 W2: Telegram 文件下载回调
     telegramDownload: async ({ chatId, msgId, output }) => {
@@ -647,7 +758,7 @@ async function main() {
         caption,
         replyTo,
       });
-      const graphId = ensureChannelId(`channel:${rawChatId}`);
+      const graphId = telegramChannelId(rawChatId);
       if (sent?.id != null && graphId) {
         cacheOutgoingMsg(graphId, sent.id);
         dispatcher.dispatch("DECLARE_ACTION", { target: graphId });
@@ -656,6 +767,11 @@ async function main() {
     },
     dispatchInstruction: (instruction, args) => dispatcher.dispatch(instruction, args),
     query: (name, args) => dispatcher.query(name, args),
+    resolveCommandKind: (name) => {
+      if (dispatcher.getQueryDef(name)) return "query";
+      if (dispatcher.getInstructionDef(name)) return "instruction";
+      return undefined;
+    },
     getMods: () => dispatcher.mods,
     // S8 完成后收紧为 strict（注入 registry + 翻转开关）
     strictCapabilities: false,
@@ -695,7 +811,7 @@ async function main() {
     let s1Passed = false;
     for (let attempt = 1; attempt <= S1_MAX_ATTEMPTS; attempt++) {
       try {
-        const { provider, model } = getAvailableProvider();
+        const { provider, model } = selectProviderForFirstPass();
         await generateText({
           model: provider(model),
           prompt: "ping",
@@ -871,6 +987,14 @@ async function main() {
     startTick: clock.tick,
   });
 
+  const runtimeHeartbeat = setInterval(() => {
+    try {
+      recordRuntimeHeartbeat(G);
+    } catch (e) {
+      log.warn("Runtime heartbeat failed", { error: e });
+    }
+  }, RUNTIME_HEARTBEAT_INTERVAL_MS);
+
   // ADR-33: 定期保存 Mod 状态 + 维护（与图快照对齐）
   // 使用 snapshotIntervalS 的墙钟秒数作为 setInterval 间隔
   let stickerSyncCounter = 0;
@@ -882,7 +1006,12 @@ async function main() {
       savePersonalitySnapshot(tick, personalityRef.current);
       // 每次快照间隔执行日志清理
       if (tick > 0) {
-        const alerts = runMaintenance(tick, G);
+        const alerts = runMaintenance(tick, G, {
+          rhythmProfileRebuild: {
+            intervalMs: config.rhythmProfileRebuildIntervalS * 1000,
+            timezoneOffset: config.timezoneOffset,
+          },
+        });
         if (alerts.length > 0) {
           dispatcher.dispatch("UPDATE_ANOMALIES", { anomalies: alerts });
         }
@@ -908,7 +1037,9 @@ async function main() {
     log.info("Shutting down...");
 
     // 停定期任务
+    clearInterval(runtimeHeartbeat);
     clearInterval(snapshotAndMaintain);
+    oneBotReceiver?.close();
 
     // 关闭 Engine API
     if (engineApiCleanup) {
@@ -927,6 +1058,13 @@ async function main() {
     await actPromise;
 
     // 保存最终状态
+    if (G.has(ALICE_SELF)) {
+      const shutdownMs = Date.now();
+      G.updateAgent(ALICE_SELF, {
+        runtime_last_seen_ms: shutdownMs,
+        runtime_shutdown_ms: shutdownMs,
+      });
+    }
     flushGraph(G);
     savePersonalitySnapshot(clock.tick, personalityRef.current);
     dispatcher.saveModStatesToDb(clock.tick);

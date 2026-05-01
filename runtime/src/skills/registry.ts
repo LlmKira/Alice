@@ -8,6 +8,7 @@ import {
   accessSync,
   constants,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -15,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { delimiter, dirname, resolve } from "node:path";
-import { compileSkillExecutable, getAliceStoreRoot } from "./store.js";
+import { compileSkillExecutable, getAliceStoreRoot, wrapSkillExecutable } from "./store.js";
 
 // 重新导出供其他模块使用
 export { getAliceStoreRoot } from "./store.js";
@@ -66,11 +67,14 @@ const BUILTIN_SYSTEM_REGISTRY: Registry = {
     storePath: DEFAULT_SYSTEM_BIN,
     commandPath: resolve(DEFAULT_SYSTEM_BIN, "irc"),
     installedAt: "2026-03-11T00:00:00.000Z",
-    actions: ["irc", "self", "engine", "alice-pkg"],
+    actions: ["irc", "album", "self", "engine", "alice-pkg"],
     categories: ["app"],
     capabilities: [
       "chat.read",
       "graph.read",
+      "transport.send",
+      "transport.read",
+      "transport.react",
       "telegram.send",
       "telegram.read",
       "telegram.react",
@@ -281,6 +285,23 @@ export function isExecutableFile(path: string): boolean {
   }
 }
 
+function isSymbolicLink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function isSkillWrapper(path: string, skillName: string): boolean {
+  try {
+    const text = readFileSync(path, "utf-8");
+    return text.includes(`export ALICE_SKILL=${JSON.stringify(skillName)}`);
+  } catch {
+    return false;
+  }
+}
+
 export function exportInstalledSkillArtifacts(
   entry: Pick<RegistryEntry, "name" | "hash" | "storePath" | "commandPath">,
   options?: { binDir?: string; storeRoot?: string },
@@ -288,9 +309,12 @@ export function exportInstalledSkillArtifacts(
   const storeRoot = options?.storeRoot ?? getAliceStoreRoot();
   const binDir = options?.binDir ?? getAliceBinDir();
   const storePath = entry.storePath ?? resolve(storeRoot, entry.hash ?? entry.name);
+  const commandPath = resolve(binDir, entry.name);
+  const realPath = resolve(binDir, `.${entry.name}.real`);
 
-  // 编译为二进制可执行文件
-  const commandPath = compileSkillExecutable(storePath, entry.name, binDir);
+  rmSync(commandPath, { force: true });
+  const compiledPath = compileSkillExecutable(storePath, entry.name, binDir);
+  wrapSkillExecutable(compiledPath, entry.name, { realPath });
 
   return { commandPath };
 }
@@ -315,8 +339,10 @@ export function ensureAllArtifacts(options?: {
   for (const entry of Object.values(registry)) {
     const target = resolve(binDir, entry.name);
 
-    // 检查可执行文件是否存在
-    if (!isExecutableFile(target)) {
+    // 检查可执行包装器是否存在；旧 symlink / 旧 ELF / 不可执行文件都重导出。
+    const needsExport =
+      !isExecutableFile(target) || isSymbolicLink(target) || !isSkillWrapper(target, entry.name);
+    if (needsExport) {
       try {
         exportInstalledSkillArtifacts(entry, { binDir, storeRoot });
         synced++;

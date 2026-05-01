@@ -7,6 +7,9 @@
 // ── 从旧代码导入 + re-export 的类型（保持单一真相来源）──────────────────
 
 export type { ScriptExecutionResult } from "../../core/script-execution.js";
+
+import type { ScriptExecutionResult } from "../../core/script-execution.js";
+
 export type { VoiceAction } from "../../voices/personality.js";
 export type { ActionQueueItem } from "../action-queue.js";
 
@@ -24,28 +27,20 @@ export interface SubcycleResult {
     | "watching"
     | "terminal"
     | "empty"
+    | "resting"
     | "fed_up"
     | "cooling_down"
     | "tc_budget_exhausted";
-  /** think() 调用收集的推理日志。 */
-  thinks: string[];
-  /** Query 自动打印日志。 */
-  queryLogs: Array<{ fn: string; result: string }>;
-  /** 指令级错误（best-effort，不中止脚本）。 */
-  instructionErrors: string[];
+  /** 子周期内累积的脚本执行事实。 */
+  execution: ScriptExecutionResult;
   /** 脚本执行总耗时（毫秒）。 */
   duration: number;
-  /** 沙箱错误（语法/运行时）。 */
-  errors: string[];
   /** D5: 实际使用的 ReAct 轮次数（0-based count）。 */
   roundsUsed: number;
-  /** ADR-232: episode 内 TC 续轮次数（watching 触发的额外 LLM 调用轮数）。 */
+  /** ADR-232: episode 内 TC 续轮次数（host 触发的额外 LLM 调用轮数）。 */
   episodeRounds: number;
   /** ADR-235: TC 循环可观测性元数据。 */
-  tcMeta?: {
-    toolCallCount: number;
-    budgetExhausted: boolean;
-    afterward: string;
-    commandLog: string;
-  };
+  tcMeta?: import("../tick/types.js").TickTcMeta;
+  /** LLM 调用失败分类。 */
+  failureKind?: import("../tick/callLLM.js").TickFailureKind;
 }

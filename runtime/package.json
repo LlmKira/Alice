@@ -22,11 +22,19 @@
     "db:migrate": "drizzle-kit migrate",
     "diagnose": "tsx src/diagnostics/cli.ts",
     "eval": "tsx --env-file=.env src/eval/cli.ts",
-    "eval:ablation": "tsx --env-file=.env src/eval/ablation-cli.ts"
+    "eval:ax-optimize": "tsx --env-file=.env src/eval/ax/cli.ts",
+    "eval:ax-gate": "tsx --env-file=.env src/eval/ax/gate.ts",
+    "eval:ax-judge-calibrate": "tsx --env-file=.env src/eval/ax/calibrate-judge.ts",
+    "eval:ax-group-reception-calibrate": "tsx --env-file=.env src/eval/ax/calibrate-group-reception.ts",
+    "eval:ax-group-reception-replay": "tsx --env-file=.env src/eval/ax/replay-group-reception.ts",
+    "eval:ablation": "tsx --env-file=.env src/eval/ablation-cli.ts",
+    "eval:social-case-replay": "tsx --env-file=.env src/social-case/replay-cli.ts"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.26",
     "@ai-sdk/openai-compatible": "^2.0.30",
+    "@ax-llm/ax": "^20.0.0",
+    "@faker-js/faker": "^10.4.0",
     "@gutenye/ocr-node": "^1.4.8",
     "@instructor-ai/instructor": "^1.7.0",
     "@mtcute/dispatcher": "^0.27.8",
@@ -39,6 +47,7 @@
     "drizzle-orm": "^0.38.0",
     "openai": "^6.32.0",
     "sharp": "^0.34.5",
+    "smol-toml": "^1.6.1",
     "sqlite-better-trigram": "^0.0.5",
     "tsx": "^4.19.0",
     "tyme4ts": "^1.4.2",

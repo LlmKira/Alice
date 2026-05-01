@@ -11,7 +11,7 @@ import {
   detectConversationStart,
   updateConversation,
 } from "../engine/conversation.js";
-import { CHANNEL_PREFIX, CONTACT_PREFIX, DUNBAR_TIER_THETA } from "../graph/constants.js";
+import { chatIdToContactId, DUNBAR_TIER_THETA, ensureChannelId } from "../graph/constants.js";
 import type { ChatType, DunbarTier } from "../graph/entities.js";
 import { findActiveConversation } from "../graph/queries.js";
 import type { WorldModel } from "../graph/world-model.js";
@@ -212,7 +212,7 @@ export function applyPerturbation(G: WorldModel, event: GraphPerturbation): numb
         event.chatType === "channel" &&
         contactId &&
         channelId &&
-        contactId === `${CONTACT_PREFIX}${channelId.slice(CHANNEL_PREFIX.length)}`;
+        contactId === chatIdToContactId(channelId);
       if (contactId && !isChannelSelfPost) {
         ensureContact(G, contactId, channelId, event.displayName);
       }
@@ -527,8 +527,8 @@ export function applyPerturbations(G: WorldModel, events: GraphPerturbation[]): 
 export function cleanupPhantomContacts(G: WorldModel): number {
   let cleaned = 0;
   for (const cid of G.getEntitiesByType("contact")) {
-    const numericPart = cid.slice(CONTACT_PREFIX.length);
-    const chId = `${CHANNEL_PREFIX}${numericPart}`;
+    const chId = ensureChannelId(cid);
+    if (!chId) continue;
     if (G.has(chId) && G.getChannel(chId).chat_type === "channel") {
       G.removeEntity(cid);
       cleaned++;

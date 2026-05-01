@@ -42,6 +42,9 @@ const REGISTRY: Registry = {
     categories: ["app"],
     capabilities: [
       "chat.read",
+      "transport.send",
+      "transport.read",
+      "transport.react",
       "telegram.send",
       "telegram.read",
       "telegram.react",
@@ -91,11 +94,14 @@ describe("requiredCapability", () => {
     expect(requiredCapability("GET", "/unknown")).toBeNull();
   });
 
-  it("telegram send/read/react map to dedicated capabilities", () => {
+  it("telegram and transport send/read/react map to dedicated capabilities", () => {
     expect(requiredCapability("GET", "/chat/123/tail")).toBe("chat.read");
     expect(requiredCapability("POST", "/telegram/send")).toBe("telegram.send");
     expect(requiredCapability("POST", "/telegram/read")).toBe("telegram.read");
     expect(requiredCapability("POST", "/telegram/react")).toBe("telegram.react");
+    expect(requiredCapability("POST", "/transport/send")).toBe("transport.send");
+    expect(requiredCapability("POST", "/transport/read")).toBe("transport.read");
+    expect(requiredCapability("POST", "/transport/react")).toBe("transport.react");
     expect(requiredCapability("POST", "/telegram/join")).toBe("telegram.join");
     expect(requiredCapability("POST", "/telegram/leave")).toBe("telegram.leave");
   });
@@ -146,6 +152,11 @@ describe("checkCapability — lenient", () => {
 
   it("telegram system client syscall checks dedicated capabilities", () => {
     const req = fakeReq("POST", "/telegram/send", "chatter");
+    expect(checkCapability(req, REGISTRY, "lenient")).toEqual({ allowed: true });
+  });
+
+  it("transport system client syscall checks neutral capabilities", () => {
+    const req = fakeReq("POST", "/transport/send", "chatter");
     expect(checkCapability(req, REGISTRY, "lenient")).toEqual({ allowed: true });
   });
 });

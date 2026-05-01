@@ -27,6 +27,7 @@ beforeEach(() => {
       p4 REAL NOT NULL, p5 REAL NOT NULL, p6 REAL NOT NULL,
       api REAL NOT NULL,
       action TEXT, target TEXT,
+      gate_verdict TEXT,
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE TABLE action_log (
@@ -37,12 +38,32 @@ beforeEach(() => {
       message_text TEXT, confidence REAL, reasoning TEXT,
       success INTEGER NOT NULL DEFAULT 0,
       observation_gap INTEGER,
-      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      closure_depth INTEGER,
+      ea_proxy REAL,
+      engagement_subcycles INTEGER,
+      engagement_duration_ms INTEGER,
+      engagement_outcome TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      auto_writeback TEXT,
+      tc_tool_call_count INTEGER,
+      tc_budget_exhausted INTEGER,
+      tc_afterward TEXT,
+      tc_command_log TEXT,
+      tc_host_continuation_trace TEXT
     );
     CREATE TABLE personality_snapshots (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       tick INTEGER NOT NULL,
       weights TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE TABLE audit_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tick INTEGER NOT NULL,
+      level TEXT NOT NULL,
+      source TEXT NOT NULL,
+      message TEXT NOT NULL,
+      details TEXT,
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
   `);
@@ -69,11 +90,13 @@ function insertTickLog(
   );
 }
 
-function insertAction(tick: number, voice: string, success: boolean) {
-  sqlite.exec(
-    `INSERT INTO action_log (tick, voice, action_type, success)
-     VALUES (${tick}, '${voice}', 'send_message', ${success ? 1 : 0})`,
-  );
+function insertActionWithCommandLog(tick: number, success: boolean, commandLog: string) {
+  sqlite
+    .prepare(
+      `INSERT INTO action_log (tick, voice, action_type, success, tc_command_log)
+       VALUES (?, 'sociability', 'observe', ?, ?)`,
+    )
+    .run(tick, success ? 1 : 0, commandLog);
 }
 
 /** ADR-124: voice_starvation 现在查询 tick_log.action（loudness winner）。 */
@@ -82,6 +105,15 @@ function insertTickLogWithVoice(tick: number, voice: string) {
     `INSERT INTO tick_log (tick, p1, p2, p3, p4, p5, p6, api, action)
      VALUES (${tick}, 0, 0, 0, 0, 0, 0, 1.0, '${voice}')`,
   );
+}
+
+function insertTickLogWithVoiceAndGate(tick: number, voice: string, gateVerdict: string) {
+  sqlite
+    .prepare(
+      `INSERT INTO tick_log (tick, p1, p2, p3, p4, p5, p6, api, action, gate_verdict)
+       VALUES (?, 0, 0, 0, 0, 0, 0, 1.0, ?, ?)`,
+    )
+    .run(tick, voice, gateVerdict);
 }
 
 function insertPersonality(tick: number, weights: number[]) {
@@ -162,15 +194,16 @@ describe("runAnomalyCheck", () => {
   });
 
   describe("action_failure_rate", () => {
-    it("失败率 > 50% 时触发 error", () => {
+    it("真实 Telegram 失败率 > 50% 时触发 error", () => {
       for (let i = 0; i < 20; i++) {
-        insertAction(80 + i, "sociability", i < 15); // 5 failures out of 20... wait
-      }
-      // 上面 i < 15 时 success=true，所以只有 5 次失败（25%），不应触发
-      // 改为 12 次失败
-      sqlite.exec("DELETE FROM action_log");
-      for (let i = 0; i < 20; i++) {
-        insertAction(80 + i, "sociability", i >= 12); // 12 failures out of 20 = 60%
+        const failed = i < 12;
+        insertActionWithCommandLog(
+          80 + i,
+          !failed,
+          failed
+            ? "$ irc read\nerror\nError: Engine API returned 500 for POST /telegram/read"
+            : "$ irc read\n✓ Marked as read",
+        );
       }
       const alerts = runAnomalyCheck(100);
       const failure = alerts.find((a) => a.type === "action_failure_rate");
@@ -178,9 +211,21 @@ describe("runAnomalyCheck", () => {
       expect(failure?.level).toBe("error");
     });
 
-    it("成功率正常时不触发", () => {
+    it("真实 Telegram 成功率正常时不触发", () => {
       for (let i = 0; i < 20; i++) {
-        insertAction(80 + i, "sociability", true);
+        insertActionWithCommandLog(80 + i, true, "$ irc read\n✓ Marked as read");
+      }
+      const alerts = runAnomalyCheck(100);
+      expect(alerts.some((a) => a.type === "action_failure_rate")).toBe(false);
+    });
+
+    it("host success=false 但已有 Telegram 成功标记时不误报", () => {
+      for (let i = 0; i < 20; i++) {
+        insertActionWithCommandLog(
+          80 + i,
+          false,
+          '$ irc say --text "hi"\nerror\nError: Engine API timeout\n✓ Sent: "hi"',
+        );
       }
       const alerts = runAnomalyCheck(100);
       expect(alerts.some((a) => a.type === "action_failure_rate")).toBe(false);
@@ -236,6 +281,27 @@ describe("runAnomalyCheck", () => {
       const voiceLost = alerts.find((a) => a.type === "voice_lost");
       expect(voiceLost).toBeDefined();
       expect(voiceLost?.level).toBe("error");
+    });
+
+    it("provider_failed 和 validation_failed 计入 LLM 失语，command_misuse 不计入", () => {
+      const types = [
+        "provider_failed",
+        "provider_failed",
+        "validation_failed",
+        "validation_failed",
+        "validation_failed",
+        "validation_failed",
+        "command_misuse",
+        "message",
+        "observe",
+        "silence",
+      ];
+      for (let i = 0; i < types.length; i++) {
+        insertActionWithType(90 + i, types[i], !types[i].endsWith("_failed"));
+      }
+
+      const alerts = runAnomalyCheck(100);
+      expect(alerts.some((a) => a.type === "voice_lost")).toBe(true);
     });
 
     it("LLM 正常时不触发", () => {
@@ -313,6 +379,26 @@ describe("runAnomalyCheck", () => {
       const alerts = runAnomalyCheck(1000);
       expect(
         alerts.some((a) => a.type === "voice_action_starvation" && a.message.includes("curiosity")),
+      ).toBe(false);
+    });
+
+    it("caution 的 system1:skip 不按行动饥饿误报", () => {
+      for (let i = 0; i < 80; i++) {
+        insertTickLogWithVoiceAndGate(501 + i, "caution", "system1:skip");
+      }
+
+      const alerts = runAnomalyCheck(1000);
+      expect(alerts.some((a) => a.type === "voice_action_starvation")).toBe(false);
+    });
+
+    it("System 1 已处理的 tick 不进入行动饥饿分母", () => {
+      for (let i = 0; i < 80; i++) {
+        insertTickLogWithVoiceAndGate(501 + i, "diligence", "system1:digest");
+      }
+
+      const alerts = runAnomalyCheck(1000);
+      expect(
+        alerts.some((a) => a.type === "voice_action_starvation" && a.message.includes("diligence")),
       ).toBe(false);
     });
   });

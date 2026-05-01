@@ -18,11 +18,12 @@ import {
   EngagementSession,
   EXPECT_REPLY_TIMEOUT,
   MAX_SUBCYCLES,
-  mergeScriptExecutionResults,
   PREEMPTION_FACTOR,
   prepareEngagementWatch,
+  prepareStayWatch,
   quickPressureEstimate,
 } from "../src/engine/act/engagement.js";
+import { emptyScriptExecutionResult, mergeScriptExecutionResults } from "../src/core/script-execution.js";
 import type { ActContext } from "../src/engine/react/orchestrator.js";
 import { CHAT_TYPE_WEIGHTS, DUNBAR_TIER_WEIGHT, PRESSURE_SPECS } from "../src/graph/constants.js";
 import type { DunbarTier } from "../src/graph/entities.js";
@@ -355,6 +356,103 @@ describe("prepareEngagementWatch", () => {
   });
 });
 
+// ── prepareStayWatch (ADR-247: watching != speech authorization) ──────
+
+describe("prepareStayWatch", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("directed same-channel message resolves await with 'activity'", async () => {
+    const buffer = new EventBuffer();
+    const ctx = makeMinimalCtx(buffer);
+    const handle = prepareStayWatch(ctx, "channel:target", 5.0);
+
+    const promise = handle.await(5000);
+    setTimeout(() => {
+      buffer.push(
+        makeEvent({
+          type: "new_message",
+          channelId: "channel:target",
+          isDirected: true,
+          senderIsBot: false,
+        }),
+      );
+    }, 50);
+
+    await vi.advanceTimersByTimeAsync(50);
+    const result = await promise;
+
+    expect(result.type).toBe("activity");
+  });
+
+  it("typing during watching does not grant a new turn", async () => {
+    const buffer = new EventBuffer();
+    const ctx = makeMinimalCtx(buffer);
+    const handle = prepareStayWatch(ctx, "channel:target", 5.0);
+
+    const promise = handle.await(200);
+    setTimeout(() => {
+      buffer.push(makeEvent({ type: "typing", channelId: "channel:target" }));
+    }, 50);
+
+    await vi.advanceTimersByTimeAsync(200);
+    const result = await promise;
+
+    expect(result.type).toBe("timeout");
+  });
+
+  it("ambient same-channel message during watching does not grant a new turn", async () => {
+    const buffer = new EventBuffer();
+    const ctx = makeMinimalCtx(buffer);
+    const handle = prepareStayWatch(ctx, "channel:target", 5.0);
+
+    const promise = handle.await(200);
+    setTimeout(() => {
+      buffer.push(
+        makeEvent({
+          type: "new_message",
+          channelId: "channel:target",
+          isDirected: false,
+          senderIsBot: false,
+        }),
+      );
+    }, 50);
+
+    await vi.advanceTimersByTimeAsync(200);
+    const result = await promise;
+
+    expect(result.type).toBe("timeout");
+  });
+
+  it("high-pressure other-channel message still interrupts watching", async () => {
+    const G = buildGraphWithChannel("channel:other", 5);
+    const buffer = new EventBuffer();
+    const ctx = makeMinimalCtx(buffer, G);
+    const handle = prepareStayWatch(ctx, "channel:target", 1.0);
+
+    const promise = handle.await(5000);
+    setTimeout(() => {
+      buffer.push(
+        makeEvent({
+          type: "new_message",
+          channelId: "channel:other",
+          isDirected: true,
+        }),
+      );
+    }, 50);
+
+    await vi.advanceTimersByTimeAsync(50);
+    const result = await promise;
+
+    expect(result.type).toBe("interrupt");
+  });
+});
+
 // ── EngagementSession (ADR-108) ──────────────────────────────────
 
 describe("EngagementSession", () => {
@@ -373,39 +471,84 @@ describe("mergeScriptExecutionResults", () => {
     const logs = ["log entry"];
     const errors = ["some error"];
     const instructionErrors = ["instruction failed"];
+    const errorCodes = ["command_invalid_target"] as const;
+    const observations = [
+      {
+        kind: "query_result" as const,
+        source: "test",
+        text: "fact",
+        enablesContinuation: true,
+      },
+    ];
+    const completedActions = ["sent:chatId=1:msgId=2"];
     const duration = 42;
 
-    const result = mergeScriptExecutionResults({
+    const source = {
       thinks,
       queryLogs,
+      observations,
       logs,
       errors,
       instructionErrors,
+      errorCodes: [...errorCodes],
       duration,
-    });
+      completedActions,
+      silenceReason: "not now",
+    };
+    const result = mergeScriptExecutionResults([source]);
 
-    expect(result.thinks).toBe(thinks);
-    expect(result.queryLogs).toBe(queryLogs);
-    expect(result.logs).toBe(logs);
-    expect(result.errors).toBe(errors);
-    expect(result.instructionErrors).toBe(instructionErrors);
+    expect(result.thinks).toEqual(thinks);
+    expect(result.queryLogs).toEqual(queryLogs);
+    expect(result.observations).toEqual(observations);
+    expect(result.logs).toEqual(logs);
+    expect(result.errors).toEqual(errors);
+    expect(result.instructionErrors).toEqual(instructionErrors);
+    expect(result.errorCodes).toEqual(["command_invalid_target"]);
     expect(result.duration).toBe(42);
-    // ADR-214 Wave B: ScriptExecutionResult 字段
-    expect(result.completedActions).toEqual([]);
-    expect(result.silenceReason).toBeNull();
+    expect(result.completedActions).toEqual(completedActions);
+    expect(result.silenceReason).toBe("not now");
   });
 
   it("空输入返回有效的 ScriptExecutionResult 结构", () => {
-    const result = mergeScriptExecutionResults({});
+    const result = emptyScriptExecutionResult();
 
     expect(result.thinks).toEqual([]);
     expect(result.queryLogs).toEqual([]);
     expect(result.logs).toEqual([]);
     expect(result.errors).toEqual([]);
     expect(result.instructionErrors).toEqual([]);
+    expect(result.errorCodes).toEqual([]);
     expect(result.duration).toBe(0);
     expect(result.completedActions).toEqual([]);
     expect(result.silenceReason).toBeNull();
+  });
+
+  it("EngagementSession 从 SubcycleResult 保留执行事实", () => {
+    const s = new EngagementSession();
+
+    s.absorb({
+      outcome: "terminal",
+      execution: emptyScriptExecutionResult({
+        thinks: ["t"],
+        queryLogs: [{ fn: "q", result: "r" }],
+        logs: ["visible"],
+        instructionErrors: ["bad instruction"],
+        errors: ["boom"],
+        errorCodes: ["command_cross_chat_send"],
+        completedActions: ["sent:chatId=1:msgId=2"],
+        silenceReason: "not now",
+      }),
+      duration: 12,
+      roundsUsed: 1,
+      episodeRounds: 0,
+    });
+
+    const merged = s.toMergedResult();
+    expect(merged.logs).toEqual(["visible"]);
+    expect(merged.errors).toEqual(["boom"]);
+    expect(merged.errorCodes).toEqual(["command_cross_chat_send"]);
+    expect(merged.completedActions).toEqual(["sent:chatId=1:msgId=2"]);
+    expect(merged.silenceReason).toBe("not now");
   });
 });
 

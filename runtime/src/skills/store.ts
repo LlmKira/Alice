@@ -17,10 +17,11 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 /** 存储根目录。 */
 const DEFAULT_STORE_ROOT = process.env.ALICE_STORE_ROOT
@@ -89,6 +90,29 @@ export function compileSkillExecutable(
 
   chmodSync(outputFile, 0o755);
   return outputFile;
+}
+
+export function wrapSkillExecutable(
+  commandPath: string,
+  skillName: string,
+  options?: { realPath?: string },
+): string {
+  const realPath = options?.realPath ?? join(resolve(commandPath, ".."), `.${skillName}.real`);
+  const realBasename = basename(realPath);
+  rmSync(realPath, { force: true });
+  renameSync(commandPath, realPath);
+  writeFileSync(
+    commandPath,
+    [
+      "#!/usr/bin/env sh",
+      `export ALICE_SKILL=${JSON.stringify(skillName)}`,
+      'self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)',
+      `exec "$self_dir/${realBasename}" "$@"`,
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return commandPath;
 }
 
 /**

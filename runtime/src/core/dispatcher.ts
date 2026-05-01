@@ -175,6 +175,25 @@ export function createAliceDispatcher(options: CreateDispatcherOptions): Dispatc
     return errors.length > 0 ? `Invalid params: ${errors.join("; ")}` : null;
   }
 
+  function prepareArgs(
+    def: InstructionDefinition | QueryDefinition,
+    args: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const prepared = { ...args };
+    const rawContextVars = prepared.__contextVars;
+    delete prepared.__contextVars;
+
+    if (!def.deriveParams || !isPlainObject(rawContextVars)) return prepared;
+
+    for (const [paramName, derive] of Object.entries(def.deriveParams)) {
+      if (prepared[paramName] != null) continue;
+      const derived = derive(rawContextVars, prepared);
+      if (derived != null) prepared[paramName] = derived;
+    }
+
+    return prepared;
+  }
+
   // 指令 → Mod 索引
   const instructionIndex = new Map<string, { mod: ModDefinition; def: InstructionDefinition }>();
   for (const mod of mods) {
@@ -213,7 +232,8 @@ export function createAliceDispatcher(options: CreateDispatcherOptions): Dispatc
       dispatchDepth++;
       try {
         // ADR-70 P3: Zod 运行时验证
-        const validationError = validateParams(entry.def.params, args);
+        const preparedArgs = prepareArgs(entry.def, args);
+        const validationError = validateParams(entry.def.params, preparedArgs);
         if (validationError) {
           return { success: false, error: validationError };
         }
@@ -226,7 +246,7 @@ export function createAliceDispatcher(options: CreateDispatcherOptions): Dispatc
         const c = ctx(modName);
         let result: unknown;
         try {
-          result = entry.def.impl(c, args);
+          result = entry.def.impl(c, preparedArgs);
           commitState(modName, c);
         } catch (e) {
           // 回滚到执行前状态
@@ -241,7 +261,7 @@ export function createAliceDispatcher(options: CreateDispatcherOptions): Dispatc
           if (handler) {
             try {
               const lc = ctx(mod.meta.name);
-              handler(lc, args, result);
+              handler(lc, preparedArgs, result);
               commitState(mod.meta.name, lc);
             } catch (e) {
               log.warn(`Listener ${mod.meta.name}.${instruction} failed`, e);
@@ -262,13 +282,14 @@ export function createAliceDispatcher(options: CreateDispatcherOptions): Dispatc
         return undefined;
       }
       // ADR-70 P3: Zod 运行时验证
-      const validationError = validateParams(entry.def.params, args);
+      const preparedArgs = prepareArgs(entry.def, args);
+      const validationError = validateParams(entry.def.params, preparedArgs);
       if (validationError) {
         return { success: false, error: validationError };
       }
       const c = ctx(entry.mod.meta.name);
       try {
-        return entry.def.impl(c, args);
+        return entry.def.impl(c, preparedArgs);
       } catch (e) {
         log.error(`Query ${name} failed`, e);
         return undefined;

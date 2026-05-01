@@ -28,11 +28,11 @@ import {
 import { activationRetrieval } from "../graph/activation.js";
 import {
   ALICE_SELF,
-  CONTACT_PREFIX,
   EMOTIONAL_HALF_LIFE,
   EMOTIONAL_NOTED_THRESHOLD,
   EMOTIONAL_VIVID_THRESHOLD,
   ensureChannelId,
+  ensureContactId,
   FACT_CONSOLIDATION_FACTOR,
   FACT_DECAY_D,
   FACT_FORGET_THRESHOLD,
@@ -221,8 +221,7 @@ export function buildSocialPanorama(
         : (profile?.interests ?? []).slice(0, PANORAMA_MAX_INTERESTS);
 
     const lastActiveMs = attrs.last_active_ms ?? 0;
-    const numericPart = cid.slice(CONTACT_PREFIX.length);
-    const privateCh = `channel:${numericPart}`;
+    const privateCh = ensureChannelId(cid) ?? cid;
     const lastSharedToMs = G.has(privateCh)
       ? Number(G.getDynamic(privateCh, "last_shared_ms") ?? 0)
       : 0;
@@ -413,6 +412,43 @@ function emptyProfile(tick: number, nowMs?: number): ContactProfile {
     traits: {},
     crystallizedInterests: {},
   };
+}
+
+function mergeContactProfile(target: ContactProfile, source: ContactProfile): void {
+  for (let h = 0; h < 24; h++) {
+    target.activeHours[h] = Math.max(target.activeHours[h] ?? 0, source.activeHours[h] ?? 0);
+  }
+  target.interests = Array.from(new Set([...target.interests, ...source.interests])).slice(0, 10);
+  target.lastUpdatedTick = Math.max(target.lastUpdatedTick ?? 0, source.lastUpdatedTick ?? 0);
+  target.lastUpdatedMs = Math.max(target.lastUpdatedMs ?? 0, source.lastUpdatedMs ?? 0);
+  target.previousPeakHour ??= source.previousPeakHour;
+  target.scheduleShift ??= source.scheduleShift;
+  target.portrait ??= source.portrait;
+  target.portraitTick ??= source.portraitTick;
+  target.portraitMs ??= source.portraitMs;
+  target.traits = { ...source.traits, ...target.traits };
+  target.crystallizedInterests = {
+    ...(source.crystallizedInterests ?? {}),
+    ...(target.crystallizedInterests ?? {}),
+  };
+}
+
+function normalizeContactProfileKeys(
+  graph: WorldModel,
+  state: Pick<RelationshipsState, "contactProfiles">,
+): void {
+  for (const [rawKey, profile] of Object.entries({ ...state.contactProfiles })) {
+    const contactId = resolveDisplayName(graph, rawKey) ?? ensureContactId(rawKey);
+    if (!contactId || contactId === rawKey || !graph.has(contactId)) continue;
+    if (graph.getNodeType(contactId) !== "contact") continue;
+
+    if (state.contactProfiles[contactId]) {
+      mergeContactProfile(state.contactProfiles[contactId], profile);
+    } else {
+      state.contactProfiles[contactId] = profile;
+    }
+    delete state.contactProfiles[rawKey];
+  }
 }
 
 /** ADR-64 VI-4: 创建空白群组画像。 */
@@ -795,8 +831,18 @@ export const relationshipsMod = createMod<RelationshipsState>("relationships", {
       category: "social",
     },
     impl(ctx, args) {
-      const contactId = String(args.contactId);
+      const rawContactId = String(args.contactId);
+      const contactId =
+        resolveDisplayName(ctx.graph, rawContactId) ?? ensureContactId(rawContactId);
       const hour = Number(args.hour);
+
+      if (
+        !contactId ||
+        !ctx.graph.has(contactId) ||
+        ctx.graph.getNodeType(contactId) !== "contact"
+      ) {
+        return { success: false, error: `contact not found: ${rawContactId}` };
+      }
 
       if (!ctx.state.contactProfiles[contactId]) {
         ctx.state.contactProfiles[contactId] = emptyProfile(ctx.tick, ctx.nowMs);
@@ -884,7 +930,7 @@ export const relationshipsMod = createMod<RelationshipsState>("relationships", {
         if (!ctx.state.groupProfiles[entityId].crystallizedInterests) {
           ctx.state.groupProfiles[entityId].crystallizedInterests = {};
         }
-        crystallized = ctx.state.groupProfiles[entityId].crystallizedInterests!;
+        crystallized = ctx.state.groupProfiles[entityId].crystallizedInterests;
       }
 
       const existing = crystallized[label];
@@ -1288,6 +1334,7 @@ export const relationshipsMod = createMod<RelationshipsState>("relationships", {
       "{ contactId: string; displayName: string; tier: number; memorizedFacts: Array<{ content: string; fact_type: string; retrievability: number }> } | null",
     returnHint: "{displayName, tier, lang, facts: [{content, type, clarity}]}",
     impl(ctx, args) {
+      normalizeContactProfileKeys(ctx.graph, ctx.state);
       const contactId = resolveContactId(ctx.graph, String(args.contactId));
       if (!contactId) return null;
 
@@ -1433,6 +1480,7 @@ export const relationshipsMod = createMod<RelationshipsState>("relationships", {
     },
     returns: "{ peakHour: number | undefined }",
     impl(ctx) {
+      normalizeContactProfileKeys(ctx.graph, ctx.state);
       let bestTier = Number.POSITIVE_INFINITY;
       let bestProfile: ContactProfile | undefined;
       for (const [contactId, profile] of Object.entries(ctx.state.contactProfiles)) {
@@ -1459,6 +1507,7 @@ export const relationshipsMod = createMod<RelationshipsState>("relationships", {
     },
   })
   .contribute((ctx): ContributionItem[] => {
+    normalizeContactProfileKeys(ctx.graph, ctx.state);
     const target = ctx.state.targetNodeId;
     const items: ContributionItem[] = [];
 
@@ -1960,6 +2009,8 @@ export const relationshipsMod = createMod<RelationshipsState>("relationships", {
    * - 只沿 Dunbar 阶梯 [500, 150, 50, 15, 5] 移动，不跳级
    */
   .onTickEnd((ctx) => {
+    normalizeContactProfileKeys(ctx.graph, ctx.state);
+
     // 每 TIER_EVAL_INTERVAL ticks 评估一次
     if (ctx.tick % TIER_EVAL_INTERVAL !== 0 || ctx.tick === 0) return;
 
@@ -2163,7 +2214,12 @@ export const relationshipsMod = createMod<RelationshipsState>("relationships", {
       // -- 活跃模式变化检测（场景 5: 长期陪伴增强） --
       // 在 tier 评估周期中比较当前峰值活跃小时与上次记录的峰值，
       // 检测显著日程变化（>= 3 小时偏移），如 "你最近又开始熬夜了"。
-      const profile = ctx.state.contactProfiles[contactId];
+      const traitBeliefs = ctx.graph.beliefs.getByEntityAttrPrefix(contactId, "trait:");
+      let profile = ctx.state.contactProfiles[contactId];
+      if (!profile && traitBeliefs.length > 0) {
+        ctx.state.contactProfiles[contactId] = emptyProfile(ctx.tick, ctx.nowMs);
+        profile = ctx.state.contactProfiles[contactId];
+      }
       if (profile && profile.activeHours.length === 24) {
         const maxActivity = Math.max(...profile.activeHours);
         if (maxActivity > 0) {
@@ -2196,7 +2252,6 @@ export const relationshipsMod = createMod<RelationshipsState>("relationships", {
       if (profile) {
         const obsState2 = readModState(ctx, "observer");
         const impressionCounts = obsState2?.impressionCounts ?? {};
-        const traitBeliefs = ctx.graph.beliefs.getByEntityAttrPrefix(contactId, "trait:");
 
         for (const [attr, belief] of traitBeliefs) {
           // attr 形如 "trait:warmth"

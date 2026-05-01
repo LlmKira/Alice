@@ -21,7 +21,14 @@ vi.mock("@ai-sdk/openai-compatible", () => ({
   }),
 }));
 
-import { getAvailableProvider, initProviders, resetProviders } from "../src/llm/client.js";
+import {
+  getAuxiliaryProvider,
+  getEvalProvider,
+  initProviders,
+  resetProviders,
+  selectProviderForFirstPass,
+  selectProviderForTick,
+} from "../src/llm/client.js";
 import {
   type BreakerEventType,
   onBreakerStateChange,
@@ -44,8 +51,21 @@ async function tripBreaker(providerName: string, failures = 5): Promise<void> {
   }
 }
 
-function mockConfig(providers: Config["providers"]): Pick<Config, "providers"> {
-  return { providers };
+function mockConfig(
+  providers: Config["providers"],
+  routing?: Partial<Config["llmRouting"]>,
+): Pick<Config, "providers" | "llmRouting"> {
+  const names = providers.map((provider) => provider.name);
+  return {
+    providers,
+    llmRouting: {
+      firstPass: routing?.firstPass ?? names,
+      toolTick: routing?.toolTick ?? routing?.firstPass ?? names,
+      eval: routing?.eval ?? routing?.firstPass ?? names,
+      auxiliary: routing?.auxiliary ?? routing?.firstPass ?? names,
+      reflect: routing?.reflect ?? routing?.firstPass ?? names,
+    },
+  };
 }
 
 afterEach(() => {
@@ -54,17 +74,39 @@ afterEach(() => {
 });
 
 describe("D5: Provider Fallback", () => {
-  it("多 provider 初始化 + 默认选择第一个", () => {
+  it("多 provider 初始化 + firstPass 使用显式路由", () => {
     initProviders(
-      mockConfig([
-        { name: "primary", baseUrl: "https://a.io/v1", apiKey: "k1", model: "m1" },
-        { name: "secondary", baseUrl: "https://b.io/v1", apiKey: "k2", model: "m2" },
-      ]) as Config,
+      mockConfig(
+        [
+          { name: "primary", baseUrl: "https://a.io/v1", apiKey: "k1", model: "m1" },
+          { name: "secondary", baseUrl: "https://b.io/v1", apiKey: "k2", model: "m2" },
+        ],
+        { firstPass: ["primary"], toolTick: ["secondary"] },
+      ) as Config,
     );
 
-    const result = getAvailableProvider();
+    const result = selectProviderForFirstPass();
     expect(result.name).toBe("primary");
     expect(result.model).toBe("m1");
+  });
+
+  it("firstPass route 使用 shuffle bag 覆盖首轮模型池", () => {
+    initProviders(
+      mockConfig(
+        [
+          { name: "p1", baseUrl: "https://a.io/v1", apiKey: "k1", model: "m1" },
+          { name: "p2", baseUrl: "https://b.io/v1", apiKey: "k2", model: "m2" },
+          { name: "p3", baseUrl: "https://c.io/v1", apiKey: "k3", model: "m3" },
+        ],
+        { firstPass: ["p1", "p2", "p3"], toolTick: ["p1"] },
+      ) as Config,
+    );
+
+    const firstBag = new Set(Array.from({ length: 3 }, () => selectProviderForFirstPass().model));
+    const secondBag = new Set(Array.from({ length: 3 }, () => selectProviderForFirstPass().model));
+
+    expect(firstBag).toEqual(new Set(["m1", "m2", "m3"]));
+    expect(secondBag).toEqual(new Set(["m1", "m2", "m3"]));
   });
 
   it("primary breaker open → fallback 到 secondary", async () => {
@@ -78,7 +120,7 @@ describe("D5: Provider Fallback", () => {
     // 让 primary 的 breaker open
     await tripBreaker("primary");
 
-    const result = getAvailableProvider();
+    const result = selectProviderForFirstPass();
     expect(result.name).toBe("secondary");
     expect(result.model).toBe("m2");
   });
@@ -94,15 +136,15 @@ describe("D5: Provider Fallback", () => {
     await tripBreaker("primary");
     await tripBreaker("secondary");
 
-    const result = getAvailableProvider();
+    const result = selectProviderForFirstPass();
     expect(result.name).toBe("primary");
   });
 
-  it("单 provider 向后兼容", () => {
+  it("单 endpoint 可用", () => {
     initProviders(
       mockConfig([
         {
-          name: "default",
+          name: "first-pass",
           baseUrl: "https://api.openai.com/v1",
           apiKey: "sk-test",
           model: "gpt-4o",
@@ -110,13 +152,129 @@ describe("D5: Provider Fallback", () => {
       ]) as Config,
     );
 
-    const result = getAvailableProvider();
-    expect(result.name).toBe("default");
+    const result = selectProviderForFirstPass();
+    expect(result.name).toBe("first-pass");
     expect(result.model).toBe("gpt-4o");
   });
 
-  it("未初始化时 getAvailableProvider 抛出", () => {
-    expect(() => getAvailableProvider()).toThrow("No providers initialized");
+  it("未初始化时 selectProviderForFirstPass 抛出", () => {
+    expect(() => selectProviderForFirstPass()).toThrow("No providers initialized");
+  });
+
+  it("tick 入口按模型 ID 轮换，endpoint name 只作为路由键", () => {
+    initProviders(
+      mockConfig(
+        [
+          { name: "p1", baseUrl: "https://a.io/v1", apiKey: "k1", model: "m1" },
+          { name: "p2", baseUrl: "https://b.io/v1", apiKey: "k2", model: "m2" },
+          { name: "p3", baseUrl: "https://c.io/v1", apiKey: "k3", model: "m3" },
+        ],
+        { firstPass: ["p1"], toolTick: ["p1", "p2", "p3"] },
+      ) as Config,
+    );
+
+    const firstBag = new Set(Array.from({ length: 3 }, () => selectProviderForTick().model));
+    const secondBag = new Set(Array.from({ length: 3 }, () => selectProviderForTick().model));
+
+    expect(firstBag).toEqual(new Set(["m1", "m2", "m3"]));
+    expect(secondBag).toEqual(new Set(["m1", "m2", "m3"]));
+  });
+
+  it("auxiliary provider 使用辅助路由，不参与 toolTick 模型池", () => {
+    initProviders(
+      mockConfig(
+        [
+          { name: "first-pass", baseUrl: "https://a.io/v1", apiKey: "k1", model: "first-model" },
+          { name: "tool-a", baseUrl: "https://b.io/v1", apiKey: "k2", model: "tool-model-a" },
+          { name: "tool-b", baseUrl: "https://c.io/v1", apiKey: "k3", model: "tool-model-b" },
+          {
+            name: "auxiliary",
+            baseUrl: "https://d.io/v1",
+            apiKey: "k4",
+            model: "auxiliary-model",
+          },
+        ],
+        {
+          firstPass: ["first-pass"],
+          toolTick: ["tool-a", "tool-b"],
+          auxiliary: ["auxiliary", "first-pass"],
+        },
+      ) as Config,
+    );
+
+    expect(selectProviderForFirstPass().model).toBe("first-model");
+    expect(getAuxiliaryProvider().model).toBe("auxiliary-model");
+    expect(new Set([selectProviderForTick().name, selectProviderForTick().name])).toEqual(
+      new Set(["tool-a", "tool-b"]),
+    );
+  });
+
+  it("firstPass 可包含 Gemini，但 toolTick 工具执行池保持独立", () => {
+    initProviders(
+      mockConfig(
+        [
+          {
+            name: "first-pass-gemini",
+            baseUrl: "https://a.io/v1",
+            apiKey: "k1",
+            model: "vertex-gemini-3-flash-preview",
+          },
+          {
+            name: "tool-v4",
+            baseUrl: "https://b.io/v1",
+            apiKey: "k2",
+            model: "deepseek-v4-flash",
+          },
+        ],
+        { firstPass: ["first-pass-gemini", "tool-v4"], toolTick: ["tool-v4"] },
+      ) as Config,
+    );
+
+    const firstPassBag = new Set(Array.from({ length: 2 }, () => selectProviderForFirstPass().model));
+    expect(firstPassBag).toEqual(
+      new Set(["vertex-gemini-3-flash-preview", "deepseek-v4-flash"]),
+    );
+    expect(selectProviderForTick().model).toBe("deepseek-v4-flash");
+  });
+
+  it("eval route 独立于 firstPass 和 toolTick", () => {
+    initProviders(
+      mockConfig(
+        [
+          { name: "first-pass", baseUrl: "https://a.io/v1", apiKey: "k1", model: "first-model" },
+          { name: "tool", baseUrl: "https://b.io/v1", apiKey: "k2", model: "tool-model" },
+          { name: "eval", baseUrl: "https://c.io/v1", apiKey: "k3", model: "eval-model" },
+        ],
+        { firstPass: ["first-pass"], toolTick: ["tool"], eval: ["eval"] },
+      ) as Config,
+    );
+
+    expect(selectProviderForFirstPass().model).toBe("first-model");
+    expect(selectProviderForTick().model).toBe("tool-model");
+    expect(getEvalProvider().model).toBe("eval-model");
+  });
+
+  it("auxiliary route 的第一个 endpoint 熔断后 fallback 到下一个", async () => {
+    initProviders(
+      mockConfig(
+        [
+          { name: "first-pass", baseUrl: "https://a.io/v1", apiKey: "k1", model: "first-model" },
+          {
+            name: "auxiliary",
+            baseUrl: "https://b.io/v1",
+            apiKey: "k2",
+            model: "auxiliary-model",
+          },
+        ],
+        { firstPass: ["first-pass"], auxiliary: ["auxiliary", "first-pass"] },
+      ) as Config,
+    );
+
+    await tripBreaker("auxiliary");
+
+    const result = getAuxiliaryProvider();
+    expect(result.name).toBe("first-pass");
+    expect(result.model).toBe("first-model");
   });
 });
 

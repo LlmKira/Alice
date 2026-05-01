@@ -11,7 +11,11 @@ export function getRecentMessagesByChat(
   chatId: string,
   limit = 20,
 ): Array<{
+  platform: string;
   msgId: number | null;
+  nativeChatId: string | null;
+  nativeMsgId: string | null;
+  stableMessageId: string | null;
   senderName: string | null;
   senderId: string | null;
   text: string | null;
@@ -23,7 +27,11 @@ export function getRecentMessagesByChat(
   const db = getDb();
   return db
     .select({
+      platform: messageLog.platform,
       msgId: messageLog.msgId,
+      nativeChatId: messageLog.nativeChatId,
+      nativeMsgId: messageLog.nativeMsgId,
+      stableMessageId: messageLog.stableMessageId,
       senderName: messageLog.senderName,
       senderId: messageLog.senderId,
       text: messageLog.text,
@@ -78,8 +86,15 @@ export function getRecentMessagesBySender(
  * @see docs/adr/97-reply-chain-diffusion-context.md
  */
 export interface DbMessageRecord {
-  /** Telegram 消息 ID。Alice 自发消息在记录时可能尚无 msgId，此时为 null。 */
+  platform: string;
+  /** UI-local visible reference number. Some platforms/rows may not have one. */
   msgId: number | null;
+  /** 平台原生聊天 ID。 */
+  nativeChatId: string | null;
+  /** 平台原生消息 ID。 */
+  nativeMsgId: string | null;
+  /** 跨平台稳定消息 ID：message:<platform>:<nativeChatId>:<nativeMsgId>。 */
+  stableMessageId: string | null;
   tick: number;
   senderId: string | null;
   senderName: string | null;
@@ -93,7 +108,11 @@ export interface DbMessageRecord {
 
 /** SELECT 投影——与 DbMessageRecord 字段对齐。 */
 const MESSAGE_RECORD_COLUMNS = {
+  platform: messageLog.platform,
   msgId: messageLog.msgId,
+  nativeChatId: messageLog.nativeChatId,
+  nativeMsgId: messageLog.nativeMsgId,
+  stableMessageId: messageLog.stableMessageId,
   tick: messageLog.tick,
   senderId: messageLog.senderId,
   senderName: messageLog.senderName,
@@ -105,7 +124,7 @@ const MESSAGE_RECORD_COLUMNS = {
 } as const;
 
 /**
- * 按 Telegram msgId 获取单条消息。
+ * 按当前聊天可见 msgId 获取单条消息。
  * 使用 idx_message_log_chat_msg 复合索引。
  *
  * @see docs/adr/97-reply-chain-diffusion-context.md
@@ -121,7 +140,11 @@ export function getMessageByMsgId(chatId: string, msgId: number): DbMessageRecor
   const r = rows[0];
   if (!r || r.msgId == null) return null;
   return {
+    platform: r.platform,
     msgId: r.msgId,
+    nativeChatId: r.nativeChatId,
+    nativeMsgId: r.nativeMsgId,
+    stableMessageId: r.stableMessageId,
     tick: r.tick,
     senderId: r.senderId,
     senderName: r.senderName,
@@ -137,8 +160,7 @@ export function getMessageByMsgId(chatId: string, msgId: number): DbMessageRecor
  * 获取 msgId 周围 ±radius 条消息（同 chatId）。
  * ORDER BY msgId ASC，用 BETWEEN 范围查询。
  *
- * Telegram msgId 在同一 chat 中单调递增，间隙通常很小，
- * BETWEEN 对 radius=1 足够精确。
+ * 此函数只服务有数值型当前聊天引用号的平台路径；无 msgId 的平台行不会进入结果。
  *
  * @see docs/adr/97-reply-chain-diffusion-context.md
  */
@@ -161,7 +183,11 @@ export function getMessageCluster(
   return rows
     .filter((r): r is typeof r & { msgId: number } => r.msgId != null)
     .map((r) => ({
+      platform: r.platform,
       msgId: r.msgId,
+      nativeChatId: r.nativeChatId,
+      nativeMsgId: r.nativeMsgId,
+      stableMessageId: r.stableMessageId,
       tick: r.tick,
       senderId: r.senderId,
       senderName: r.senderName,

@@ -2,7 +2,7 @@
  * Blackboard Tick Prompt 构建器 — 从 Blackboard 状态组装 LLM prompt。
  *
  * - Shell Manual：真实命令空间 + engine bridge
- * - Capability Guide：从 CAPABILITY_FAMILIES + 工具 affordance 生成 man <category> 填写指南
+ * - Shell Manual：扁平展示真实命令签名；详细用法走 `<command> --help`
  * - 复用叶子函数：resolveTarget, timeline
  *
  * ═══════════════════════════════════════════════════════════════════════
@@ -31,12 +31,14 @@ import type { Dispatcher } from "../../core/dispatcher.js";
 import { enforcePromptStyle } from "../../core/prompt-style.js";
 import { generateShellManual } from "../../core/shell-manual.js";
 import { estimateTokens, renderContributionsByZone } from "../../core/storyteller.js";
-import type { ModDefinition } from "../../core/types.js";
+import type { ContributionItem, ModDefinition } from "../../core/types.js";
 import { applyVisibilityFilter, buildAudienceContext } from "../../core/visibility.js";
 import { findActiveConversation } from "../../graph/queries.js";
 import type { WorldModel } from "../../graph/world-model.js";
 import { getInjectableFeedItems } from "../../mods/feeds.mod.js";
 import { buildUserPromptSnapshot, ChatTarget, renderUserPrompt } from "../../prompt/index.js";
+import { replaceSocialCaseWritebackContextVars } from "../../social-case/context.js";
+import { buildSocialCasePromptSurface } from "../../social-case/prompt.js";
 import { createLogger } from "../../utils/logger.js";
 import { humanDuration } from "../../utils/time-format.js";
 import { getFacetTags, getFacetWhisper } from "../../voices/palette.js";
@@ -49,6 +51,18 @@ import { resolveTarget } from "./target.js";
 import type { Blackboard, FeatureFlags, UnifiedTool } from "./types.js";
 
 const log = createLogger("tick/prompt");
+
+const FEEDBACK_CONTRIBUTION_KEYS = new Set(["last-action-recap", "outcome-history"]);
+
+function feedbackEntriesFromContributions(items: readonly ContributionItem[]): string[] {
+  return items
+    .filter(
+      (item) => item.bucket === "section" && item.key && FEEDBACK_CONTRIBUTION_KEYS.has(item.key),
+    )
+    .flatMap((item) => item.lines.map((line) => String(line)))
+    .filter((line) => line.length > 0)
+    .slice(0, 8);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 类型
@@ -77,19 +91,20 @@ export interface TickPromptContext {
   messages: MessageRecord[];
   observations: string[];
   round: number;
-  /** ADR-232: episode 内 TC 续轮次数（watching 触发的额外轮数）。0 = 首轮。 */
+  /** episode 内 block 续轮次数（host 触发的额外轮数，如本地 follow-up / 自纠）。0 = 首轮。 */
   episodeRound?: number;
   /** 墙钟时间覆盖（ms）。省略时使用 Date.now()。Eval 用固定时间戳消除时间漂移。 */
   nowMs?: number;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Capability Guide — 从工具 affordance 生成 needs 填写指南
+// Legacy Category Summary — 历史兼容：从工具 affordance 生成类别摘要
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * 从 contextual 工具的 affordance 元数据生成 Capability Guide。
- * 告诉 LLM 可以通过 man <category> 激活哪些类别，以及何时该激活。
+ * 从 contextual 工具的 affordance 元数据生成类别摘要。
+ * ADR-223 后正常 prompt 不再注入该 guide；shell manual 扁平展示所有可见命令。
+ * 保留此函数是为了兼容旧测试/实验入口，文案统一指向 `<command> --help`。
  *
  * always 工具不需要出现（始终可见），on-demand 不通过 needs 激活。
  * 只渲染 contextual 工具的 category + whenToUse。
@@ -127,7 +142,7 @@ export function buildCapabilityGuide(
   if (categories.size === 0) return "";
 
   const lines: string[] = [
-    "## Capability Guide",
+    "## Command Categories",
     "",
     "Run `<command> --help` for usage details.",
     "",
@@ -204,6 +219,24 @@ export async function buildTickPrompt(
     }
   }
 
+  const rawContributions = dispatcher.collectContributions();
+  const feedbackEntries = feedbackEntriesFromContributions(rawContributions);
+  let socialCaseLines: string[] = [];
+  try {
+    const socialCaseSurface = buildSocialCasePromptSurface({
+      G,
+      target: item.target ?? null,
+      chatType,
+    });
+    socialCaseLines = socialCaseSurface.lines;
+    replaceSocialCaseWritebackContextVars(
+      board.contextVars as Record<string, unknown>,
+      socialCaseSurface.contextVars,
+    );
+  } catch (error) {
+    log.warn("Social case prompt replay failed", error);
+  }
+
   // 构建 snapshot（内部判定 isBot、isOwnedChannel 等标志）
   const snapshot = buildUserPromptSnapshot({
     G,
@@ -221,6 +254,8 @@ export async function buildTickPrompt(
     contactProfiles: relState?.contactProfiles,
     jargonEntries: targetJargon.length > 0 ? targetJargon : undefined,
     feedItems: isChannel ? getInjectableFeedItems() : undefined,
+    feedbackEntries,
+    socialCaseLines,
     peripheralConfig:
       !isGroup && !isChannel
         ? {
@@ -238,9 +273,9 @@ export async function buildTickPrompt(
     hasBots: board.features.hasBots,
   });
 
-  // ── 工具手册 + Capability Guide ──
+  // ── 工具手册 ──
   const manual = await generateShellManual(dispatcher.mods);
-  // ADR-223: 扁平工具可见性 — Capability Guide 已删除。
+  // ADR-223: 扁平工具可见性 — category guide 已从普通 prompt 删除。
   // 56 个工具 × CLI 签名 ≈ 4000 token，在 12K budget 内。
   // 所有工具签名已通过 Command Catalog + shell manual 扁平展示。
   // 三层折叠（core/capability/on-demand）为省 2000 token 导致搜索等关键工具被永久隐藏。
@@ -266,7 +301,6 @@ export async function buildTickPrompt(
   // ADR-172: Contribute → Rank → 【Filter】 → Trim → Inject
   // ADR-220: 只收集 header bucket（system prompt 用）。
   // User prompt 完全由新 ECS 管线生成，section/footer bucket 不再需要。
-  const rawContributions = dispatcher.collectContributions();
   const headerOnly = rawContributions.filter((c) => c.bucket === "header");
   const audience = buildAudienceContext(G, item.target ?? null, chatType);
   const contributions = applyVisibilityFilter(headerOnly, audience, G);

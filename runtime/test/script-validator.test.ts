@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   registerKnownCommands,
+  registerKnownSubcommands,
   resetKnownCommands,
   validateScript,
 } from "../src/core/script-validator.js";
@@ -49,6 +50,13 @@ describe("validateScript", () => {
     expect(result.valid).toBe(true);
   });
 
+  it("接受双引号参数里的真实多行文本", () => {
+    const result = validateScript(
+      'irc reply --ref 130199 --text "好哦 那讲个短的\n\n从前有颗星星\n晚安"\nself feel --valence positive',
+    );
+    expect(result.valid).toBe(true);
+  });
+
   it("未知命令 → 报错", () => {
     const result = validateScript("unknowncmd hello");
     expect(result.valid).toBe(false);
@@ -58,6 +66,31 @@ describe("validateScript", () => {
   it("变量赋值 → 跳过（不是命令）", () => {
     const result = validateScript('recent=$(irc tail --count 5)\nirc say --text "hello"');
     expect(result.valid).toBe(true);
+  });
+
+  it("拒绝 #latest 这类虚构消息引用", () => {
+    const result = validateScript("irc react --ref #latest --emoji 👀");
+    expect(result.valid).toBe(false);
+    expect(result.summary).toContain("never latest");
+  });
+
+  it("拒绝裸 # 数字消息引用，避免 shell 注释吞掉后续参数", () => {
+    const result = validateScript('irc reply --ref #12099 --text "hello"');
+    expect(result.valid).toBe(false);
+    expect(result.summary).toContain("starts a shell comment");
+  });
+
+  it("接受数字消息引用", () => {
+    const result = validateScript('irc reply --ref 12099 --text "hello"');
+    expect(result.valid).toBe(true);
+  });
+
+  it("拒绝用 shell 变量作为消息引用", () => {
+    const result = validateScript(
+      'msg_id=$(irc tail --count 1)\nirc react --ref "$msg_id" --emoji 👀',
+    );
+    expect(result.valid).toBe(false);
+    expect(result.summary).toContain("--ref must be a literal visible msgId");
   });
 
   it("shell 关键字 → 跳过", () => {
@@ -78,6 +111,26 @@ describe("validateScript", () => {
     const result = validateScript("xyzzyplugh hello");
     expect(result.valid).toBe(false);
     expect(result.errors[0].message).not.toContain("did you mean");
+  });
+
+  it("注册子命令后拒绝不存在的 self 子命令", () => {
+    registerKnownSubcommands("self", ["feel", "note", "diary"]);
+
+    const result = validateScript("self read --in @room --count 5");
+
+    expect(result.valid).toBe(false);
+    expect(result.errors[0].code).toBe("unknown_subcommand");
+    expect(result.summary).toContain("unknown self subcommand 'read'");
+  });
+
+  it("注册子命令后拒绝不存在的 irc 子命令", () => {
+    registerKnownSubcommands("irc", ["read", "tail", "whois"]);
+
+    const result = validateScript("irc unblock --target Replies");
+
+    expect(result.valid).toBe(false);
+    expect(result.errors[0].code).toBe("unknown_subcommand");
+    expect(result.summary).toContain("unknown irc subcommand 'unblock'");
   });
 
   // ── registerKnownCommands ───────────────────────────────────────────

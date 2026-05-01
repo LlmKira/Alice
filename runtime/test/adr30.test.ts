@@ -2,9 +2,8 @@
  * ADR-30 实现测试：预测偏差场核心功能。
  *
  * 测试覆盖:
- * - Self mood decay（半衰期公式）
- * - R_v mood 调制（Sociability/Caution 权重偏移）
- * - feel() + mood_set_ms 同步（target 由 deriveParams 注入）
+ * - 旧 self mood 默认字段的兼容形状
+ * - 焦点集不消费 mood scalar
  * - Digest 行动（mark_read + relevance 衰减）
  * - P6 profile completeness gap（Def 3.3）
  * - Typed self-facts（分类存储 + 淘汰优先级）
@@ -42,9 +41,9 @@ function makeTensionMap(entries: [string, Partial<TensionVector>][]): Map<string
   return map;
 }
 
-// -- Self mood decay ---------------------------------------------------------
+// -- Legacy self mood fields -------------------------------------------------
 
-describe("ADR-30: self mood decay", () => {
+describe("ADR-30 legacy self mood fields", () => {
   it("self 节点默认 mood_valence=0, mood_set_ms=0", () => {
     const G = new WorldModel();
     G.addAgent("self");
@@ -53,29 +52,11 @@ describe("ADR-30: self mood decay", () => {
     expect(attrs.mood_set_ms).toBe(0);
   });
 
-  it("mood_effective = mood_valence × 0.5^(elapsedS/halfLife)", () => {
+  it("ADR-268: tests must not treat legacy scalar decay as runtime authority", () => {
     const G = new WorldModel();
-    G.addAgent("self", { mood_valence: 0.8, mood_set_ms: 0 });
-
-    // 模拟 selfMoodDecay 逻辑（halfLife 单位为秒）
-    const nowMs = tickMs(60); // 60 ticks × 60s = 3600s
-    const halfLife = 3600; // 秒
-    const baseMood = Number(G.getAgent("self").mood_valence);
-    const moodSetMs = Number(G.getAgent("self").mood_set_ms);
-    const elapsedS = (nowMs - moodSetMs) / 1000; // 3600s
-    const decay = 0.5 ** (elapsedS / halfLife);
-    const effective = baseMood * decay;
-
-    // 3600s / 3600 halfLife = 1 半衰期 → 0.8 × 0.5 = 0.4
-    expect(effective).toBeCloseTo(0.4, 10);
-  });
-
-  it("mood_valence=0 时 mood_effective=0（零不衰减）", () => {
-    const G = new WorldModel();
-    G.addAgent("self", { mood_valence: 0, mood_set_ms: 0 });
-    const baseMood = Number(G.getAgent("self").mood_valence);
-    expect(baseMood).toBe(0);
-    // selfMoodDecay 中 baseMood === 0 时直接返回，不计算
+    G.addAgent("self", { mood_valence: 0.8, mood_set_ms: tickMs(1) });
+    expect(G.getAgent("self").mood_valence).toBe(0.8);
+    expect(G.getAgent("self").mood_effective).toBeUndefined();
   });
 });
 

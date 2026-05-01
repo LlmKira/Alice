@@ -6,11 +6,12 @@
  */
 
 import type { z } from "zod";
+import { albumSubCommands } from "../system/album-cli.js";
 import { alicePkgSubCommands } from "../system/alice-pkg-cli.js";
 import { renderSubCommandSynopsis } from "../system/citty-synopsis.js";
 import { ircSubCommands } from "../system/irc-cli.js";
 import { probeCommandCatalog } from "./command-catalog.js";
-import { registerKnownCommands } from "./script-validator.js";
+import { registerKnownCommands, registerKnownSubcommands } from "./script-validator.js";
 import type { ModDefinition, ParamDefinition } from "./types.js";
 
 function isOptionalParam(param: ParamDefinition): boolean {
@@ -25,10 +26,13 @@ function toKebab(snake: string): string {
 const MANUAL_OMIT_ARGS = new Set(["json"]);
 
 function renderIrcSection(): string[] {
+  registerKnownSubcommands("irc", Object.keys(ircSubCommands));
   const lines = [
     "## irc",
     "",
-    "Named flags only. `--in` omitted = current chat. Hidden compatibility aliases are omitted here.",
+    "Named flags only. Omit `--in` for this chat; never write `--in current`.",
+    "Reaction emoji must be Telegram-supported, for example: 👍 👎 ❤ 🔥 🥰 👏 😁 🤔 😢 🎉 👀 😴.",
+    "When you don't know who someone is or what's going on, a quick lookup (`irc whois`, `irc threads`) fills you in instantly.",
     "",
     ...renderSubCommandSynopsis("irc", ircSubCommands, { omitArgs: MANUAL_OMIT_ARGS }),
   ];
@@ -70,6 +74,7 @@ function paramPlaceholder(paramName: string, schema: z.ZodTypeAny): string {
 
 function renderSelfCommands(mods: readonly ModDefinition[]): string[] {
   const lines: string[] = ["## self", ""];
+  const subcommands: string[] = [];
 
   for (const mod of mods) {
     const instructionEntries = Object.entries(mod.instructions ?? {}).filter(
@@ -80,6 +85,7 @@ function renderSelfCommands(mods: readonly ModDefinition[]): string[] {
     );
 
     for (const [name, def] of instructionEntries) {
+      subcommands.push(toKebab(name));
       const derivedKeys = def.deriveParams
         ? new Set(Object.keys(def.deriveParams))
         : new Set<string>();
@@ -95,6 +101,7 @@ function renderSelfCommands(mods: readonly ModDefinition[]): string[] {
     }
 
     for (const [name, def] of queryEntries) {
+      subcommands.push(toKebab(name));
       const derivedKeys = def.deriveParams
         ? new Set(Object.keys(def.deriveParams))
         : new Set<string>();
@@ -110,6 +117,7 @@ function renderSelfCommands(mods: readonly ModDefinition[]): string[] {
     }
   }
 
+  registerKnownSubcommands("self", subcommands);
   lines.push("");
   return lines;
 }
@@ -117,7 +125,29 @@ function renderSelfCommands(mods: readonly ModDefinition[]): string[] {
 // ─── Command Catalog（系统命令 + Skill 命令发现）──────────────────────
 
 function renderAlicePkgSection(): string[] {
+  registerKnownSubcommands("alice-pkg", Object.keys(alicePkgSubCommands));
   const lines = ["## alice-pkg", "", ...renderSubCommandSynopsis("alice-pkg", alicePkgSubCommands)];
+  lines.push("");
+  return lines;
+}
+
+function renderAlbumSection(): string[] {
+  registerKnownSubcommands("album", Object.keys(albumSubCommands));
+  const lines = [
+    "## album",
+    "",
+    "Search and send group photos Alice has already observed. Sending is current-chat scoped.",
+    "Search index fields: caption text, VLM/WDTagger description, OCR text, and tags. Current photo descriptions are usually English prose; OCR is raw/noisy text from screenshots and memes.",
+    'For ordinary image requests, search short visual English terms first: object + scene/color/action, for example `album search --query "kitten laptop" --count 5` or `album search --query "rocket fire smoke" --count 5`.',
+    // @see docs/adr/260-group-photo-album-affordance/README.md
+    // @see docs/adr/266-tool-result-action-closure/README.md
+    'When someone asks for a picture, search the group photo album before saying you cannot send one: `album search --query "visual words" --count 5`, then `album send --asset <assetId>` if a result fits.',
+    "For text-in-image requests, search exact visible words or distinctive OCR fragments. Use 1-3 short variants rather than a full sentence, because OCR may merge spaces or misread Cyrillic/Latin-looking letters.",
+    "If the user asks in another language, translate the visual target into likely English description words before searching; then inspect `description`/`ocrText` with `--json` and retry narrower or broader.",
+    "Do not use `--include-unavailable` for normal sends. It is only for diagnosing photos whose source message was deleted or became inaccessible.",
+    "",
+    ...renderSubCommandSynopsis("album", albumSubCommands, { omitArgs: MANUAL_OMIT_ARGS }),
+  ];
   lines.push("");
   return lines;
 }
@@ -150,15 +180,24 @@ export async function generateShellManual(mods: readonly ModDefinition[]): Promi
   const parts = [
     "## Shell Contract",
     "",
-    "Write a multi-line POSIX sh script. One command per line. `# ...` comments = inner monologue.",
+    'Return only one JSON object: {"script":"...","afterward":"done|waiting_reply|watching|resting|fed_up|cooling_down","residue":{...}}.',
+    "The JSON `script` value is a multi-line POSIX sh script. One command per line. `# ...` comments = inner monologue.",
+    "If you choose silence/no action, return a script with only `# ...` comments, for example `# nothing to add`.",
+    "Omit `residue` unless something feels unfinished.",
     "All commands support --help.",
+    "`<command> --help` opens detailed usage for specialized tools. But most of the time you don't need any of this — just talk.",
     "Do not invent aliases or positional shorthand. For `irc`, use named flags exactly as shown below.",
+    "Prefer double quotes for flag values. Avoid single-quoting natural language.",
+    "Do not parse CLI output with shell tools to get message IDs. Use visible numeric `msgId` values from the chat context, for example `--ref 12099`.",
+    "Batch pure reads in one script before you act. Split queries across multiple turns only when one result changes the next question.",
     "",
     "## Afterward",
     "",
-    "`done` | `waiting_reply` | `watching` | `fed_up` (closes chat) | `cooling_down` (freezes ~30min)",
+    "`done` | `waiting_reply` | `watching` | `resting` (sleep/leaves Telegram) | `fed_up` (closes chat) | `cooling_down` (freezes ~30min)",
+    "These are post-turn chat signals. Immediate same-tick follow-up is host-controlled from fresh observations.",
     "",
     ...renderIrcSection(),
+    ...renderAlbumSection(),
     ...renderSelfCommands(mods),
     ...renderAlicePkgSection(),
     ...skillCatalog,

@@ -10,7 +10,6 @@ function makeSnapshot(chatTargetType: UserPromptSnapshot["chatTargetType"]): Use
     chatTargetType,
     nowMs: Date.UTC(2026, 3, 5, 3, 0, 0),
     timezoneOffset: 0,
-    moodLabel: "neutral",
     target: {
       id: chatTargetType === "group" ? -1001234567890 : 42,
       displayName: chatTargetType === "group" ? "Test Group" : "Test Contact",
@@ -28,7 +27,8 @@ function makeSnapshot(chatTargetType: UserPromptSnapshot["chatTargetType"]): Use
     ownedChannels: [],
     timeline: { lines: [] },
     threads: [{ threadId: "42", title: "Test topic" }],
-    feedback: [],
+    socialCaseLines: [],
+    feedback: [{ text: "Sent a message to Test Contact." }],
     whisper: "stay calm",
     conversationRecap: [
       {
@@ -52,6 +52,7 @@ describe("prompt renderers style", () => {
     const text = renderGroup(makeSnapshot("group"));
 
     expect(text).toContain("## Open topics");
+    expect(text).not.toContain("Current mood:");
     expect(text).toContain("Alice: hello there");
     expect(text).not.toContain("\n  Alice: hello there");
     expect(lintPromptStyle(text)).toEqual([]);
@@ -60,7 +61,10 @@ describe("prompt renderers style", () => {
   it("private renderer 输出通过 prompt-style lint", () => {
     const text = renderPrivate(makeSnapshot("private_person"));
 
+    expect(text).toContain("3:00 AM");
+    expect(text).not.toContain("Current mood:");
     expect(text).toContain("## Open topics");
+    expect(text).toContain("Sent a message to Test Contact.");
     expect(text).toContain("Test Contact: hi back");
     expect(text).not.toContain("\n  Test Contact: hi back");
     expect(lintPromptStyle(text)).toEqual([]);
@@ -82,13 +86,29 @@ describe("prompt renderers style", () => {
           interests: ["compiler", "haskell"],
         },
       ],
-      timeline: { lines: ["[09:00] Tech Feed (#10): new compiler release"] },
+      timeline: { lines: ["[09:00] Tech Feed (msgId 10): new compiler release"] },
       feedItems: [{ title: "HN", url: "https://example.com", snippet: "FP thread is trending" }],
     });
 
     expect(text).toContain("## People you might share with");
+    expect(text).not.toContain("Current mood:");
     expect(text).toContain("## Recent posts (channel, you can read but not post)");
     expect(text).toContain("## From the web");
     expect(lintPromptStyle(text)).toEqual([]);
+  });
+
+  it("ADR-268 renders emotion style modulation without internal control terms", () => {
+    const snapshot = {
+      ...makeSnapshot("private_person"),
+      emotionProjection: "You are low on energy; shorter replies may feel more natural.",
+      emotionStyleHint: "This round fits a shorter, lower-effort reply.",
+    };
+    const text = renderPrivate(snapshot);
+
+    expect(text).toContain("low on energy");
+    expect(text).toContain("shorter, lower-effort reply");
+    expect(text).not.toContain("styleBudget");
+    expect(text).not.toContain("maxCharsMultiplier");
+    expect(text).not.toContain("emotion_control");
   });
 });

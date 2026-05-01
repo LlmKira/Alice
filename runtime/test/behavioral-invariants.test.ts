@@ -531,9 +531,21 @@ describe("ADR-189 蟑螂审计: active_cooling + bypass 集成 (GAP-1, P0)", () 
 
     // 验证有 active_cooling silence 记录
     const db = getDb();
-    const silences = db.select({ reason: silenceLog.reason }).from(silenceLog).all();
+    const silences = db
+      .select({
+        reason: silenceLog.reason,
+        deltaP: silenceLog.deltaP,
+        socialCost: silenceLog.socialCost,
+        netValue: silenceLog.netValue,
+      })
+      .from(silenceLog)
+      .all();
     const hasCooling = silences.some((r) => r.reason === "active_cooling");
     expect(hasCooling).toBe(true);
+    const cooling = silences.find((r) => r.reason === "active_cooling");
+    expect(cooling?.deltaP).toEqual(expect.any(Number));
+    expect(cooling?.socialCost).toEqual(expect.any(Number));
+    expect(cooling?.netValue).toEqual(expect.any(Number));
   });
 
   it("(b) IAUS winner bypass=true(pending_directed) + 高 classCounts → bypass active_cooling → enqueue", () => {

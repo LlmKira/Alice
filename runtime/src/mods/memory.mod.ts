@@ -22,6 +22,7 @@ import { section } from "../core/types.js";
 import { getDb } from "../db/connection.js";
 import { messageLog } from "../db/schema.js";
 import { extractNumericId } from "../graph/constants.js";
+import { parseTransportTargetId, stableTransportMessageId } from "../platform/transport.js";
 import { estimateAgeS } from "../pressure/clock.js";
 import { humanDuration, humanDurationAgo } from "../utils/time-format.js";
 
@@ -60,19 +61,30 @@ export const memoryMod = createMod<MemoryState>("memory", {
     params: z.object({
       chatId: z.string().min(1).describe("频道 ID"),
       text: z.string().min(1).describe("消息文本"),
-      msgId: z.number().optional().describe("Telegram 消息 ID（用于 reply directed 检测）"),
+      msgId: z.number().optional().describe("当前聊天可见消息引用号"),
     }),
     description: "记录发出的消息到 message_log",
     impl(ctx, args) {
       const text = String(args.text).slice(0, 4096);
+      const chatId = String(args.chatId);
+      const target = parseTransportTargetId(chatId);
+      const nativeChatId = target?.nativeId;
+      const nativeMsgId = args.msgId != null ? String(args.msgId) : undefined;
       // FTS 同步由 SQLite 触发器自动完成。
       // @see runtime/drizzle/0017_fts5_triggers.sql
       getDb()
         .insert(messageLog)
         .values({
           tick: ctx.tick,
-          chatId: String(args.chatId),
+          platform: target?.platform ?? "telegram",
+          chatId,
           msgId: args.msgId != null ? Number(args.msgId) : undefined,
+          nativeChatId,
+          nativeMsgId,
+          stableMessageId:
+            target && nativeMsgId != null
+              ? stableTransportMessageId(target.platform, target.nativeId, nativeMsgId)
+              : undefined,
           senderId: "self",
           senderName: "Alice",
           text,
@@ -185,7 +197,7 @@ export const memoryMod = createMod<MemoryState>("memory", {
           // ADR-110/166: 统一使用 estimateAgeS
           const agoS = estimateAgeS(m, ctx.nowMs, ctx.tick);
           const ago = humanDurationAgo(agoS);
-          // ADR-219: 传入 msg_id 使 LLM 可用 `irc forward --ref #msgId` 引用频道消息
+          // ADR-219: 传入当前聊天可见 msgId，使 LLM 可用 `irc forward --ref msgId` 引用频道消息。
           mb.timeline(ago, sender, preview, m.msgId);
         }
         // 用 display_name 替代 raw chatId（LLM 无障碍）

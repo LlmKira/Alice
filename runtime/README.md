@@ -16,55 +16,41 @@
 | SQLite | 本地数据库 | ✅ |
 | Docker | skill 沙箱执行 | ✅ |
 
-首次登录至少需要这几个 `.env` 字段：
+运行配置在 `runtime/config.toml`。这个文件只放非敏感配置，可以提交和发布。
+
+`.env` 只放 secret。首次登录至少需要这些字段：
 
 ```bash
-TELEGRAM_API_ID=123456
 TELEGRAM_API_HASH=abcdef123456
 TELEGRAM_PHONE=+8613800138000
+TELEGRAM_ADMIN=123456789
 
-LLM_BASE_URL=https://api.openai.com/v1
 LLM_API_KEY=sk-xxx
-LLM_MODEL=gpt-4o
 ```
 
 ## 焦点白名单
 
-如果你希望 Alice 只在少数几个聊天里分配注意力，可以直接在实例工作目录放一个
-`focus-whitelist.txt`。文件一旦存在，运行时会自动读取；不需要额外配置 `.env`。
+如果你希望 Alice 只在少数几个聊天里分配注意力，推荐直接写在 `runtime/config.toml`：
 
-这里建议直接写 Telegram chat ID，不需要写内部的 `channel:` 前缀。
-运行时会自动把纯数字 ID 归一化成内部 target。
-
-例如，工作目录是 `~/alice`：
-
-```bash
-cd ~/alice
-cat > focus-whitelist.txt <<'EOF'
-# 每行一个 Telegram chat ID
--1001234567890
-7785440246
-EOF
+```toml
+[focus]
+whitelist = [
+  "-1001234567890",
+  "7785440246",
+]
 ```
 
-文件格式规则：
-
-- 一行一个 Telegram chat ID，例如 `-1001234567890`
-- 也兼容内部格式 `channel:-1001234567890`
-- 支持空行
-- 支持 `#` 注释，包括行尾注释
+这里建议直接写 Telegram chat ID，不需要写内部的 `channel:` 前缀。运行时会自动归一化。
 
 行为边界：
 
 - 白名单只限制“待选目标”
 - 压力场仍然对全量图正常计算
-- 修改白名单文件后需要重启 Alice 生效
+- 修改 TOML 后需要重启 Alice 生效
 
-如果你不想使用默认文件名，也可以在 `.env` 里显式指定路径：
+## QQ / OneBot 接入
 
-```bash
-FOCUS_WHITELIST_PATH=/path/to/custom-focus-whitelist.txt
-```
+QQ 第一接入路线使用 OneBot v11 + NapCatQQ。部署、配置和最小验证见 [deploy/qq-onebot.md](./deploy/qq-onebot.md)。
 
 ## 方式一：一键安装
 
@@ -220,20 +206,20 @@ sudo pnpm --dir /usr/local/lib/alice rebuild better-sqlite3 @mtcute/node
 
 ### 3. `.env` 里填了 `OPENAI_*`，但 `alice doctor` 仍然报错
 
-Alice 现在只读取 `LLM_*` 字段。把旧字段改成：
+Alice 的非敏感配置读取 `runtime/config.toml`，`.env` 只提供 TOML 中 `*_env` 引用的 secret。把 key 放到：
 
 ```bash
-LLM_BASE_URL=...
 LLM_API_KEY=...
-LLM_MODEL=...
 ```
+
+模型名、base URL、模型池写在 `runtime/config.toml` 的 `[[providers]]` 里。
 
 ### 4. 启动时报 Telegram 登录相关错误
 
 请确认：
 
 - `TELEGRAM_PHONE` 已填写，且带国家区号，例如 `+8613800138000`
-- `TELEGRAM_API_ID` 是数字
+- `runtime/config.toml` 里的 `telegram.api_id` 是数字
 - `TELEGRAM_API_HASH` 不是 bot token
 
 ### 5. 需要手动跑数据库迁移吗？

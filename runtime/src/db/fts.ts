@@ -19,7 +19,11 @@ import type { DbMessageRecord } from "./queries.js";
 /** FTS5 搜索的 raw row 形状（与 better-sqlite3 的 .all() 返回对齐）。 */
 interface FtsSearchRow {
   id: number;
+  platform: string;
   msg_id: number | null;
+  native_chat_id: string | null;
+  native_msg_id: string | null;
+  stable_message_id: string | null;
   tick: number;
   chat_id: string;
   sender_id: string | null;
@@ -40,7 +44,11 @@ export type FtsMessageResult = DbMessageRecord & { chatId: string; snippet: stri
 /** raw row → FtsMessageResult 映射。 */
 function mapRow(r: FtsSearchRow): FtsMessageResult {
   return {
+    platform: r.platform,
     msgId: r.msg_id ?? null,
+    nativeChatId: r.native_chat_id,
+    nativeMsgId: r.native_msg_id,
+    stableMessageId: r.stable_message_id,
     tick: r.tick,
     chatId: r.chat_id,
     senderId: r.sender_id,
@@ -56,7 +64,8 @@ function mapRow(r: FtsSearchRow): FtsMessageResult {
 }
 
 /** SELECT 列投影——所有查询共用。 */
-const COLUMNS = `m.id, m.msg_id, m.tick, m.chat_id, m.sender_id, m.sender_name,
+const COLUMNS = `m.id, m.platform, m.msg_id, m.native_chat_id, m.native_msg_id, m.stable_message_id,
+  m.tick, m.chat_id, m.sender_id, m.sender_name,
   m.text, m.media_type, m.is_outgoing, m.reply_to_msg_id, m.created_at`;
 
 /** 搜索选项。 */

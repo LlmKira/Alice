@@ -7,7 +7,8 @@
 import { describe, expect, it } from "vitest";
 import type { ModContext } from "../src/core/types.js";
 import { WorldModel } from "../src/graph/world-model.js";
-import { computeExternalFeedback, observerMod } from "../src/mods/observer.mod.js";
+import { computeExternalFeedback } from "../src/mods/observer/external-feedback.js";
+import { observerMod } from "../src/mods/observer.mod.js";
 
 // biome-ignore lint/style/noNonNullAssertion: test — instructions 已知存在
 const instructions = observerMod.instructions!;

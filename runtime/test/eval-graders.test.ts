@@ -9,6 +9,7 @@
  * - gradeStructural（结构性评分：Intent primary + Branch secondary）
  */
 import { describe, expect, it } from "vitest";
+import { emptyScriptExecutionResult } from "../src/core/script-execution.js";
 import {
   BRANCH_INTENT_MAP,
   classifyBranch,
@@ -27,11 +28,8 @@ function makeTickResult(overrides: Partial<EvalTickResult> = {}): EvalTickResult
     outcome: "terminal",
     actions: [],
     instructions: [],
-    thinks: [],
-    queryLogs: [],
     observations: [],
-    errors: [],
-    instructionErrors: [],
+    execution: emptyScriptExecutionResult(),
     silenceReason: null,
     stepsUsed: 1,
     preparedCategories: [],
@@ -536,10 +534,12 @@ describe("gradeStructural", () => {
   it("queries.must 通过", () => {
     const result = makeTickResult({
       actions: [makeSendMessage()],
-      queryLogs: [
-        { fn: "get_profile", result: '{"name":"Alice"}' },
-        { fn: "get_chat_history", result: "[]" },
-      ],
+      execution: emptyScriptExecutionResult({
+        queryLogs: [
+          { fn: "get_profile", result: '{"name":"Alice"}' },
+          { fn: "get_chat_history", result: "[]" },
+        ],
+      }),
     });
     const assertions: StructuralAssertions = {
       expectedIntent: "engage",

@@ -34,6 +34,64 @@ export interface Output {
   exit: (code: number) => never;
 }
 
+// ── Structured Error Protocol ──
+
+export const CLI_ERROR_PREFIX = "__ALICE_ERROR__:";
+export const CLI_ERROR_DETAIL_PREFIX = "__ALICE_ERROR_DETAIL__:";
+
+export const CLI_ERROR_CODES = [
+  "command_cross_chat_send",
+  "command_invalid_target",
+  "command_invalid_message_id",
+  "command_invalid_reply_ref",
+  "command_missing_argument",
+  "command_arg_format",
+  "invalid_reaction",
+  "invalid_sticker_keyword",
+  "unreachable_telegram_user",
+  "voice_messages_forbidden",
+  "album_asset_not_found",
+  "album_source_missing",
+  "album_source_inaccessible",
+  "album_forward_restricted",
+  "album_send_failed",
+  "telegram_hard_permanent",
+  "telegram_soft_permanent",
+  "timeout",
+] as const;
+
+export type CliErrorCode = (typeof CLI_ERROR_CODES)[number];
+
+export interface CliErrorDetail {
+  code: CliErrorCode;
+  source: string;
+  currentChatId?: string | null;
+  requestedChatId?: string | null;
+  payload?: Record<string, unknown>;
+}
+
+export function isCliErrorCode(value: string): value is CliErrorCode {
+  return (CLI_ERROR_CODES as readonly string[]).includes(value);
+}
+
+export class CliExecutionError extends Error {
+  constructor(
+    readonly code: CliErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CliExecutionError";
+  }
+}
+
+export function emitCliErrorCode(output: Output, code: CliErrorCode): void {
+  output.error(`${CLI_ERROR_PREFIX}${code}`);
+}
+
+export function emitCliErrorDetail(output: Output, detail: CliErrorDetail): void {
+  output.error(`${CLI_ERROR_DETAIL_PREFIX}${JSON.stringify(detail)}`);
+}
+
 // ── Target Resolver 接口 ──
 
 /** 解析目标聊天 ID（返回 number 供 Engine API 使用）。 */
@@ -46,6 +104,8 @@ export interface CliContext {
   engine: EngineClient;
   output: Output;
   resolveTarget: TargetResolver;
+  /** 当前执行上下文的聊天 ID；发送类命令用它阻止跨聊天主动发话。 */
+  currentChatId?: number;
 }
 
 // ── Result Types ──
@@ -53,6 +113,8 @@ export interface CliContext {
 /** 发送消息结果。 */
 export interface SendResult {
   msgId?: number;
+  deliveredAs?: "voice" | "text";
+  fallbackReason?: string;
 }
 
 /** 下载结果。 */
@@ -76,8 +138,13 @@ export function formatCliError(cliName: string, msg: string): string {
 }
 
 /** 构造错误退出函数（闭包）。 */
-export function makeDie(output: Output, cliName: string): (msg: string) => never {
-  return (msg: string): never => {
+export function makeDie(
+  output: Output,
+  cliName: string,
+): (msg: string, code?: CliErrorCode, detail?: CliErrorDetail) => never {
+  return (msg: string, code?: CliErrorCode, detail?: CliErrorDetail): never => {
+    if (code) emitCliErrorCode(output, code);
+    if (detail) emitCliErrorDetail(output, detail);
     output.error(formatCliError(cliName, msg));
     output.exit(1);
   };

@@ -7,8 +7,13 @@
 
 import { md } from "@mtcute/markdown-parser";
 import type { Chat, ChatPreview, Message, StickerSet, TelegramClient } from "@mtcute/node";
-import { InputMedia, Long, type tl } from "@mtcute/node";
+import { InputMedia, Long, tl } from "@mtcute/node";
 import { createLogger } from "../utils/logger.js";
+import {
+  rethrowTelegramActionFailure,
+  TelegramActionError,
+  type TelegramActionErrorCode,
+} from "./errors.js";
 
 const log = createLogger("actions");
 
@@ -100,28 +105,32 @@ export async function sendText(
   const mdParsed = tryParseMarkdown(text);
 
   let sent: Message | undefined;
-  if (options.mentions?.length) {
-    const entities: tl.TypeMessageEntity[] = mdParsed ? [...mdParsed.entities] : [];
-    for (const m of options.mentions) {
-      // 使用 messageEntityMentionName（userId: number），mtcute _normalizeInputText
-      // 会在 sendText 内部自动转换为 inputMessageEntityMentionName + resolvePeer。
-      // @see docs/reference/mtcute/ packages/core/src/highlevel/methods/misc/normalize-text.ts
-      entities.push({
-        _: "messageEntityMentionName",
-        offset: m.offset,
-        length: m.length,
-        userId: m.userId,
-      });
+  try {
+    if (options.mentions?.length) {
+      const entities: tl.TypeMessageEntity[] = mdParsed ? [...mdParsed.entities] : [];
+      for (const m of options.mentions) {
+        // 使用 messageEntityMentionName（userId: number），mtcute _normalizeInputText
+        // 会在 sendText 内部自动转换为 inputMessageEntityMentionName + resolvePeer。
+        // @see docs/reference/mtcute/ packages/core/src/highlevel/methods/misc/normalize-text.ts
+        entities.push({
+          _: "messageEntityMentionName",
+          offset: m.offset,
+          length: m.length,
+          userId: m.userId,
+        });
+      }
+      sent = await client.sendText(
+        chatId,
+        { text: mdParsed ? mdParsed.text : text, entities },
+        { replyTo: options.replyToMsgId },
+      );
+    } else if (mdParsed) {
+      sent = await client.sendText(chatId, mdParsed, { replyTo: options.replyToMsgId });
+    } else {
+      sent = await client.sendText(chatId, text, { replyTo: options.replyToMsgId });
     }
-    sent = await client.sendText(
-      chatId,
-      { text: mdParsed ? mdParsed.text : text, entities },
-      { replyTo: options.replyToMsgId },
-    );
-  } else if (mdParsed) {
-    sent = await client.sendText(chatId, mdParsed, { replyTo: options.replyToMsgId });
-  } else {
-    sent = await client.sendText(chatId, text, { replyTo: options.replyToMsgId });
+  } catch (err) {
+    rethrowTelegramActionFailure(err, "send_text", { chatId: String(chatId) });
   }
   return sent?.id;
 }
@@ -164,11 +173,15 @@ export async function sendReaction(
   emoji: string,
 ): Promise<void> {
   await globalLimiter.acquire();
-  await client.sendReaction({
-    chatId,
-    message: msgId,
-    emoji,
-  });
+  try {
+    await client.sendReaction({
+      chatId,
+      message: msgId,
+      emoji,
+    });
+  } catch (err) {
+    rethrowTelegramActionFailure(err, "send_reaction", { chatId: String(chatId), msgId, emoji });
+  }
 }
 
 // ── M2: 行动空间扩展 ─────────────────────────────────────────────────────
@@ -203,14 +216,88 @@ export async function forwardMessage(
   fromChatId: string | number,
   msgId: number,
   toChatId: string | number,
+  options: { noAuthor?: boolean; noCaption?: boolean } = {},
 ): Promise<number | undefined> {
   await globalLimiter.acquire();
-  const sent = await client.forwardMessagesById({
-    fromChatId,
-    messages: [msgId],
-    toChatId,
-  });
+  let sent: Message[];
+  try {
+    sent = await client.forwardMessagesById({
+      fromChatId,
+      messages: [msgId],
+      toChatId,
+      noAuthor: options.noAuthor,
+      noCaption: options.noCaption,
+    });
+  } catch (err) {
+    rethrowTelegramActionFailure(err, "forward_message", {
+      fromChatId: String(fromChatId),
+      toChatId: String(toChatId),
+      msgId,
+    });
+  }
   return sent[0]?.id;
+}
+
+export function classifyAlbumSourceError(error: unknown): TelegramActionErrorCode | null {
+  if (tl.RpcError.is(error, "MESSAGE_ID_INVALID") || tl.RpcError.is(error, "MSG_ID_INVALID")) {
+    return "album_source_missing";
+  }
+  if (
+    tl.RpcError.is(error, "CHANNEL_PRIVATE") ||
+    tl.RpcError.is(error, "CHAT_FORBIDDEN") ||
+    tl.RpcError.is(error, "PEER_ID_INVALID") ||
+    tl.RpcError.is(error, "CHAT_ID_INVALID") ||
+    tl.RpcError.is(error, "USER_NOT_PARTICIPANT")
+  ) {
+    return "album_source_inaccessible";
+  }
+  if (tl.RpcError.is(error, "CHAT_FORWARDS_RESTRICTED")) {
+    return "album_forward_restricted";
+  }
+  return null;
+}
+
+export async function uploadMessageMediaCopy(
+  client: TelegramClient,
+  fromChatId: string | number,
+  msgId: number,
+  toChatId: string | number,
+  options: { caption?: string; replyToMsgId?: number } = {},
+): Promise<number | undefined> {
+  await globalLimiter.acquire();
+  const msgs = await client.getMessages(fromChatId, [msgId]);
+  const msg = msgs[0];
+  if (!msg) {
+    throw new TelegramActionError(
+      "album_source_missing",
+      `album source message ${msgId} not found`,
+    );
+  }
+  const media = msg.media;
+  if (!media) {
+    throw new TelegramActionError(
+      "album_source_missing",
+      `album source message ${msgId} has no media`,
+    );
+  }
+  const buffer = Buffer.from(
+    await client.downloadAsBuffer(media as Parameters<typeof client.downloadAsBuffer>[0]),
+  );
+  const inputMedia = InputMedia.auto(buffer, { fileName: `album-${msgId}.jpg` });
+  let sent: Message | undefined;
+  try {
+    sent = await client.sendMedia(toChatId, inputMedia, {
+      caption: options.caption,
+      replyTo: options.replyToMsgId,
+    });
+  } catch (err) {
+    rethrowTelegramActionFailure(err, "upload_media_copy", {
+      fromChatId: String(fromChatId),
+      toChatId: String(toChatId),
+      msgId,
+    });
+  }
+  return sent?.id;
 }
 
 /**
@@ -223,9 +310,14 @@ export async function sendSticker(
   options: { replyToMsgId?: number } = {},
 ): Promise<number | undefined> {
   await globalLimiter.acquire();
-  const sent = await client.sendMedia(chatId, fileId, {
-    replyTo: options.replyToMsgId,
-  });
+  let sent: Message | undefined;
+  try {
+    sent = await client.sendMedia(chatId, fileId, {
+      replyTo: options.replyToMsgId,
+    });
+  } catch (err) {
+    rethrowTelegramActionFailure(err, "send_sticker", { chatId: String(chatId), fileId });
+  }
   return sent?.id;
 }
 
@@ -455,15 +547,8 @@ export async function joinChat(
   chatIdOrLink: string | number,
 ): Promise<{ chat?: Chat; pending: boolean }> {
   await globalLimiter.acquire();
-  try {
-    const chat = await client.joinChat(chatIdOrLink);
-    return { chat, pending: false };
-  } catch (err: unknown) {
-    if (err instanceof Error && err.message.includes("INVITE_REQUEST_SENT")) {
-      return { pending: true };
-    }
-    throw err;
-  }
+  const chat = await client.joinChat(chatIdOrLink);
+  return { chat, pending: false };
 }
 
 /**
@@ -609,16 +694,21 @@ export async function sendVoice(
   options: { replyToMsgId?: number; duration?: number } = {},
 ): Promise<number | undefined> {
   await globalLimiter.acquire();
-  const sent = await client.sendMedia(
-    chatId,
-    InputMedia.voice(audioBuffer, {
-      duration: options.duration,
-      // Telegram 要求 OGG/Opus 才显示波形条（voice message 样式）
-      fileMime: "audio/ogg",
-      fileName: "voice.ogg",
-    }),
-    { replyTo: options.replyToMsgId },
-  );
+  let sent: Message | undefined;
+  try {
+    sent = await client.sendMedia(
+      chatId,
+      InputMedia.voice(audioBuffer, {
+        duration: options.duration,
+        // Telegram 要求 OGG/Opus 才显示波形条（voice message 样式）
+        fileMime: "audio/ogg",
+        fileName: "voice.ogg",
+      }),
+      { replyTo: options.replyToMsgId },
+    );
+  } catch (err) {
+    rethrowTelegramActionFailure(err, "send_voice", { chatId: String(chatId) });
+  }
   return sent?.id;
 }
 
@@ -825,9 +915,9 @@ async function llmSummarize(opts: {
   maxOutputTokens?: number;
 }): Promise<string> {
   const { generateText } = await import("ai");
-  const { getAvailableProvider } = await import("../llm/client.js");
+  const { selectProviderForFirstPass } = await import("../llm/client.js");
 
-  const { provider, model } = getAvailableProvider();
+  const { provider, model } = selectProviderForFirstPass();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 20_000);
   try {

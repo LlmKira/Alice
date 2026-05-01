@@ -26,11 +26,14 @@ export function handleMetaCommands(res: ServerResponse, deps: EngineApiDeps): vo
     // 收集有 affordance 的指令
     for (const [name, def] of Object.entries(mod.instructions ?? {})) {
       if (!def.affordance) continue;
-      const params = Object.entries(def.params).map(([pName, pDef]) => ({
-        name: pName,
-        optional: pDef.schema.isOptional(),
-        description: pDef.description,
-      }));
+      const derivedKeys = def.deriveParams ? new Set(Object.keys(def.deriveParams)) : new Set();
+      const params = Object.entries(def.params)
+        .filter(([pName]) => !derivedKeys.has(pName))
+        .map(([pName, pDef]) => ({
+          name: pName,
+          optional: pDef.schema.isOptional(),
+          description: pDef.description,
+        }));
       commands.push({
         name,
         kind: "instruction",

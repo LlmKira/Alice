@@ -7,9 +7,9 @@
 
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
-  readlinkSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -196,7 +196,7 @@ describe("content-addressed store", () => {
     const { hash } = installToStore(raw, sourceDir, "weather", tmpStore);
 
     expect(existsSync(resolve(tmpStore, hash, "bin", "weather.ts"))).toBe(true);
-    expect(existsSync(resolve(tmpStore, hash, "weather"))).toBe(true);
+    expect(existsSync(resolve(tmpStore, hash, "manifest.yaml"))).toBe(true);
 
     try {
       rmSync(tmpStore, { recursive: true });
@@ -205,17 +205,16 @@ describe("content-addressed store", () => {
     }
   });
 
-  it("backfills launcher for an existing store entry", () => {
+  it("keeps existing store entries stable on repeated install", () => {
     const raw = readFileSync(WEATHER_MANIFEST_PATH, "utf-8");
     const tmpStore = resolve(import.meta.dirname, ".test-store-backfill");
     const sourceDir = resolve(import.meta.dirname, "../skills/weather");
 
     const { hash } = installToStore(raw, sourceDir, "weather", tmpStore);
-    rmSync(resolve(tmpStore, hash, "weather"));
 
     installToStore(raw, sourceDir, "weather", tmpStore);
 
-    expect(existsSync(resolve(tmpStore, hash, "weather"))).toBe(true);
+    expect(existsSync(resolve(tmpStore, hash, "manifest.yaml"))).toBe(true);
 
     try {
       rmSync(tmpStore, { recursive: true });
@@ -316,6 +315,11 @@ describe("registry", () => {
       );
 
       expect(existsSync(exported.commandPath)).toBe(true);
+      expect(readFileSync(exported.commandPath, "utf-8")).toContain('export ALICE_SKILL="weather"');
+      expect(readFileSync(exported.commandPath, "utf-8")).toContain(
+        'exec "$self_dir/.weather.real" "$@"',
+      );
+      expect(existsSync(resolve(binDir, ".weather.real"))).toBe(true);
 
       removeExportedSkillArtifacts("weather", { binDir });
       expect(existsSync(exported.commandPath)).toBe(false);
@@ -328,7 +332,7 @@ describe("registry", () => {
     }
   });
 
-  it("atomically switches exported command symlink when a skill is re-exported", () => {
+  it("atomically switches exported command wrapper when a skill is re-exported", () => {
     const tmpRoot = resolve(import.meta.dirname, ".test-exported-command-switch");
     const oldSkillDir = resolve(tmpRoot, "store", "hash-old");
     const newSkillDir = resolve(tmpRoot, "store", "hash-new");
@@ -349,9 +353,11 @@ describe("registry", () => {
         },
         { binDir, storeRoot: resolve(tmpRoot, "store") },
       );
-      // 验证 symlink 解析后指向正确的目标
-      const oldResolved = resolve(binDir, readlinkSync(resolve(binDir, "weather")));
-      expect(oldResolved).toBe(resolve(oldSkillDir, "weather"));
+      expect(lstatSync(resolve(binDir, "weather")).isSymbolicLink()).toBe(false);
+      expect(readFileSync(resolve(binDir, "weather"), "utf-8")).toContain(
+        'export ALICE_SKILL="weather"',
+      );
+      expect(existsSync(resolve(binDir, ".weather.real"))).toBe(true);
 
       exportInstalledSkillArtifacts(
         {
@@ -362,8 +368,10 @@ describe("registry", () => {
         },
         { binDir, storeRoot: resolve(tmpRoot, "store") },
       );
-      const newResolved = resolve(binDir, readlinkSync(resolve(binDir, "weather")));
-      expect(newResolved).toBe(resolve(newSkillDir, "weather"));
+      expect(readFileSync(resolve(binDir, "weather"), "utf-8")).toContain(
+        'export ALICE_SKILL="weather"',
+      );
+      expect(existsSync(resolve(binDir, ".weather.real"))).toBe(true);
     } finally {
       try {
         rmSync(tmpRoot, { recursive: true });
@@ -373,35 +381,33 @@ describe("registry", () => {
     }
   });
 
-  it("ensureAllArtifacts detects and fixes broken symlinks", () => {
+  it("ensureAllArtifacts detects and fixes broken wrappers", () => {
     const tmpRoot = resolve(import.meta.dirname, ".test-ensure-artifacts");
     const storeRoot = resolve(tmpRoot, "store");
     const binDir = resolve(tmpRoot, "bin");
     const registryPath = resolve(tmpRoot, "registry.json");
 
-    // 创建有效的 skill
-    const skillDir = resolve(storeRoot, "hash-valid", "demo");
+    const skillDir = resolve(storeRoot, "hash-valid", "google");
     mkdirSync(skillDir, { recursive: true });
-    writeFileSync(resolve(skillDir, "demo"), "#!/usr/bin/env sh\necho demo\n");
 
     // 创建 registry
     writeFileSync(
       registryPath,
       JSON.stringify({
-        demo: {
-          name: "demo",
+        google: {
+          name: "google",
           version: "1.0.0",
           hash: "hash-valid",
           storePath: skillDir,
-          commandPath: resolve(skillDir, "demo"),
+          commandPath: resolve(skillDir, "google"),
         },
       }),
     );
 
     // 创建 broken symlink（指向不存在的目标）
     mkdirSync(binDir, { recursive: true });
-    symlinkSync("../store/hash-wrong/demo", resolve(binDir, "demo.tmp"));
-    renameSync(resolve(binDir, "demo.tmp"), resolve(binDir, "demo"));
+    symlinkSync("../store/hash-wrong/google", resolve(binDir, "google.tmp"));
+    renameSync(resolve(binDir, "google.tmp"), resolve(binDir, "google"));
 
     try {
       // 调用 ensureAllArtifacts（传入测试目录）
@@ -409,11 +415,13 @@ describe("registry", () => {
 
       // 应该检测到 broken 并修复
       expect(result.fixed).toBe(1);
-      expect(existsSync(resolve(binDir, "demo"))).toBe(true);
+      expect(existsSync(resolve(binDir, "google"))).toBe(true);
 
-      // symlink 应该指向正确的 hash
-      const resolved = resolve(binDir, readlinkSync(resolve(binDir, "demo")));
-      expect(resolved).toBe(resolve(skillDir, "demo"));
+      expect(lstatSync(resolve(binDir, "google")).isSymbolicLink()).toBe(false);
+      expect(readFileSync(resolve(binDir, "google"), "utf-8")).toContain(
+        'export ALICE_SKILL="google"',
+      );
+      expect(existsSync(resolve(binDir, ".google.real"))).toBe(true);
     } finally {
       try {
         rmSync(tmpRoot, { recursive: true });
@@ -651,7 +659,8 @@ describe("compiler edge cases", () => {
     expect(paramDef.required).toBe(true);
     // required array: null/undefined → 空数组（不是 undefined）
     expect(paramDef.schema).toBeDefined();
-    const parsed = paramDef.schema!.safeParse(null);
+    if (!paramDef.schema) throw new Error("schema missing");
+    const parsed = paramDef.schema.safeParse(null);
     expect(parsed.success).toBe(true);
     if (parsed.success) {
       expect(Array.isArray(parsed.data)).toBe(true);

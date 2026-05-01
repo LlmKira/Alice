@@ -92,6 +92,16 @@ export interface SilenceValues {
   deltaP?: number;
   socialCost?: number;
   apiValue?: number;
+  /** ADR-252: ActionQueue queued item count at resource-plane suppression time. */
+  queueQueued?: number;
+  /** ADR-252: ActionQueue processing target count at resource-plane suppression time. */
+  queueProcessing?: number;
+  /** ADR-252: queued + processing, used as sink occupancy pressure. */
+  queueActive?: number;
+  /** ADR-252: queue/ACT saturation ratio used by backpressure. */
+  queueSaturation?: number;
+  /** ADR-252: threshold that triggered queue backpressure. */
+  queueBackpressureThreshold?: number;
 }
 
 export type GateVerdict =

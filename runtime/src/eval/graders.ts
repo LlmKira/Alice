@@ -47,7 +47,7 @@ export function toEvalTickResult(result: TickResult): EvalTickResult {
     ...result,
     actions: [],
     instructions: [],
-    silenceReason: null,
+    silenceReason: result.execution.silenceReason,
   };
 }
 
@@ -248,7 +248,7 @@ export function gradeStructural(
   }
 
   if (assertions.queries?.must) {
-    const queryFns = result.queryLogs.map((q) => q.fn);
+    const queryFns = result.execution.queryLogs.map((q) => q.fn);
     for (const fn of assertions.queries.must) {
       checks.push(
         check(
@@ -283,7 +283,7 @@ export function gradeStructural(
     for (const need of assertions.expectedNeeds) {
       checks.push(
         check(
-          `needs:${need}`,
+          `preparedCategory:${need}`,
           actualNeeds.includes(need),
           `preparedCategories contains "${need}"`,
           actualNeeds.length > 0 ? actualNeeds.join(", ") : "(none)",

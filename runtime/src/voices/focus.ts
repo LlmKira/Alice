@@ -7,6 +7,8 @@
  * 替代 v4 的全局 tanh(Pi/κi) + 激活函数映射。
  */
 
+import { readEmotionState } from "../emotion/graph.js";
+import { emotionStateMoodSignal } from "../emotion/state.js";
 import { type TensionVector, tensionNorm, ZERO_TENSION } from "../graph/tension.js";
 import type { WorldModel } from "../graph/world-model.js";
 import { elapsedS, readNodeMs } from "../pressure/clock.js";
@@ -137,15 +139,10 @@ function topK(scored: [string, number][], k: number): [string, number][] {
   return scored.sort((a, b) => b[1] - a[1]).slice(0, k);
 }
 
-/**
- * 读取 self.mood_effective，返回 [-1, 1] 范围的情绪值。
- * 无 self 节点或 mood_effective=0 时返回 0（不调制）。
- * ADR-181: 公开导出供 loudness.ts 使用。
- */
-export function readSelfMood(G: WorldModel): number {
+/** 读取 ADR-268 EmotionState mood signal；旧 self mood scalar 不再是控制 authority。 */
+export function readSelfMood(G: WorldModel, nowMs = Date.now()): number {
   if (!G.has("self")) return 0;
-  const m = G.getAgent("self").mood_effective ?? 0;
-  return Math.max(-1, Math.min(1, m));
+  return emotionStateMoodSignal(readEmotionState(G, nowMs));
 }
 
 /**

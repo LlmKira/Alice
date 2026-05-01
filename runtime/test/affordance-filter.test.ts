@@ -104,9 +104,11 @@ function makeScriptExecutionResult(
     logs: [],
     errors: [],
     instructionErrors: [],
+    errorCodes: [],
     duration: 10,
     thinks: [],
     queryLogs: [],
+    observations: [],
     completedActions: [],
     silenceReason: null,
     ...overrides,
@@ -179,10 +181,10 @@ describe("createBlackboard", () => {
     expect(board.voice).toBe("curious");
     expect(board.target).toBe("channel:123");
     expect(board.observations).toEqual([]);
-    expect(board.errors).toEqual([]);
+    expect(board.execution.errors).toEqual([]);
     expect(board.preparedCategories.size).toBe(0);
-    expect(board.thinks).toEqual([]);
-    expect(board.queryLogs).toEqual([]);
+    expect(board.execution.thinks).toEqual([]);
+    expect(board.execution.queryLogs).toEqual([]);
     expect(board.budget).toEqual({ maxSteps: 3, usedSteps: 0 });
   });
 
@@ -220,15 +222,23 @@ describe("updateBoard", () => {
     updateBoard(
       board,
       makeScriptExecutionResult({
+        logs: ["visible output"],
         thinks: ["I should reply"],
         queryLogs: [{ fn: "get_weather", result: "sunny" }],
         errors: ["minor warning"],
+        errorCodes: ["command_invalid_target"],
+        completedActions: ["sent:chatId=1:msgId=2"],
+        silenceReason: "not now",
       }),
     );
 
-    expect(board.thinks).toEqual(["I should reply"]);
-    expect(board.queryLogs).toEqual([{ fn: "get_weather", result: "sunny" }]);
-    expect(board.errors).toEqual(["minor warning"]);
+    expect(board.execution.logs).toEqual(["visible output"]);
+    expect(board.execution.thinks).toEqual(["I should reply"]);
+    expect(board.execution.queryLogs).toEqual([{ fn: "get_weather", result: "sunny" }]);
+    expect(board.execution.errors).toEqual(["minor warning"]);
+    expect(board.execution.errorCodes).toEqual(["command_invalid_target"]);
+    expect(board.execution.completedActions).toEqual(["sent:chatId=1:msgId=2"]);
+    expect(board.execution.silenceReason).toBe("not now");
     expect(board.budget.usedSteps).toBe(1);
   });
 
@@ -243,7 +253,7 @@ describe("updateBoard", () => {
     const board = freshBoard();
     updateBoard(board, makeScriptExecutionResult({ instructionErrors: ["feel: invalid valence"] }));
     const result = drainBoard(board, "terminal", 100);
-    expect(result.instructionErrors).toEqual(["feel: invalid valence"]);
+    expect(result.execution.instructionErrors).toEqual(["feel: invalid valence"]);
   });
 });
 
@@ -289,18 +299,26 @@ describe("drainBoard", () => {
       contextVars: {},
     });
 
-    board.thinks.push("reasoning");
+    board.execution.thinks.push("reasoning");
     board.observations.push("user is happy");
+    board.execution.logs.push("visible output");
+    board.execution.errorCodes.push("command_invalid_target");
+    board.execution.completedActions.push("sent:chatId=1:msgId=2");
+    board.execution.silenceReason = "not now";
     board.preparedCategories.add("weather");
     board.budget.usedSteps = 2;
 
     const result = drainBoard(board, "terminal", 150);
 
     expect(result.outcome).toBe("terminal");
-    expect(result.thinks).toEqual(["reasoning"]);
+    expect(result.execution.thinks).toEqual(["reasoning"]);
     expect(result.observations).toEqual(["user is happy"]);
-    expect(result.errors).toEqual([]);
-    expect(result.instructionErrors).toEqual([]);
+    expect(result.execution.logs).toEqual(["visible output"]);
+    expect(result.execution.errors).toEqual([]);
+    expect(result.execution.errorCodes).toEqual(["command_invalid_target"]);
+    expect(result.execution.completedActions).toEqual(["sent:chatId=1:msgId=2"]);
+    expect(result.execution.silenceReason).toBe("not now");
+    expect(result.execution.instructionErrors).toEqual([]);
     expect(result.stepsUsed).toBe(2);
     expect(result.preparedCategories).toEqual(["weather"]);
     expect(result.duration).toBe(150);

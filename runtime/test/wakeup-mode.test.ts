@@ -29,6 +29,10 @@ import { tickLog } from "../src/db/schema.js";
 import { ActionQueue } from "../src/engine/action-queue.js";
 import { createDeliberationState } from "../src/engine/deliberation.js";
 import { type EvolveState, evolveTick } from "../src/engine/evolve.js";
+import {
+  decideStartupMode,
+  POST_RESTART_RECOVERY_MIN_OFFLINE_MS,
+} from "../src/engine/startup-mode.js";
 import { WorldModel } from "../src/graph/world-model.js";
 import { AdaptiveKappa, createPressureHistory } from "../src/pressure/aggregate.js";
 import { EventBuffer } from "../src/telegram/events.js";
@@ -130,17 +134,25 @@ describe("ADR-190: Wakeup Mode", () => {
   // T1: 长离线 → wakeup 模态（验证 index.ts 逻辑的等价测试——直接检查 mode 决策）
   it("T1: 2h 离线后应处于 wakeup 模态", () => {
     const config = loadConfig();
-    const offlineDurationS = 7200; // 2 小时
-    const initialMode = offlineDurationS > config.wakeupOfflineThresholdS ? "wakeup" : "patrol";
-    expect(initialMode).toBe("wakeup");
+    const decision = decideStartupMode({
+      runtimeOfflineMs: 7200_000,
+      actionSilenceMs: 0,
+      wakeupOfflineThresholdS: config.wakeupOfflineThresholdS,
+      postRestartRecoveryMinOfflineMs: POST_RESTART_RECOVERY_MIN_OFFLINE_MS,
+    });
+    expect(decision.initialMode).toBe("wakeup");
   });
 
   // T2: 短离线 → patrol 模态
   it("T2: 5min 离线后应处于 patrol 模态", () => {
     const config = loadConfig();
-    const offlineDurationS = 300; // 5 分钟
-    const initialMode = offlineDurationS > config.wakeupOfflineThresholdS ? "wakeup" : "patrol";
-    expect(initialMode).toBe("patrol");
+    const decision = decideStartupMode({
+      runtimeOfflineMs: 300_000,
+      actionSilenceMs: 0,
+      wakeupOfflineThresholdS: config.wakeupOfflineThresholdS,
+      postRestartRecoveryMinOfflineMs: POST_RESTART_RECOVERY_MIN_OFFLINE_MS,
+    });
+    expect(decision.initialMode).toBe("patrol");
   });
 
   // T3: wakeup 中 idle gate 被抑制

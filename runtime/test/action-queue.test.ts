@@ -66,6 +66,16 @@ describe("ActionQueue — Engagement Exclusivity", () => {
 
     // 先 dequeue（注册 waiter），再 enqueue（直接交付）
     const dequeuePromise = q.dequeue();
+    expect(q.getMetrics()).toMatchObject({
+      queued: 0,
+      processing: 0,
+      active: 0,
+      waitingConsumers: 1,
+      maxDepth: ActionQueue.MAX_DEPTH,
+      overflowCount: 0,
+      saturation: 0,
+    });
+
     q.enqueue(makeItem("channel:1"));
 
     const item = await dequeuePromise;
@@ -73,9 +83,23 @@ describe("ActionQueue — Engagement Exclusivity", () => {
     expect(item?.target).toBe("channel:1");
     // 直接交付路径也设置了 processing
     expect(q.isTargetActive("channel:1")).toBe(true);
+    expect(q.getMetrics()).toMatchObject({
+      queued: 0,
+      processing: 1,
+      active: 1,
+      waitingConsumers: 0,
+      saturation: 1 / ActionQueue.MAX_DEPTH,
+    });
 
     q.markComplete("channel:1");
     expect(q.isTargetActive("channel:1")).toBe(false);
+    expect(q.getMetrics()).toMatchObject({
+      queued: 0,
+      processing: 0,
+      active: 0,
+      waitingConsumers: 0,
+      saturation: 0,
+    });
   });
 
   it("engagement 抢占 requeue: processing + queue 双重追踪", async () => {
@@ -131,5 +155,87 @@ describe("ActionQueue — Engagement Exclusivity", () => {
     // close 清理 processing
     q.close();
     expect(q.isTargetActive("channel:1")).toBe(false);
+  });
+});
+
+describe("ActionQueue — metrics", () => {
+  it("getMetrics 覆盖 enqueue、dequeue、markComplete 生命周期", async () => {
+    const q = new ActionQueue();
+
+    q.enqueue(makeItem("channel:1"));
+    q.enqueue(makeItem("channel:2"));
+    expect(q.getMetrics()).toMatchObject({
+      queued: 2,
+      processing: 0,
+      active: 2,
+      waitingConsumers: 0,
+      maxDepth: ActionQueue.MAX_DEPTH,
+      overflowCount: 0,
+      saturation: 2 / ActionQueue.MAX_DEPTH,
+    });
+
+    const item = await q.dequeue();
+    expect(item?.target).toBe("channel:1");
+    expect(q.getMetrics()).toMatchObject({
+      queued: 1,
+      processing: 1,
+      active: 2,
+      saturation: 2 / ActionQueue.MAX_DEPTH,
+    });
+
+    q.markComplete("channel:1");
+    expect(q.getMetrics()).toMatchObject({
+      queued: 1,
+      processing: 0,
+      active: 1,
+      saturation: 1 / ActionQueue.MAX_DEPTH,
+    });
+  });
+
+  it("getMetrics 记录 overflowCount 且饱和度封顶为 1", () => {
+    const q = new ActionQueue();
+
+    for (let i = 0; i < ActionQueue.MAX_DEPTH; i++) {
+      q.enqueue(makeItem(`channel:${i}`, 2));
+    }
+    expect(q.getMetrics()).toMatchObject({
+      queued: ActionQueue.MAX_DEPTH,
+      active: ActionQueue.MAX_DEPTH,
+      overflowCount: 0,
+      saturation: 1,
+    });
+
+    q.enqueue(makeItem("channel:rejected", 1));
+    expect(q.getMetrics()).toMatchObject({
+      queued: ActionQueue.MAX_DEPTH,
+      active: ActionQueue.MAX_DEPTH,
+      overflowCount: 1,
+      saturation: 1,
+    });
+  });
+
+  it("getMetrics 覆盖 close 唤醒等待者并清理 processing", async () => {
+    const q = new ActionQueue();
+    q.enqueue(makeItem("channel:1"));
+    await q.dequeue();
+    const waiter = q.dequeue();
+
+    expect(q.getMetrics()).toMatchObject({
+      queued: 0,
+      processing: 1,
+      active: 1,
+      waitingConsumers: 1,
+    });
+
+    q.close();
+    expect(await waiter).toBeNull();
+    expect(q.getMetrics()).toMatchObject({
+      queued: 0,
+      processing: 0,
+      active: 0,
+      waitingConsumers: 0,
+      overflowCount: 0,
+      saturation: 0,
+    });
   });
 });

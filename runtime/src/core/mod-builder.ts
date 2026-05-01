@@ -83,7 +83,10 @@ interface InstructionConfig<S, T extends z.ZodRawShape> {
   params: z.ZodObject<T>;
   description: string;
   examples?: string[];
-  deriveParams?: Record<string, (contextVars: Record<string, unknown>) => unknown>;
+  deriveParams?: Record<
+    string,
+    (contextVars: Record<string, unknown>, args?: Record<string, unknown>) => unknown
+  >;
   perTurnCap?: number | { limit: number; group: string };
   affordance?: AffordanceDeclaration;
   impl: (ctx: ModContext<S>, args: z.output<z.ZodObject<T>>) => unknown;
@@ -95,7 +98,10 @@ interface QueryConfig<S, T extends z.ZodRawShape> {
   returns?: string;
   /** LLM 可读的返回值简述。渲染为 JSDoc @returns。 */
   returnHint?: string;
-  deriveParams?: Record<string, (contextVars: Record<string, unknown>) => unknown>;
+  deriveParams?: Record<
+    string,
+    (contextVars: Record<string, unknown>, args?: Record<string, unknown>) => unknown
+  >;
   affordance?: AffordanceDeclaration;
   format?: (result: unknown) => string[];
   impl: (ctx: ModContext<S>, args: z.output<z.ZodObject<T>>) => unknown;

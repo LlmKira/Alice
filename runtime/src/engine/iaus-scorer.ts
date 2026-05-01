@@ -16,6 +16,8 @@
  */
 
 import type { BeliefStore } from "../belief/store.js";
+import { readEmotionControlPatch } from "../emotion/graph.js";
+import type { EmotionControlPatch } from "../emotion/types.js";
 import { type TensionVector, ZERO_TENSION } from "../graph/tension.js";
 import type { WorldModel } from "../graph/world-model.js";
 import {
@@ -23,6 +25,7 @@ import {
   effectiveAversion,
   effectiveObligation,
   isConversationContinuation,
+  isSelfResting,
   OBLIGATION_THRESHOLDS,
 } from "../pressure/signal-decay.js";
 import {
@@ -53,6 +56,23 @@ const DEFAULT_DESIRE_BOOST = 0.15;
 const DEFAULT_MOMENTUM_BONUS = 0.2;
 /** ADR-182 D1: Momentum 衰减超时（ms）。 */
 const DEFAULT_MOMENTUM_DECAY_MS = 300_000;
+/** ADR-251 Wave 1: 无回应 private proactive 短 burst 软恢复窗口。 */
+const PROACTIVE_PACING_MIN_INTERVAL_MS = 60_000;
+/** ADR-251 Wave 1: 最近主动外展的软阻尼下限。硬限制只用于 100% 确定的语义门。 */
+const PROACTIVE_PACING_RECENT_MIN = 0.2;
+/** ADR-251 Wave 1: 单方连续输出阻尼斜率。 */
+const PROACTIVE_PACING_CONSECUTIVE_GAIN = 2.5;
+/** ADR-268: lonely connection pull must not amplify repeated unsolicited outreach. */
+const EMOTION_PROACTIVE_CAP_MIN = 0.2;
+/** ADR-268: active affect gently modulates non-obligatory action tendency. */
+const EMOTION_ACTION_UTILITY_MIN = 0.55;
+const EMOTION_ACTION_UTILITY_MAX = 1.08;
+/** 久未收到私聊 incoming 后，主动外展开始软降权。 */
+const INACTIVITY_STALE_GRACE_MS = 24 * 3600_000;
+/** 久未收到私聊 incoming 的软降权完整展开窗口。 */
+const INACTIVITY_STALE_FULL_MS = 7 * 24 * 3600_000;
+/** stale 不是不可达证明，所以只软降权，不清零。 */
+const INACTIVITY_STALE_MIN = 0.15;
 
 /**
  * ADR-218 Phase 2: U_fairness — CFS-inspired 服务比例公平 Consideration。
@@ -211,6 +231,7 @@ export interface CandidateContext {
   nowMs: number;
   getHawkesDiscount?: (target: string) => number;
   getGoldilocksUtility?: (target: string) => number;
+  getRhythmTimingProfile?: (target: string, chatType?: string) => RhythmTimingProfile | null;
 }
 
 /** gates.ts 及 idle gate 构建候选时的最小接口。 */
@@ -228,8 +249,52 @@ export interface ActionCandidate {
 export interface IAUSCandidate extends ActionCandidate {
   /** 逐项 Consideration 得分（调试用）。 */
   considerations: Record<string, number>;
+  /** 不参与评分的 shadow 诊断。 */
+  diagnostics?: IAUSCandidateDiagnostics;
   /** 是否绕过门控。 */
   bypassGates: boolean;
+}
+
+export interface IAUSScoredCandidate {
+  action: string;
+  target: string | null;
+  V: number;
+  bypassGates: boolean;
+  bottleneck: string;
+  deltaP: number;
+  socialCost: number;
+  netValue: number;
+  considerations: Record<string, number>;
+  diagnostics?: IAUSCandidateDiagnostics;
+}
+
+export interface RhythmTimingProfile {
+  activeNowScore: number;
+  quietNowScore: number;
+  confidence: "low" | "medium" | "high";
+  stale: boolean;
+}
+
+export interface TimingShadowDiagnostic {
+  utility: number;
+  applied: boolean;
+  reason:
+    | "bypass"
+    | "unsupported_chat_type"
+    | "missing_profile"
+    | "low_confidence"
+    | "stale"
+    | "eligible";
+  activeNowScore?: number;
+  quietNowScore?: number;
+  confidence?: RhythmTimingProfile["confidence"];
+  stale?: boolean;
+  netValue?: number;
+  shadowNetValue?: number;
+}
+
+export interface IAUSCandidateDiagnostics {
+  timingShadow?: TimingShadowDiagnostic;
 }
 
 export interface IAUSResult {
@@ -239,13 +304,7 @@ export interface IAUSResult {
   selectedProbability: number;
   winnerBypassGates: boolean;
   spread: number;
-  scored: Array<{
-    action: string;
-    target: string | null;
-    V: number;
-    bypassGates: boolean;
-    bottleneck: string;
-  }>;
+  scored: IAUSScoredCandidate[];
 }
 
 export interface IAUSConfig {
@@ -347,6 +406,198 @@ export function computeCandidateBypass(ctx: CandidateContext, target: string): b
   const isContinuation = !targetHasDirected && isConversationContinuation(G, target, nowMs);
 
   return targetHasDirected || isContinuation;
+}
+
+/**
+ * ADR-251: 热聊安全的主动性阻尼。
+ *
+ * 这不是普通 pre-CF consideration，也不是硬 gate。CF 会把单个极低项用几何均值抬高，
+ * 所以该 utility 在 CF 之后相乘；它仍记录到 considerations 供 bottleneck 审计。
+ *
+ * 不变量：
+ * - directed / obligation / conversation continuation 不阻尼；
+ * - group/channel 不阻尼；
+ * - private 中只要对方在 Alice 上次发言后又说话（hot chat），不阻尼；
+ * - 只软压无人回应的 unsolicited private proactive。
+ *
+ * @see docs/adr/251-hot-chat-safe-proactive-damping.md
+ */
+export function computeProactivePacingUtility(opts: {
+  chatType: string | undefined;
+  bypassGates: boolean;
+  nowMs: number;
+  lastIncomingMs?: number;
+  lastOutgoingMs?: number;
+  lastProactiveOutreachMs?: number;
+  consecutiveOutgoing?: number;
+}): number {
+  if (opts.bypassGates) return 1.0;
+
+  const chatType = opts.chatType ?? "private";
+  if (ChatTarget.isGroupChat(chatType) || ChatTarget.isChannelChat(chatType)) return 1.0;
+
+  const lastIncomingMs = Number(opts.lastIncomingMs ?? 0);
+  const lastOutgoingMs = Number(opts.lastOutgoingMs ?? 0);
+  if (lastIncomingMs > lastOutgoingMs) return 1.0;
+
+  const lastProactiveMs = Number(opts.lastProactiveOutreachMs ?? 0);
+  let utility = 1.0;
+  if (lastProactiveMs > 0) {
+    const elapsedRatio = clamp01((opts.nowMs - lastProactiveMs) / PROACTIVE_PACING_MIN_INTERVAL_MS);
+    utility *= PROACTIVE_PACING_RECENT_MIN + (1 - PROACTIVE_PACING_RECENT_MIN) * elapsedRatio ** 2;
+  }
+
+  const unilateralCount = Math.max(0, Number(opts.consecutiveOutgoing ?? 0) - 1);
+  if (unilateralCount > 0) {
+    utility *= 1 / (1 + PROACTIVE_PACING_CONSECUTIVE_GAIN * unilateralCount);
+  }
+
+  return Math.max(EPSILON, Math.min(1.0, utility));
+}
+
+export function computeEmotionProactiveCapUtility(opts: {
+  chatType: string | undefined;
+  bypassGates: boolean;
+  proactiveCap: number | null;
+  consecutiveOutgoing?: number;
+  lastIncomingMs?: number;
+  lastOutgoingMs?: number;
+}): number {
+  if (opts.bypassGates) return 1.0;
+  if (opts.proactiveCap == null) return 1.0;
+
+  const chatType = opts.chatType ?? "private";
+  if (ChatTarget.isGroupChat(chatType) || ChatTarget.isChannelChat(chatType)) return 1.0;
+
+  const lastIncomingMs = Number(opts.lastIncomingMs ?? 0);
+  const lastOutgoingMs = Number(opts.lastOutgoingMs ?? 0);
+  if (lastIncomingMs > lastOutgoingMs) return 1.0;
+
+  const overCap = Math.max(0, Number(opts.consecutiveOutgoing ?? 0) - opts.proactiveCap);
+  if (overCap <= 0) return 1.0;
+
+  return Math.max(EPSILON, EMOTION_PROACTIVE_CAP_MIN / overCap);
+}
+
+export function computeInactivityStaleUtility(opts: {
+  chatType: string | undefined;
+  bypassGates: boolean;
+  nowMs: number;
+  lastIncomingMs?: number;
+}): number {
+  if (opts.bypassGates) return 1.0;
+
+  const chatType = opts.chatType ?? "private";
+  if (chatType !== "private") return 1.0;
+
+  const lastIncomingMs = Number(opts.lastIncomingMs ?? 0);
+  if (!Number.isFinite(lastIncomingMs) || lastIncomingMs <= 0) return 1.0;
+
+  const inactiveMs = opts.nowMs - lastIncomingMs;
+  if (inactiveMs <= INACTIVITY_STALE_GRACE_MS) return 1.0;
+
+  const span = INACTIVITY_STALE_FULL_MS - INACTIVITY_STALE_GRACE_MS;
+  const ratio = span > 0 ? clamp01((inactiveMs - INACTIVITY_STALE_GRACE_MS) / span) : 1.0;
+  return 1.0 - ratio * (1.0 - INACTIVITY_STALE_MIN);
+}
+
+export function computeEmotionActionUtility(opts: {
+  actionType: VoiceAction;
+  chatType: string | undefined;
+  bypassGates: boolean;
+  control: EmotionControlPatch;
+}): number {
+  if (opts.bypassGates) return 1.0;
+
+  const chatType = opts.chatType ?? "private";
+  if (ChatTarget.isChannelChat(chatType)) return 1.0;
+
+  const { voiceBias, styleBudget } = opts.control;
+  let utility = 1.0;
+
+  if (opts.actionType === "sociability") {
+    utility += voiceBias.sociability;
+    utility -= Math.max(0, voiceBias.caution) * 0.35;
+    if (styleBudget.preferShort) utility -= 0.08;
+    if (styleBudget.avoidSelfProof) utility -= 0.12;
+  } else if (opts.actionType === "curiosity") {
+    utility += Math.min(0, voiceBias.sociability) * 0.4;
+    utility -= Math.max(0, voiceBias.caution) * 0.2;
+    if (styleBudget.preferShort) utility -= 0.04;
+  } else {
+    utility -= Math.max(0, voiceBias.caution) * 0.1;
+  }
+
+  if (styleBudget.maxCharsMultiplier < 0.85) {
+    utility -= (0.85 - styleBudget.maxCharsMultiplier) * 0.25;
+  }
+
+  return Math.max(EMOTION_ACTION_UTILITY_MIN, Math.min(EMOTION_ACTION_UTILITY_MAX, utility));
+}
+
+/**
+ * ADR-261 Wave 3: rhythm profile timing utility, shadow-only.
+ *
+ * 这个函数只产出诊断值，不参与当前 IAUS 乘法评分。未来 Wave 4 若启用，
+ * 也只能作用于非 bypass 的 unsolicited private/channel proactive。
+ */
+export function computeTimingShadowUtility(opts: {
+  chatType: string | undefined;
+  bypassGates: boolean;
+  profile?: RhythmTimingProfile | null;
+}): TimingShadowDiagnostic {
+  if (opts.bypassGates) {
+    return { utility: 1.0, applied: false, reason: "bypass" };
+  }
+
+  const chatType = opts.chatType ?? "private";
+  if (ChatTarget.isGroupChat(chatType) || chatType === "bot") {
+    return { utility: 1.0, applied: false, reason: "unsupported_chat_type" };
+  }
+
+  const profile = opts.profile;
+  if (!profile) {
+    return { utility: 1.0, applied: false, reason: "missing_profile" };
+  }
+
+  if (profile.confidence === "low") {
+    return {
+      utility: 1.0,
+      applied: false,
+      reason: "low_confidence",
+      activeNowScore: profile.activeNowScore,
+      quietNowScore: profile.quietNowScore,
+      confidence: profile.confidence,
+      stale: profile.stale,
+    };
+  }
+
+  if (profile.stale) {
+    return {
+      utility: 1.0,
+      applied: false,
+      reason: "stale",
+      activeNowScore: profile.activeNowScore,
+      quietNowScore: profile.quietNowScore,
+      confidence: profile.confidence,
+      stale: profile.stale,
+    };
+  }
+
+  const utility = Math.max(
+    0.3,
+    Math.min(1.15, 1.0 + 0.15 * profile.activeNowScore - 0.45 * profile.quietNowScore),
+  );
+
+  return {
+    utility,
+    applied: true,
+    reason: "eligible",
+    activeNowScore: profile.activeNowScore,
+    quietNowScore: profile.quietNowScore,
+    confidence: profile.confidence,
+    stale: profile.stale,
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -707,8 +958,10 @@ export function scoreAllCandidates(
   config: IAUSConfig,
 ): IAUSResult | null {
   const { nowMs, candidateCtx, saturationCost: satConfig, windowStartMs } = config;
+  if (isSelfResting(G, nowMs)) return null;
 
-  const selfMood = readSelfMood(G);
+  const selfMood = readSelfMood(G, nowMs);
+  const emotionControl = readEmotionControlPatch(G, nowMs);
   const channels = G.getEntitiesByType("channel").filter(
     (target) => !config.targetWhitelist || config.targetWhitelist.has(target),
   );
@@ -732,9 +985,8 @@ export function scoreAllCandidates(
     const reachabilityScore =
       typeof rawReach === "number" && !Number.isNaN(rawReach) ? rawReach : 1.0;
     const effSilences = effectiveActSilences(G, target, nowMs);
-    const consecutiveOutgoing = G.has(target)
-      ? Number(G.getChannel(target).consecutive_outgoing ?? 0)
-      : 0;
+    const channelAttrs = G.has(target) ? G.getChannel(target) : null;
+    const consecutiveOutgoing = channelAttrs ? Number(channelAttrs.consecutive_outgoing ?? 0) : 0;
 
     // U_freshness input: per-target action count in window / perTargetCap
     const targetActionsInWindow = recentActions.filter(
@@ -773,6 +1025,35 @@ export function scoreAllCandidates(
 
     // 4. Per-target rate limit (hard filter, replaces retry loop in evolve.ts)
     if (targetActionsInWindow >= perTargetCap) continue;
+
+    const proactivePacingUtility = computeProactivePacingUtility({
+      chatType,
+      bypassGates: bypass,
+      nowMs,
+      lastIncomingMs: Number(channelAttrs?.last_incoming_ms ?? 0),
+      lastOutgoingMs: Number(channelAttrs?.last_outgoing_ms ?? 0),
+      lastProactiveOutreachMs: Number(channelAttrs?.last_proactive_outreach_ms ?? 0),
+      consecutiveOutgoing,
+    });
+    const emotionProactiveCapUtility = computeEmotionProactiveCapUtility({
+      chatType,
+      bypassGates: bypass,
+      proactiveCap: emotionControl.actionCaps.proactiveMessages,
+      consecutiveOutgoing,
+      lastIncomingMs: Number(channelAttrs?.last_incoming_ms ?? 0),
+      lastOutgoingMs: Number(channelAttrs?.last_outgoing_ms ?? 0),
+    });
+    const timingShadow = computeTimingShadowUtility({
+      chatType,
+      bypassGates: bypass,
+      profile: candidateCtx.getRhythmTimingProfile?.(target, chatType) ?? null,
+    });
+    const inactivityStaleUtility = computeInactivityStaleUtility({
+      chatType,
+      bypassGates: bypass,
+      nowMs,
+      lastIncomingMs: Number(channelAttrs?.last_incoming_ms ?? 0),
+    });
 
     const sharedInputs: SharedInputs = {
       tension,
@@ -819,15 +1100,35 @@ export function scoreAllCandidates(
           continue;
       }
 
-      // 乘积 ∏ U_k
-      const allConsiderations = { ...shared, ...specific };
+      // 乘积 ∏ U_k。ADR-251 的 U_proactive_pacing 在 CF 后应用，避免被几何均值补偿稀释。
+      const preCFConsiderations = { ...shared, ...specific };
       let rawScore = 1;
-      for (const v of Object.values(allConsiderations)) {
+      for (const v of Object.values(preCFConsiderations)) {
         rawScore *= v;
       }
 
       // Compensation Factor
       let compensatedScore = compensate(rawScore, n, CF);
+
+      // ADR-251: private proactive pacing — post-CF utility。
+      // 只压无人回应的 unsolicited private proactive；directed/hot-chat/group/channel 均为 1.0。
+      compensatedScore *= proactivePacingUtility;
+      compensatedScore *= emotionProactiveCapUtility;
+      compensatedScore *= inactivityStaleUtility;
+      const emotionActionUtility = computeEmotionActionUtility({
+        actionType,
+        chatType,
+        bypassGates: bypass,
+        control: emotionControl,
+      });
+      compensatedScore *= emotionActionUtility;
+      const allConsiderations = {
+        ...preCFConsiderations,
+        U_proactive_pacing: proactivePacingUtility,
+        U_emotion_proactive_cap: emotionProactiveCapUtility,
+        U_inactivity_stale: inactivityStaleUtility,
+        U_emotion_action: emotionActionUtility,
+      };
 
       // ADR-217: Aversion — 社交回避乘性调制。
       // V_eff = V × (1 - aversion)。bypass 不穿透回避（Alice 主动选择，义务不覆盖）。
@@ -885,6 +1186,7 @@ export function scoreAllCandidates(
           deltaP: rawDeltaP,
           socialCost: rawSocialCost,
           considerations: allConsiderations,
+          diagnostics: { timingShadow },
           bypassGates: bypass,
         },
         V: compensatedScore,
@@ -953,6 +1255,19 @@ export function scoreAllCandidates(
     }
   }
 
+  for (const entry of pool) {
+    const timingShadow = entry.candidate.diagnostics?.timingShadow;
+    if (!timingShadow) continue;
+    entry.candidate.diagnostics = {
+      ...entry.candidate.diagnostics,
+      timingShadow: {
+        ...timingShadow,
+        netValue: entry.V,
+        shadowNetValue: entry.V * timingShadow.utility,
+      },
+    };
+  }
+
   // ── Thompson Sampling 噪声叠加 ──────────────────────────────────────
   const eta = config.thompsonEta;
   let softmaxValues: number[];
@@ -1005,7 +1320,7 @@ export function scoreAllCandidates(
     selectedProbability: probs[winnerIdx],
     winnerBypassGates: pool[winnerIdx].bypassGates,
     spread,
-    // D5: scored 返回全部候选（审计完整性），附加 bottleneck
+    // D5: scored 返回全部候选（审计完整性），保留反事实所需的结构化字段。
     scored: scored.map((s) => ({
       action: s.candidate.action,
       target: s.candidate.target,
@@ -1015,6 +1330,11 @@ export function scoreAllCandidates(
         (min, [k, v]) => (v < min[1] ? [k, v] : min),
         ["", Infinity] as [string, number],
       )[0],
+      deltaP: s.candidate.deltaP,
+      socialCost: s.candidate.socialCost,
+      netValue: s.V,
+      considerations: s.candidate.considerations,
+      diagnostics: s.candidate.diagnostics,
     })),
   };
 }

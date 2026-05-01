@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { desc, sql } from "drizzle-orm";
+import { classifyIausActionRow } from "../diagnostics/iaus-action-classifier.js";
 import type { WorldModel } from "../graph/world-model.js";
 import { effectiveUnread } from "../pressure/signal-decay.js";
 import { createLogger } from "../utils/logger.js";
@@ -148,23 +149,43 @@ export function runAnomalyCheck(currentTick: number, G?: WorldModel): AnomalyAle
     log.warn("pressure_extreme 检测失败", e);
   }
 
-  // action_failure_rate: 最近 20 次 success=false > 50%
+  // action_failure_rate: 最近 20 次真实 Telegram 尝试失败 > 50%
+  // ADR-254: action_log.success 是整行 host 结果，会把“已发送但等待回复超时”
+  // 和后续 self 命令失败混进硬失败率。告警必须基于 tc_command_log 派生的行动事实。
   try {
     const db = getDb();
     const rows = db
-      .select({ success: actionLog.success })
+      .select({
+        actionType: actionLog.actionType,
+        success: actionLog.success,
+        engagementOutcome: actionLog.engagementOutcome,
+        tcAfterward: actionLog.tcAfterward,
+        tcCommandLog: actionLog.tcCommandLog,
+      })
       .from(actionLog)
       .orderBy(desc(actionLog.tick))
       .limit(20)
       .all();
     if (rows.length >= 5) {
-      const failures = rows.filter((r) => !r.success).length;
-      const rate = failures / rows.length;
+      const classifications = rows.map((r) =>
+        classifyIausActionRow({
+          action_type: r.actionType,
+          success: r.success,
+          engagement_outcome: r.engagementOutcome,
+          tc_afterward: r.tcAfterward,
+          tc_command_log: r.tcCommandLog,
+        }),
+      );
+      const attempts = classifications.filter(
+        (c) => c.category === "telegram_success" || c.category === "telegram_failure",
+      );
+      const failures = attempts.filter((c) => c.category === "telegram_failure").length;
+      const rate = attempts.length > 0 ? failures / attempts.length : 0;
       if (rate > 0.5) {
         alerts.push({
           level: "error",
           type: "action_failure_rate",
-          message: `行动失败率 ${(rate * 100).toFixed(0)}%（最近 ${rows.length} 次中 ${failures} 次失败）`,
+          message: `Telegram 行动失败率 ${(rate * 100).toFixed(0)}%（最近 ${rows.length} 行中 ${attempts.length} 次 Telegram 尝试，${failures} 次失败）`,
           tick: currentTick,
         });
       }
@@ -173,8 +194,8 @@ export function runAnomalyCheck(currentTick: number, G?: WorldModel): AnomalyAle
     log.warn("action_failure_rate 检测失败", e);
   }
 
-  // voice_lost: 最近 10 条 action_log 中 llm_failed 超过 50%
-  // ADR-129: LLM 调用失败被正确标记为 actionType="llm_failed" 后可被此检测捕获
+  // voice_lost: 最近 10 条 action_log 中 LLM 产出失败超过 50%
+  // command_misuse / telegram_failed 是执行或工具面问题，不计入 LLM 失语。
   // @see docs/adr/129-llm-voice-loss-awareness.md
   try {
     const db = getDb();
@@ -185,7 +206,12 @@ export function runAnomalyCheck(currentTick: number, G?: WorldModel): AnomalyAle
       .limit(10)
       .all();
     if (rows.length >= 3) {
-      const llmFailures = rows.filter((r) => r.actionType === "llm_failed").length;
+      const llmFailures = rows.filter(
+        (r) =>
+          r.actionType === "llm_failed" ||
+          r.actionType === "provider_failed" ||
+          r.actionType === "validation_failed",
+      ).length;
       const rate = llmFailures / rows.length;
       if (rate > 0.5) {
         alerts.push({
@@ -263,16 +289,25 @@ export function runAnomalyCheck(currentTick: number, G?: WorldModel): AnomalyAle
 
   // voice_action_starvation: 某声部 loudness 赢面 > 50 次但 action 转化率 < 5%
   // ADR-131 D3: 让声部饥饿问题可观测。声部赢了竞争但被门控拦截的模式。
+  // Caution 的主要合法产物是 system1:skip，不是 System 2 行动；System 1 已处理的 tick
+  // 也不应进入“应转化为 action”的分母。
   // @see docs/adr/131-feedback-loop-integrity.md §D3
   try {
     const db = getDb();
-    const voices = ["diligence", "curiosity", "sociability", "caution"];
+    const voices = ["diligence", "curiosity", "sociability"];
     for (const voice of voices) {
-      // 最近 500 tick 内的 loudness 赢面数
+      // 最近 500 tick 内需要 System 2 消化的 loudness 赢面数。
       const loudnessRow = db
         .select({ cnt: sql<number>`count(*)` })
         .from(tickLog)
-        .where(sql`${tickLog.action} = ${voice} AND ${tickLog.tick} > ${currentTick - 500}`)
+        .where(sql`
+          ${tickLog.action} = ${voice}
+          AND ${tickLog.tick} > ${currentTick - 500}
+          AND (
+            ${tickLog.gateVerdict} IS NULL
+            OR ${tickLog.gateVerdict} NOT IN ('system1:skip', 'system1:mark_read', 'system1:digest')
+          )
+        `)
         .get();
       const loudnessWins = loudnessRow?.cnt ?? 0;
       if (loudnessWins < 50) continue; // 样本不足

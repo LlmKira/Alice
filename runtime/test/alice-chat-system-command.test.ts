@@ -29,6 +29,9 @@ describe("resolveTarget", () => {
       await expect(resolveTarget("me")).resolves.toBe(456);
       await expect(resolveTarget("@me")).resolves.toBe(456);
       await expect(resolveTarget("~me")).resolves.toBe(456);
+      await expect(resolveTarget("current")).resolves.toBe(456);
+      await expect(resolveTarget("here")).resolves.toBe(456);
+      await expect(resolveTarget("this")).resolves.toBe(456);
     } finally {
       if (previous == null) {
         delete process.env.ALICE_CTX_TARGET_CHAT;
@@ -58,5 +61,9 @@ describe("parseMsgId", () => {
 
   it("throws on invalid input", () => {
     expect(() => parseMsgId("abc")).toThrow("invalid message ID");
+  });
+
+  it("rejects fake latest aliases", () => {
+    expect(() => parseMsgId("#latest")).toThrow("never latest");
   });
 });

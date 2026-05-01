@@ -99,6 +99,13 @@ export class MessageTimelineSource implements TimelineSource {
 
   entries(_target: string, _sinceMs: number, _nowMs: number): TimelineEntry[] {
     const result: TimelineEntry[] = [];
+    const repliesByYou = new Map<number, number[]>();
+    for (const msg of this.messages) {
+      if (!msg.isOutgoing || !msg.replyToId) continue;
+      const replies = repliesByYou.get(msg.replyToId) ?? [];
+      replies.push(msg.id);
+      repliesByYou.set(msg.replyToId, replies);
+    }
 
     // ADR-97 + ADR-114 D2: 上下文分隔符状态
     let contextType: "none" | "diffused" | "mention" = "none";
@@ -133,6 +140,11 @@ export class MessageTimelineSource implements TimelineSource {
       const replyMark = msg.replyToId ? ` ↩${msg.replyToId}` : "";
       const editMark = msg.isEdited ? " [edited]" : "";
       const fwdMark = msg.forwardFrom ? ` [fwd ${msg.forwardFrom}]` : "";
+      const repliesFromYou = !msg.isOutgoing ? repliesByYou.get(msg.id) : undefined;
+      const alreadyRepliedMark =
+        repliesFromYou && repliesFromYou.length > 0
+          ? ` (already replied by you: ${repliesFromYou.map((id) => `#${id}`).join(", ")})`
+          : "";
       let reactionStr = "";
       if (msg.reactions) {
         const sorted = Object.entries(msg.reactions)
@@ -155,7 +167,7 @@ export class MessageTimelineSource implements TimelineSource {
       result.push({
         ts: msgTs,
         kind: "message",
-        rendered: `${name} (${msg.id})${replyMark}${editMark}${fwdMark}: ${preview}${reactionStr}${sharedMark}`,
+        rendered: `${name} (${msg.id})${replyMark}${editMark}${fwdMark}: ${preview}${alreadyRepliedMark}${reactionStr}${sharedMark}`,
       });
     }
 

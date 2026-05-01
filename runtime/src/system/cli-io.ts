@@ -11,6 +11,13 @@ import { engineGet, enginePost, engineQuery } from "../../skills/_lib/engine-cli
 import { resolveTarget } from "./chat-client.js";
 import type { EngineClient, Output, TargetResolver } from "./cli-types.js";
 
+function currentChatIdFromEnv(): number | undefined {
+  const raw = process.env.ALICE_CTX_TARGET_CHAT?.trim();
+  if (!raw) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 // ── Engine Client 实现 ──
 
 /** 真实 Engine API 客户端。 */
@@ -49,5 +56,6 @@ export function createRealContext(): CliContext {
     engine: realEngine,
     output: realOutput,
     resolveTarget: realResolveTarget,
+    currentChatId: currentChatIdFromEnv(),
   };
 }

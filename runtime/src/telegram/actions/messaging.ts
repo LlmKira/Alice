@@ -8,7 +8,7 @@ import { tl } from "@mtcute/node";
 import { z } from "zod";
 import { sanitizeOutgoingText } from "../../core/sandbox-schemas.js";
 import { ensureChannelId, ensureContactId } from "../../graph/constants.js";
-import { writeForwardEntry } from "../../graph/dynamic-props.js";
+import { recordForwardShare } from "../../graph/dynamic-props.js";
 import { defineAction } from "../action-builder.js";
 import type { TelegramActionDef } from "../action-types.js";
 import { editMessage, forwardMessage, markRead, sendText, setTyping } from "../actions.js";
@@ -203,23 +203,18 @@ export const messagingActions: TelegramActionDef[] = [
       }
       ctx.dispatcher.dispatch("DECLARE_ACTION", { target: toGraphId });
 
-      // ADR-206 C3: 追踪分享时间
       const fromGraphId = ctx.ensureGraphId(args.fromChatId);
-      if (ctx.G.has(fromGraphId)) {
-        ctx.G.setDynamic(fromGraphId, "last_shared_ms", Date.now());
-      }
-      if (ctx.G.has(toGraphId)) {
-        ctx.G.setDynamic(toGraphId, "last_shared_ms", Date.now());
-      }
-
-      // BT 反馈闭环：记录"哪条消息被转发到了哪里"。
-      // 下次渲染 channel timeline 时，消息行会标注 "(already shared with X)"。
-      if (ctx.G.has(fromGraphId)) {
-        const toName =
-          ctx.G.has(toGraphId) && ctx.G.getDynamic(toGraphId, "display_name")
-            ? String(ctx.G.getDynamic(toGraphId, "display_name"))
-            : String(args.toChatId);
-        writeForwardEntry(ctx.G, fromGraphId, args.msgId, toName);
+      const toName =
+        ctx.G.has(toGraphId) && ctx.G.getDynamic(toGraphId, "display_name")
+          ? String(ctx.G.getDynamic(toGraphId, "display_name"))
+          : String(args.toChatId);
+      if (fwdMsgId != null) {
+        recordForwardShare(ctx.G, {
+          fromGraphId,
+          msgId: args.msgId,
+          toGraphId,
+          targetName: toName,
+        });
       }
 
       ctx.log.info("forward_message executed", {

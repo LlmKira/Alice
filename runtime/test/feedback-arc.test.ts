@@ -9,6 +9,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { ScriptExecutionResult } from "../src/core/script-execution.js";
+import { readEmotionEpisodes } from "../src/emotion/graph.js";
 import { applyOutcomeMoodNudge } from "../src/engine/react/feedback-arc.js";
 import { WorldModel } from "../src/graph/world-model.js";
 
@@ -20,15 +21,25 @@ function makeResult(completedActions: string[] = []): ScriptExecutionResult {
     logs: [],
     errors: [],
     instructionErrors: [],
+    errorCodes: [],
     duration: 0,
     thinks: [],
     queryLogs: [],
+    observations: [],
     completedActions,
     silenceReason: null,
   };
 }
 
-/** 创建包含 self agent 的 WorldModel，可指定初始 mood_valence。 */
+function makeFailedResult(errorCodes: ScriptExecutionResult["errorCodes"]): ScriptExecutionResult {
+  return {
+    ...makeResult(),
+    errors: ["failed"],
+    errorCodes: [...errorCodes],
+  };
+}
+
+/** 创建包含 self agent 的 WorldModel，可指定旧 self mood，验证 ADR-268 不再写它。 */
 function makeGraph(moodValence = 0): WorldModel {
   const G = new WorldModel();
   G.addAgent("self", { mood_valence: moodValence, mood_set_ms: 0 });
@@ -37,21 +48,33 @@ function makeGraph(moodValence = 0): WorldModel {
 
 const SCALE = 0.05;
 
-describe("ADR-185 §3: applyOutcomeMoodNudge (shell-native)", () => {
+describe("ADR-268: applyOutcomeMoodNudge emotion episodes", () => {
   // -- shell-native: rate_outcome 不可用，退化到 fallback ----------------------
 
-  it("消息已发送（无 rate_outcome）→ mood_valence 轻微增加 (scale × 0.3)", () => {
+  it("消息已发送（无 rate_outcome）→ pleased episode，不写 legacy self mood", () => {
     const G = makeGraph(0);
     const sr = makeResult();
     applyOutcomeMoodNudge(G, sr, true, false, SCALE);
-    expect(G.getAgent("self").mood_valence).toBeCloseTo(SCALE * 0.3);
+    expect(G.getAgent("self").mood_valence).toBe(0);
+    expect(G.getAgent("self").mood_set_ms).toBe(0);
+    expect(readEmotionEpisodes(G)).toHaveLength(1);
+    expect(readEmotionEpisodes(G)[0]?.kind).toBe("pleased");
   });
 
-  it("LLM 失败 → mood_valence 轻微减少 (scale × -0.5)", () => {
+  it("LLM 失败 → tired episode，不写 legacy self mood", () => {
     const G = makeGraph(0);
     const sr = makeResult();
     applyOutcomeMoodNudge(G, sr, false, true, SCALE);
-    expect(G.getAgent("self").mood_valence).toBeCloseTo(SCALE * -0.5);
+    expect(G.getAgent("self").mood_valence).toBe(0);
+    expect(readEmotionEpisodes(G)[0]?.kind).toBe("tired");
+  });
+
+  it("重复 Telegram 确定性失败 → annoyed episode", () => {
+    const G = makeGraph(0);
+    applyOutcomeMoodNudge(G, makeFailedResult(["invalid_reaction"]), false, false, SCALE);
+    applyOutcomeMoodNudge(G, makeFailedResult(["invalid_reaction"]), false, false, SCALE);
+    expect(readEmotionEpisodes(G).at(-1)?.kind).toBe("annoyed");
+    expect(G.getAgent("self").mood_valence).toBe(0);
   });
 
   it("主动沉默 → mood_valence 不变", () => {
@@ -64,37 +87,33 @@ describe("ADR-185 §3: applyOutcomeMoodNudge (shell-native)", () => {
 
   // -- 深度对话额外加成 -------------------------------------------------------
 
-  it("深度对话 (subcycles=4) → 额外正向加成", () => {
+  it("深度对话 (subcycles=4) → pleased episode intensity 更高", () => {
     const G = makeGraph(0);
     const sr = makeResult();
     applyOutcomeMoodNudge(G, sr, true, false, SCALE, 4);
-    // delta = scale * 0.3 + scale * 0.3 = scale * 0.6
-    expect(G.getAgent("self").mood_valence).toBeCloseTo(SCALE * 0.6);
+    expect(readEmotionEpisodes(G)[0]?.kind).toBe("pleased");
+    expect(readEmotionEpisodes(G)[0]?.intensity).toBeGreaterThan(SCALE * 0.3);
   });
 
   it("subcycles=2（边界值）→ 不触发深度对话奖励", () => {
     const G = makeGraph(0);
     const sr = makeResult();
     applyOutcomeMoodNudge(G, sr, true, false, SCALE, 2);
-    // subcycles <= 2 → 无额外加成
-    expect(G.getAgent("self").mood_valence).toBeCloseTo(SCALE * 0.3);
+    expect(readEmotionEpisodes(G)[0]?.cause.summary).toContain("sent successfully");
   });
 
-  // -- clamp 边界 -------------------------------------------------------------
-
-  it("clamp: mood_valence=0.99 + positive nudge → 不超过 1.0", () => {
+  it("legacy clamp path is gone: positive nudge leaves old scalar untouched", () => {
     const G = makeGraph(0.99);
     const sr = makeResult();
-    // delta = SCALE * 0.3 = 0.015, 0.99 + 0.015 = 1.005 → clamp to 1.0
     applyOutcomeMoodNudge(G, sr, true, false, SCALE);
-    expect(G.getAgent("self").mood_valence).toBe(1.0);
+    expect(G.getAgent("self").mood_valence).toBe(0.99);
   });
 
-  it("clamp: mood_valence=-0.98 + negative nudge → 不低于 -1.0", () => {
+  it("legacy clamp path is gone: negative nudge leaves old scalar untouched", () => {
     const G = makeGraph(-0.98);
     const sr = makeResult();
     applyOutcomeMoodNudge(G, sr, false, true, SCALE);
-    expect(G.getAgent("self").mood_valence).toBe(-1.0);
+    expect(G.getAgent("self").mood_valence).toBe(-0.98);
   });
 
   // -- 禁用 -------------------------------------------------------------------
@@ -103,21 +122,15 @@ describe("ADR-185 §3: applyOutcomeMoodNudge (shell-native)", () => {
     const G = makeGraph(0.5);
     const sr = makeResult();
     applyOutcomeMoodNudge(G, sr, true, false, 0);
-    // delta = 0 * 0.3 = 0 → 不更新
     expect(G.getAgent("self").mood_valence).toBe(0.5);
+    expect(readEmotionEpisodes(G)).toHaveLength(0);
   });
 
-  // -- mood_set_ms 更新 -------------------------------------------------------
-
-  it("非零 delta 时 mood_set_ms 被重置", () => {
+  it("非零 delta 时不重置 legacy mood_set_ms", () => {
     const G = makeGraph(0);
     const sr = makeResult();
-    const before = Date.now();
     applyOutcomeMoodNudge(G, sr, true, false, SCALE);
-    const after = Date.now();
-    const ms = G.getAgent("self").mood_set_ms;
-    expect(ms).toBeGreaterThanOrEqual(before);
-    expect(ms).toBeLessThanOrEqual(after);
+    expect(G.getAgent("self").mood_set_ms).toBe(0);
   });
 
   // -- 无 self agent → 安全退出 ------------------------------------------------

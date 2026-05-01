@@ -81,9 +81,9 @@ export class PromptBuilder {
     return this;
   }
 
-  /** [HH:MM] Name (#msgId): text 时间线条目。msgId 可选，用于 irc forward --ref 引用。 */
+  /** [HH:MM] Name (msgId N): text 时间线条目。msgId 可选，用于 irc forward --ref 引用。 */
   timeline(time: string, name: string, text: string, msgId?: number | null): this {
-    const idTag = msgId != null && msgId > 0 ? ` (#${msgId})` : "";
+    const idTag = msgId != null && msgId > 0 ? ` (msgId ${msgId})` : "";
     this.lines.push(`[${time}] ${name}${idTag}: ${text}` as PromptLine);
     return this;
   }

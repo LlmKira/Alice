@@ -7,13 +7,18 @@ import type { Dispatcher } from "@mtcute/dispatcher";
 import type { TelegramClient } from "@mtcute/node";
 import { Chat, getMarkedPeerId, type tl, User } from "@mtcute/node";
 import { and, desc, eq, isNotNull } from "drizzle-orm";
+import { recordObservedGroupPhoto } from "../db/album.js";
+import { writeCanonicalEvent, writeCanonicalEventOnce } from "../db/canonical-event-store.js";
 import { getDb } from "../db/connection.js";
 import { messageLog } from "../db/schema.js";
 import { terminateConversation } from "../engine/conversation.js";
-import { CHANNEL_PREFIX, CONTACT_PREFIX } from "../graph/constants.js";
+import { telegramChannelId, telegramContactId } from "../graph/constants.js";
 import type { WorldModel } from "../graph/world-model.js";
+import { getCachedDescription, getCachedOcrText } from "../llm/media-cache.js";
+import { stableTransportMessageId } from "../platform/transport.js";
 import { createLogger } from "../utils/logger.js";
 import { fetchAndCacheBio, getCachedBio } from "./bio-cache.js";
+import { canonicalFromPerturbation } from "./canonical-events.js";
 import type { GraphPerturbation } from "./mapper.js";
 
 const log = createLogger("events");
@@ -21,12 +26,42 @@ const log = createLogger("events");
 /** ADR-64 I-1: directed 消息到达回调类型。 */
 export type DirectedCallback = (event: GraphPerturbation) => void;
 
+/** ADR-248 W3: canonical_events 实时旁路写入。失败只告警，不影响 EventBuffer 主路径。 */
+export function pushCanonicalPerturbation(
+  buffer: EventBuffer,
+  event: GraphPerturbation,
+  sourceId?: string,
+): void {
+  try {
+    if (sourceId) {
+      writeCanonicalEventOnce(canonicalFromPerturbation(event), { source: "telegram", sourceId });
+    } else {
+      writeCanonicalEvent(canonicalFromPerturbation(event));
+    }
+  } catch (e) {
+    log.warn("Failed to write canonical event side path", e);
+  }
+  buffer.push(event);
+}
+
 /**
  * 对话延续唤醒窗口（ms）。旧值 2 ticks × 60s = 120s。
  * Alice 在某频道发言后此时间窗内，该频道的新消息也触发 debounce 唤醒。
  * 避免群聊中对方不用 reply 直接跟进时 Alice 等待整个 tick 间隔。
  */
 const CONTINUATION_WAKEUP_MS = 120_000;
+
+function extractMediaUniqueFileId(media: unknown): string | null {
+  if (!media || typeof media !== "object") return null;
+  const record = media as { uniqueFileId?: unknown; fileUniqueId?: unknown };
+  if (typeof record.uniqueFileId === "string" && record.uniqueFileId.trim()) {
+    return record.uniqueFileId;
+  }
+  if (typeof record.fileUniqueId === "string" && record.fileUniqueId.trim()) {
+    return record.fileUniqueId;
+  }
+  return null;
+}
 
 /** 事件缓冲区：每 tick 收集，evolve 消费。 */
 export class EventBuffer {
@@ -250,7 +285,7 @@ export function bindEvents(
   // 新消息
   dp.onNewMessage(async (ctx) => {
     const chatId = String(ctx.chat.id);
-    const channelId = `${CHANNEL_PREFIX}${chatId}`;
+    const channelId = telegramChannelId(chatId);
     const senderId = ctx.sender ? String(ctx.sender.id) : null;
     const selfId = getSelfId();
     const tick = getCurrentTick();
@@ -267,7 +302,7 @@ export function bindEvents(
     // Alice 已在原始频道看到真实消息，此处的副本应丢弃。
     if (senderId === "1271266957") return;
 
-    const contactId = senderId ? `${CONTACT_PREFIX}${senderId}` : null;
+    const contactId = senderId ? telegramContactId(senderId) : null;
 
     // 判断是否 directed（reply、私聊、或 @mention）
     const isPrivate = ctx.chat instanceof User;
@@ -331,6 +366,7 @@ export function bindEvents(
 
     // L3: 推断消息内容类型
     let contentType: "text" | "sticker" | "photo" | "voice" | "video" | "document" = "text";
+    let mediaUniqueFileId: string | null = null;
     const media = ctx.media;
     if (media) {
       const mediaType = media.type;
@@ -339,6 +375,7 @@ export function bindEvents(
       else if (mediaType === "voice" || mediaType === "audio") contentType = "voice";
       else if (mediaType === "video") contentType = "video";
       else if (mediaType === "document") contentType = "document";
+      mediaUniqueFileId = extractMediaUniqueFileId(media);
     }
 
     // ADR-66 F1: 对话延续窗口 — Alice 近期在该频道发言 → 非 directed 消息也唤醒 evolve
@@ -358,7 +395,7 @@ export function bindEvents(
       try {
         const fwdSender = ctx.forward.sender;
         if (fwdSender && "id" in fwdSender) {
-          forwardFromChannelId = `${CHANNEL_PREFIX}${fwdSender.id}`;
+          forwardFromChannelId = telegramChannelId(fwdSender.id);
           forwardFromChannelName =
             "displayName" in fwdSender ? (fwdSender.displayName as string) : undefined;
         }
@@ -382,28 +419,32 @@ export function bindEvents(
       }
     }
 
-    buffer.push({
-      type: "new_message",
-      channelId,
-      contactId: contactId ?? undefined,
-      isDirected,
-      isContinuation,
-      tick,
-      // ADR-147 D5: 消息原始发送时间（Telegram 服务器 Unix 时间戳）。
-      // 积压消息的 nowMs 使用原始时间 → effectiveUnread 衰减正确生效。
-      nowMs: ctx.date.getTime(),
-      novelty: 0.5,
-      displayName,
-      chatDisplayName,
-      chatType,
-      messageText: msgText,
-      senderName: sName,
-      contentType,
-      senderIsBot: senderIsBot || undefined,
-      forwardFromChannelId,
-      forwardFromChannelName,
-      tmeLinks,
-    });
+    pushCanonicalPerturbation(
+      buffer,
+      {
+        type: "new_message",
+        channelId,
+        contactId: contactId ?? undefined,
+        isDirected,
+        isContinuation,
+        tick,
+        // ADR-147 D5: 消息原始发送时间（Telegram 服务器 Unix 时间戳）。
+        // 积压消息的 nowMs 使用原始时间 → effectiveUnread 衰减正确生效。
+        nowMs: ctx.date.getTime(),
+        novelty: 0.5,
+        displayName,
+        chatDisplayName,
+        chatType,
+        messageText: msgText,
+        senderName: sName,
+        contentType,
+        senderIsBot: senderIsBot || undefined,
+        forwardFromChannelId,
+        forwardFromChannelName,
+        tmeLinks,
+      },
+      `message:${channelId}:${ctx.id}`,
+    );
 
     // 写入 message_log（FTS 同步由 SQLite 触发器自动完成）。
     // ADR-119: 媒体消息也入库（sticker/voice/photo 等），不再仅限有文本的消息。
@@ -414,8 +455,12 @@ export function bindEvents(
           .insert(messageLog)
           .values({
             tick,
+            platform: "telegram",
             chatId: channelId,
             msgId: ctx.id,
+            nativeChatId: chatId,
+            nativeMsgId: String(ctx.id),
+            stableMessageId: stableTransportMessageId("telegram", chatId, ctx.id),
             replyToMsgId: ctx.replyToMessage?.id ?? undefined,
             senderId: contactId ?? undefined,
             senderName: sName,
@@ -427,6 +472,28 @@ export function bindEvents(
           .run();
       } catch (e) {
         log.warn("Failed to write message_log", e);
+      }
+    }
+
+    // ADR-260: group photo album asset projection.
+    // 只收群/超群照片；私聊照片不进入相册。
+    if (
+      contentType === "photo" &&
+      mediaUniqueFileId &&
+      (chatType === "group" || chatType === "supergroup")
+    ) {
+      try {
+        recordObservedGroupPhoto({
+          fileUniqueId: mediaUniqueFileId,
+          sourceChatId: Number(chatId),
+          sourceMsgId: ctx.id,
+          captionText: msgText ?? null,
+          description: getCachedDescription(mediaUniqueFileId) ?? null,
+          ocrText: getCachedOcrText(mediaUniqueFileId) ?? null,
+          observedAtMs: ctx.date.getTime(),
+        });
+      } catch (e) {
+        log.warn("Failed to index group photo album asset", e);
       }
     }
 
@@ -452,8 +519,8 @@ export function bindEvents(
     if (senderId === "1271266957") return;
 
     const chatId = String(ctx.chat.id);
-    const channelId = `${CHANNEL_PREFIX}${chatId}`;
-    const contactId = senderId ? `${CONTACT_PREFIX}${senderId}` : null;
+    const channelId = telegramChannelId(chatId);
+    const contactId = senderId ? telegramContactId(senderId) : null;
     const tick = getCurrentTick();
 
     // directed 检测（与 onNewMessage 一致）
@@ -496,44 +563,56 @@ export function bindEvents(
     const displayName = ctx.sender?.displayName;
     const msgText = ctx.text ? ctx.text.slice(0, 4096) : undefined;
 
-    buffer.push({
-      type: "new_message",
-      channelId,
-      contactId: contactId ?? undefined,
-      isDirected,
-      tick,
-      novelty: 0.3, // 编辑的新奇度较低
-      nowMs: ctx.date.getTime(),
-      displayName,
-      chatType,
-      messageText: msgText, // 审计修复: 确保 safety_flag 检测覆盖编辑消息
-    });
+    pushCanonicalPerturbation(
+      buffer,
+      {
+        type: "new_message",
+        channelId,
+        contactId: contactId ?? undefined,
+        isDirected,
+        tick,
+        novelty: 0.3, // 编辑的新奇度较低
+        nowMs: ctx.date.getTime(),
+        displayName,
+        chatType,
+        messageText: msgText, // 审计修复: 确保 safety_flag 检测覆盖编辑消息
+      },
+      `edit:${channelId}:${ctx.id}`,
+    );
   });
 
   // 已读历史
   dp.onHistoryRead(async (ctx) => {
     const chatId = String(ctx.chatId);
-    const channelId = `${CHANNEL_PREFIX}${chatId}`;
+    const channelId = telegramChannelId(chatId);
     const tick = getCurrentTick();
 
-    buffer.push({
-      type: "read_history",
-      channelId,
-      tick,
-    });
+    pushCanonicalPerturbation(
+      buffer,
+      {
+        type: "read_history",
+        channelId,
+        tick,
+      },
+      `read_history:${channelId}:${tick}`,
+    );
   });
 
   // 用户在线状态
   dp.onUserStatusUpdate(async (ctx) => {
     const userId = String(ctx.userId);
-    const contactId = `${CONTACT_PREFIX}${userId}`;
+    const contactId = telegramContactId(userId);
     const tick = getCurrentTick();
 
-    buffer.push({
-      type: "user_status",
-      contactId,
-      tick,
-    });
+    pushCanonicalPerturbation(
+      buffer,
+      {
+        type: "user_status",
+        contactId,
+        tick,
+      },
+      `user_status:${contactId}:${tick}`,
+    );
   });
 
   // Reaction（别人给消息点赞/回应）
@@ -545,7 +624,7 @@ export function bindEvents(
     async (_client, upd, _peers) => {
       const raw = upd as tl.RawUpdateMessageReactions;
       const chatId = String(getMarkedPeerId(raw.peer));
-      const channelId = `${CHANNEL_PREFIX}${chatId}`;
+      const channelId = telegramChannelId(chatId);
       const selfId = getSelfId();
       const tick = getCurrentTick();
 
@@ -561,7 +640,7 @@ export function bindEvents(
       // 跳过自己的 reaction
       if (actorId === selfId) return;
 
-      const contactId = actorId ? `${CONTACT_PREFIX}${actorId}` : null;
+      const contactId = actorId ? telegramContactId(actorId) : null;
 
       // 提取 emoji——从聚合结果中取第一个有效 reaction
       const firstResult = raw.reactions.results[0];
@@ -585,17 +664,21 @@ export function bindEvents(
           }
         }
 
-        buffer.push({
-          type: "reaction",
-          channelId,
-          contactId: contactId ?? undefined,
-          tick,
-          emoji,
-          messageId: raw.msgId,
-          isContinuation,
-          // ADR-147 D11: updateMessageReactions TL 无 date 字段，
-          // 无法获取 reaction 原始时间。积压场景由 D4 isRecovering + D7 P1 cap 兜底。
-        });
+        pushCanonicalPerturbation(
+          buffer,
+          {
+            type: "reaction",
+            channelId,
+            contactId: contactId ?? undefined,
+            tick,
+            emoji,
+            messageId: raw.msgId,
+            isContinuation,
+            // ADR-147 D11: updateMessageReactions TL 无 date 字段，
+            // 无法获取 reaction 原始时间。积压场景由 D4 isRecovering + D7 P1 cap 兜底。
+          },
+          `reaction:${channelId}:${raw.msgId}:${contactId ?? "unknown"}:${emoji}`,
+        );
         log.debug("Reaction received (userbot raw)", {
           channelId,
           contactId,
@@ -609,9 +692,9 @@ export function bindEvents(
   // M4: 群成员变更（加入、离开、封禁等）
   dp.onChatMemberUpdate(async (ctx) => {
     const chatId = String(ctx.chat.id);
-    const channelId = `${CHANNEL_PREFIX}${chatId}`;
+    const channelId = telegramChannelId(chatId);
     const userId = String(ctx.user.id);
-    const contactId = `${CONTACT_PREFIX}${userId}`;
+    const contactId = telegramContactId(userId);
     const tick = getCurrentTick();
 
     const updateType = ctx.type; // joined | left | kicked | added | ...
@@ -633,12 +716,16 @@ export function bindEvents(
       }
     }
 
-    buffer.push({
-      type: "chat_member_update",
-      channelId,
-      contactId,
-      tick,
-    });
+    pushCanonicalPerturbation(
+      buffer,
+      {
+        type: "chat_member_update",
+        channelId,
+        contactId,
+        tick,
+      },
+      `chat_member_update:${channelId}:${contactId}:${updateType}:${tick}`,
+    );
 
     log.debug("Chat member update", { channelId, contactId, updateType });
   });
@@ -646,20 +733,24 @@ export function bindEvents(
   // Typing indicator — 用户正在输入
   dp.onUserTyping(async (ctx) => {
     const chatId = String(ctx.chatId);
-    const channelId = `${CHANNEL_PREFIX}${chatId}`;
+    const channelId = telegramChannelId(chatId);
     const userId = ctx.userId ? String(ctx.userId) : null;
-    const contactId = userId ? `${CONTACT_PREFIX}${userId}` : undefined;
+    const contactId = userId ? telegramContactId(userId) : undefined;
     const tick = getCurrentTick();
 
     // 跳过 Alice 自己的 typing
     if (userId === getSelfId()) return;
 
-    buffer.push({
-      type: "typing",
-      channelId,
-      contactId,
-      tick,
-      novelty: 0.05, // 极低 novelty — typing 不触发 perceive
-    });
+    pushCanonicalPerturbation(
+      buffer,
+      {
+        type: "typing",
+        channelId,
+        contactId,
+        tick,
+        novelty: 0.05, // 极低 novelty — typing 不触发 perceive
+      },
+      `typing:${channelId}:${contactId ?? "unknown"}:${tick}`,
+    );
   });
 }

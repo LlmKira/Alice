@@ -116,13 +116,13 @@ class CircuitBreaker {
 /** 判断错误是否可重试（429, 502, 503, 504, 超时、网络错误）。 */
 function isRetryable(error: unknown): boolean {
   if (error instanceof Error) {
-    const msg = error.message.toLowerCase();
     // 超时
     if (error.name === "AbortError" || error.name === "TimeoutError") return true;
-    if (msg.includes("timeout") || msg.includes("timed out")) return true;
-    // 网络错误
-    if (msg.includes("econnreset") || msg.includes("econnrefused")) return true;
-    if (msg.includes("fetch failed") || msg.includes("network")) return true;
+  }
+
+  const nodeCode = extractErrorCode(error);
+  if (nodeCode === "ETIMEDOUT" || nodeCode === "ECONNRESET" || nodeCode === "ECONNREFUSED") {
+    return true;
   }
 
   // HTTP 状态码（Vercel AI SDK 和 openai SDK 都在 error 上暴露 status）
@@ -133,6 +133,14 @@ function isRetryable(error: unknown): boolean {
   }
 
   return false;
+}
+
+function extractErrorCode(error: unknown): string | null {
+  if (error == null || typeof error !== "object") return null;
+  const code = (error as { code?: unknown }).code;
+  if (typeof code === "string") return code;
+  const cause = (error as { cause?: unknown }).cause;
+  return cause ? extractErrorCode(cause) : null;
 }
 
 /** 从各种错误格式中提取 HTTP status。 */
@@ -218,6 +226,13 @@ export class CircuitOpenError extends Error {
   }
 }
 
+export class ProviderUnavailableError extends Error {
+  constructor(readonly cause: unknown) {
+    super("LLM provider unavailable after resilience retries");
+    this.name = "ProviderUnavailableError";
+  }
+}
+
 /**
  * 用弹性层包装异步 LLM 调用。
  *
@@ -281,5 +296,5 @@ export async function withResilience<T>(
     }
   }
 
-  throw lastError;
+  throw new ProviderUnavailableError(lastError);
 }

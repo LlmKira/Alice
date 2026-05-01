@@ -22,16 +22,18 @@
  * --to TARGET 仅用于 forward（方向介词，"转发到"）。
  * TARGET 支持 @ID（聊天平台惯例）、~ID（向后兼容）和裸数字。
  * 省略时自动从 ALICE_CTX_TARGET_CHAT 环境变量获取当前聊天上下文。
- * 兼容别名：`0` / `me` / `@me` / `~me` 也解析为当前聊天。
+ * 兼容别名：`0` / `me` / `@me` / `~me` / `current` / `here` / `this`
+ * 也解析为当前聊天。
  *
  * @see docs/adr/238-citty-native-cli-redesign.md
  */
 
 import { enginePost } from "../../skills/_lib/engine-client.js";
+import { CliExecutionError } from "./cli-types.js";
 
 // ── 共享解析工具 ──
 
-const CURRENT_CHAT_ALIASES = new Set(["0", "me", "@me", "~me"]);
+const CURRENT_CHAT_ALIASES = new Set(["0", "me", "@me", "~me", "current", "here", "this"]);
 
 /**
  * 解析 --in TARGET（或 forward 的 --to/--from TARGET）。
@@ -48,7 +50,7 @@ export async function resolveTarget(raw?: string): Promise<number> {
   const useCurrentChat = trimmed == null || trimmed === "" || CURRENT_CHAT_ALIASES.has(trimmed);
   const effective = useCurrentChat ? currentChat : trimmed;
   if (!effective) {
-    throw new Error("missing target: use --in @ID");
+    throw new CliExecutionError("command_missing_argument", "missing target: use --in @ID");
   }
 
   // 去掉 @ 或 ~ 前缀
@@ -71,17 +73,33 @@ export async function resolveTarget(raw?: string): Promise<number> {
     return result.result.telegramId;
   }
 
-  throw new Error(`invalid target: "${effective}"`);
+  throw new CliExecutionError("command_invalid_target", `invalid target: "${effective}"`);
 }
 
 /**
- * 解析 msgId，容忍 # 前缀（LLM 从 prompt 中 (#5791) 复制）。
+ * 解析 msgId，容忍带引号的 # 前缀；提示面不再主动展示 shell 不安全的裸 #。
  */
 export function parseMsgId(raw: string): number {
-  const stripped = raw.startsWith("#") ? raw.slice(1) : raw;
+  const stripped = raw.trim().replace(/^#/, "");
+  if (/^(latest|last|recent)$/i.test(stripped)) {
+    throw new CliExecutionError(
+      "command_invalid_message_id",
+      `invalid message ID: "${raw}" (use a visible current-chat msgId, never latest)`,
+    );
+  }
+  if (!/^\d+$/.test(stripped)) {
+    throw new CliExecutionError(
+      "command_invalid_message_id",
+      `invalid message ID: "${raw}" (expected a visible msgId like 5791)`,
+    );
+  }
   const n = Number(stripped);
-  if (!Number.isFinite(n))
-    throw new Error(`invalid message ID: "${raw}" (expected a number like 5791)`);
+  if (!Number.isSafeInteger(n) || n <= 0) {
+    throw new CliExecutionError(
+      "command_invalid_message_id",
+      `invalid message ID: "${raw}" (expected a visible msgId like 5791)`,
+    );
+  }
   return n;
 }
 

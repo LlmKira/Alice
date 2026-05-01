@@ -36,64 +36,36 @@ import { PersonalityVector } from "../src/voices/personality.js";
 
 describe("classifyFailure", () => {
   // ADR-90 W4: classifyFailure 返回 { type, subtype } 结构
-  it("kicked → permanent/soft", () => {
-    expect(classifyFailure({ errors: ["KICKED from chat"], instructionErrors: [] })).toEqual({
+  it("telegram_soft_permanent → permanent/soft", () => {
+    expect(classifyFailure({ errorCodes: ["telegram_soft_permanent"] })).toEqual({
       type: "permanent",
       subtype: "soft",
     });
   });
 
-  it("banned → permanent/hard", () => {
-    expect(classifyFailure({ errors: [], instructionErrors: ["USER_BANNED_IN_CHANNEL"] })).toEqual({
+  it("telegram_hard_permanent → permanent/hard", () => {
+    expect(classifyFailure({ errorCodes: ["telegram_hard_permanent"] })).toEqual({
       type: "permanent",
       subtype: "hard",
     });
   });
 
-  it("peer_id_invalid → permanent/soft", () => {
-    expect(classifyFailure({ errors: ["PEER_ID_INVALID"], instructionErrors: [] })).toEqual({
-      type: "permanent",
-      subtype: "soft",
-    });
-  });
-
-  it("chat_write_forbidden → permanent/soft", () => {
-    expect(classifyFailure({ errors: ["CHAT_WRITE_FORBIDDEN"], instructionErrors: [] })).toEqual({
-      type: "permanent",
-      subtype: "soft",
-    });
-  });
-
-  it("user_deactivated → permanent/hard", () => {
-    expect(classifyFailure({ errors: ["INPUT_USER_DEACTIVATED"], instructionErrors: [] })).toEqual({
-      type: "permanent",
-      subtype: "hard",
-    });
-  });
-
-  it("channel_private → permanent/soft", () => {
-    expect(classifyFailure({ errors: ["CHANNEL_PRIVATE"], instructionErrors: [] })).toEqual({
+  it("unreachable_telegram_user → permanent/soft", () => {
+    expect(classifyFailure({ errorCodes: ["unreachable_telegram_user"] })).toEqual({
       type: "permanent",
       subtype: "soft",
     });
   });
 
   it("timeout → transient", () => {
-    expect(classifyFailure({ errors: ["Request timeout"], instructionErrors: [] })).toEqual({
-      type: "transient",
-      subtype: null,
-    });
-  });
-
-  it("unknown error → transient (conservative)", () => {
-    expect(classifyFailure({ errors: ["Something went wrong"], instructionErrors: [] })).toEqual({
+    expect(classifyFailure({ errorCodes: ["timeout"] })).toEqual({
       type: "transient",
       subtype: null,
     });
   });
 
   it("no errors → transient", () => {
-    expect(classifyFailure({ errors: [], instructionErrors: [] })).toEqual({
+    expect(classifyFailure({ errorCodes: [] })).toEqual({
       type: "transient",
       subtype: null,
     });
@@ -266,7 +238,6 @@ describe("IAUS reachability dampening", () => {
     G: WorldModel,
     contributions: Record<string, Record<string, number>>,
   ): IAUSConfig {
-    const tensionMap = buildTensionMap(contributions);
     return {
       candidateCtx: makeCandidateCtx(G),
       kappa,

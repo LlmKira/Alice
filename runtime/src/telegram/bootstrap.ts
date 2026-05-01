@@ -5,7 +5,7 @@
  */
 import type { TelegramClient } from "@mtcute/node";
 import { Chat, User } from "@mtcute/node";
-import { CHANNEL_PREFIX, CONTACT_PREFIX } from "../graph/constants.js";
+import { telegramChannelId, telegramContactId } from "../graph/constants.js";
 import type { ChatType, DunbarTier } from "../graph/entities.js";
 import { WorldModel } from "../graph/world-model.js";
 import { createLogger } from "../utils/logger.js";
@@ -39,7 +39,7 @@ export async function buildInitialGraph(client: TelegramClient): Promise<WorldMo
     if (peer instanceof User && peer.id === self.id) continue;
 
     const chatId = String(peer.id);
-    const channelId = `${CHANNEL_PREFIX}${chatId}`;
+    const channelId = telegramChannelId(chatId);
 
     // 判断 peer 类型：User 是私聊，Chat 是群/频道
     const isUser = peer instanceof User;
@@ -85,7 +85,7 @@ export async function buildInitialGraph(client: TelegramClient): Promise<WorldMo
 
     // 私聊 → 创建 CONTACT 节点
     if (isUser) {
-      const contactId = `${CONTACT_PREFIX}${chatId}`;
+      const contactId = telegramContactId(chatId);
       if (!G.has(contactId)) {
         G.addContact(contactId, {
           tier: tierContact,

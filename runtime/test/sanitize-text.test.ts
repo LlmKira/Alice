@@ -80,6 +80,12 @@ describe("sanitizeOutgoingText", () => {
     expect(output).toContain("倒是 lingxh 在签什么名？");
   });
 
+  it("把 shell 参数里的字面量换行转成真实换行", () => {
+    expect(sanitizeOutgoingText("好哦 那讲个短的\\n\\n从前有颗星星")).toBe(
+      "好哦 那讲个短的\n\n从前有颗星星",
+    );
+  });
+
   it("多个注解同时剥离", () => {
     expect(sanitizeOutgoingText("嗯 [sticker shy] 好的 [😂×3]")).toBe("嗯  好的");
   });

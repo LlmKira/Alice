@@ -101,9 +101,11 @@ function makeResult(completedActions: string[] = []): ScriptExecutionResult {
     logs: [],
     errors: [],
     instructionErrors: [],
+    errorCodes: [],
     duration: 0,
     thinks: [],
     queryLogs: [],
+    observations: [],
     completedActions,
     silenceReason: null,
   };

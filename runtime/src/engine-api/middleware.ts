@@ -69,15 +69,30 @@ const ROUTE_CAPABILITIES: Array<{
     test: (m, p) => m === "POST" && p.startsWith("/telegram/send"),
     required: "telegram.send",
   },
+  // neutral transport send
+  {
+    test: (m, p) => m === "POST" && p.startsWith("/transport/send"),
+    required: "transport.send",
+  },
   // telegram mark read
   {
     test: (m, p) => m === "POST" && p.startsWith("/telegram/read"),
     required: "telegram.read",
   },
+  // neutral transport read
+  {
+    test: (m, p) => m === "POST" && p.startsWith("/transport/read"),
+    required: "transport.read",
+  },
   // telegram react
   {
     test: (m, p) => m === "POST" && p.startsWith("/telegram/react"),
     required: "telegram.react",
+  },
+  // neutral transport react
+  {
+    test: (m, p) => m === "POST" && p.startsWith("/transport/react"),
+    required: "transport.react",
   },
   // telegram join
   {
@@ -92,6 +107,15 @@ const ROUTE_CAPABILITIES: Array<{
   // telegram forward
   {
     test: (m, p) => m === "POST" && p.startsWith("/telegram/forward"),
+    required: "telegram.forward",
+  },
+  // album search/send
+  {
+    test: (m, p) => m === "GET" && p.startsWith("/album/search"),
+    required: "chat.read",
+  },
+  {
+    test: (m, p) => m === "POST" && p.startsWith("/album/send"),
     required: "telegram.forward",
   },
   // dispatch

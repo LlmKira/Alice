@@ -319,6 +319,10 @@ export const CHANNEL_PREFIX = "channel:";
 export const CONTACT_PREFIX = "contact:";
 /** 对话会话图节点 ID 前缀。 */
 export const CONVERSATION_PREFIX = "conversation:";
+export const TELEGRAM_PLATFORM = "telegram";
+
+const PLATFORM_ENTITY_ID_RE = /^(channel|contact):([a-z][a-z0-9_-]*):(.+)$/u;
+const TELEGRAM_NUMBER_RE = /^-?\d+$/u;
 
 // -- ID 转换工具 -------------------------------------------------------------
 
@@ -328,13 +332,42 @@ export const CONVERSATION_PREFIX = "conversation:";
  * @see docs/adr/155-branded-graph-id.md
  */
 export function chatIdToContactId(chatId: string): ContactNodeId | null {
-  if (chatId.startsWith(CONTACT_PREFIX)) return chatId as ContactNodeId;
-  if (chatId.startsWith(CHANNEL_PREFIX))
-    return `${CONTACT_PREFIX}${chatId.slice(CHANNEL_PREFIX.length)}` as ContactNodeId;
+  const parsed = parsePlatformEntityId(chatId);
+  if (!parsed) return null;
+  if (parsed.kind === "contact") return chatId as ContactNodeId;
+  if (parsed.kind === "channel") return platformContactId(parsed.platform, parsed.nativeId);
   return null;
 }
 
 // -- 通用 ID 转换 -----------------------------------------------------------
+
+export function platformChannelId(platform: string, nativeId: string | number): ChannelNodeId {
+  return `${CHANNEL_PREFIX}${platform}:${nativeId}` as ChannelNodeId;
+}
+
+export function platformContactId(platform: string, nativeId: string | number): ContactNodeId {
+  return `${CONTACT_PREFIX}${platform}:${nativeId}` as ContactNodeId;
+}
+
+export function telegramChannelId(nativeId: string | number): ChannelNodeId {
+  return platformChannelId(TELEGRAM_PLATFORM, nativeId);
+}
+
+export function telegramContactId(nativeId: string | number): ContactNodeId {
+  return platformContactId(TELEGRAM_PLATFORM, nativeId);
+}
+
+function parsePlatformEntityId(
+  id: string,
+): { kind: "channel" | "contact"; platform: string; nativeId: string } | null {
+  const match = PLATFORM_ENTITY_ID_RE.exec(id);
+  if (!match) return null;
+  return {
+    kind: match[1] as "channel" | "contact",
+    platform: match[2],
+    nativeId: match[3],
+  };
+}
 
 /**
  * 从任何实体 ID（channel:xxx, contact:xxx, 纯数字字符串）提取 Telegram 数字 ID。
@@ -343,24 +376,30 @@ export function chatIdToContactId(chatId: string): ContactNodeId | null {
  */
 export function extractNumericId(id: string): TelegramId | null {
   let raw: string;
-  if (id.startsWith(CHANNEL_PREFIX)) raw = id.slice(CHANNEL_PREFIX.length);
-  else if (id.startsWith(CONTACT_PREFIX)) raw = id.slice(CONTACT_PREFIX.length);
-  // @senderId 前缀（prompt 标注惯例）+ ~senderId（向后兼容）
+  const parsed = parsePlatformEntityId(id);
+  if (parsed) {
+    if (parsed.platform !== TELEGRAM_PLATFORM) return null;
+    raw = parsed.nativeId;
+  }
+  // @senderId 前缀（prompt 标注惯例）+ ~senderId（LLM-facing shorthand）
   else if (id.startsWith("@") || id.startsWith("~")) raw = id.slice(1);
   else raw = id;
+  if (!TELEGRAM_NUMBER_RE.test(raw)) return null;
   const n = Number(raw);
   return Number.isNaN(n) || raw === "" ? null : (n as TelegramId);
 }
 
 /**
- * 确保 ID 为 channel 格式（channel:xxx）。
- * 接受 channel:xxx、contact:xxx、纯数字字符串。非法格式返回 null。
+ * 确保 ID 为平台限定 channel 格式（channel:<platform>:<nativeId>）。
+ * 纯数字字符串按 Telegram native id 处理；旧 `channel:<id>` / `contact:<id>` 不再接受。
  * @see docs/adr/155-branded-graph-id.md
  */
 export function ensureChannelId(id: string): ChannelNodeId | null {
-  if (id.startsWith(CHANNEL_PREFIX)) return id as ChannelNodeId;
+  const parsed = parsePlatformEntityId(id);
+  if (parsed?.kind === "channel") return id as ChannelNodeId;
+  if (parsed?.kind === "contact") return platformChannelId(parsed.platform, parsed.nativeId);
   const n = extractNumericId(id);
-  return n != null ? (`${CHANNEL_PREFIX}${n}` as ChannelNodeId) : null;
+  return n != null ? telegramChannelId(n) : null;
 }
 
 // -- Perceive Facts 常量 (ADR-160) ------------------------------------------
@@ -426,9 +465,11 @@ export const EMOTIONAL_NOTED_THRESHOLD = 0.2;
  * @see docs/adr/155-branded-graph-id.md
  */
 export function ensureContactId(id: string): ContactNodeId | null {
-  if (id.startsWith(CONTACT_PREFIX)) return id as ContactNodeId;
+  const parsed = parsePlatformEntityId(id);
+  if (parsed?.kind === "contact") return id as ContactNodeId;
+  if (parsed?.kind === "channel") return platformContactId(parsed.platform, parsed.nativeId);
   const n = extractNumericId(id);
-  return n != null ? (`${CONTACT_PREFIX}${n}` as ContactNodeId) : null;
+  return n != null ? telegramContactId(n) : null;
 }
 
 /**
@@ -442,8 +483,23 @@ export function resolveContactAndChannel(
 ): { contactId: ContactNodeId | null; channelId: ChannelNodeId | null } {
   const channelId = ensureChannelId(target);
   const contactId = ensureContactId(target);
+  const parsed = parsePlatformEntityId(target);
+  const mirroredContactId =
+    parsed?.kind === "channel" ? platformContactId(parsed.platform, parsed.nativeId) : null;
+  const mirroredChannelId =
+    parsed?.kind === "contact" ? platformChannelId(parsed.platform, parsed.nativeId) : null;
   return {
-    contactId: contactId && has(contactId) ? contactId : null,
-    channelId: channelId && has(channelId) ? channelId : null,
+    contactId:
+      contactId && has(contactId)
+        ? contactId
+        : mirroredContactId && has(mirroredContactId)
+          ? mirroredContactId
+          : null,
+    channelId:
+      channelId && has(channelId)
+        ? channelId
+        : mirroredChannelId && has(mirroredChannelId)
+          ? mirroredChannelId
+          : null,
   };
 }

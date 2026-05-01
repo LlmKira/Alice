@@ -2,6 +2,7 @@
  * 消息拉取 — Telegram API 实时消息获取 + 回复链逸散。
  */
 import {
+  Audio,
   type Photo,
   Poll,
   Sticker,
@@ -15,9 +16,11 @@ import {
 
 import { eq } from "drizzle-orm";
 import type { Config } from "../../config.js";
+import { updateAlbumPhotoSemantics } from "../../db/album.js";
 import { getDb } from "../../db/connection.js";
 import { type DbMessageRecord, getMessageCluster } from "../../db/queries.js";
 import { stickerPalette } from "../../db/schema.js";
+import { telegramChannelId } from "../../graph/constants.js";
 import type { ChatType } from "../../graph/entities.js";
 import { isASREnabled, transcribeVoice } from "../../llm/asr.js";
 import { setCachedChatInfo } from "../../llm/group-cache.js";
@@ -55,6 +58,52 @@ const RASTER_THUMB_TYPES = new Set(["s", "m", "x", "y", "w", "a", "b", "c", "d"]
 export interface ContentSegment {
   readonly kind: "body" | "media" | "link" | "image" | "meta";
   readonly text: string;
+}
+
+export function formatImageOcrMetaText(ocr: string): string {
+  return `(image OCR text, not sender speech: "${ocr}")`;
+}
+
+function formatAudioDuration(seconds: number): string | undefined {
+  if (!Number.isFinite(seconds) || seconds <= 0) return undefined;
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+export function formatAudioMediaText(
+  audio: Pick<Audio, "title" | "performer" | "duration" | "fileName">,
+): string {
+  const title = audio.title?.trim();
+  const performer = audio.performer?.trim();
+  const fileName = audio.fileName?.trim();
+  const duration = formatAudioDuration(audio.duration);
+  const track = title && performer ? `${title} — ${performer}` : (title ?? performer ?? fileName);
+  const detail = [track, duration].filter(Boolean).join(", ");
+  return detail ? `(audio 🎵: ${detail})` : "(audio 🎵)";
+}
+
+export function formatStickerMediaText(params: {
+  emoji?: string;
+  title?: string;
+  description?: string;
+  fileId: string;
+}): string {
+  const title = params.title?.trim();
+  const description = params.description?.trim();
+  const emoji = params.emoji?.trim();
+  const header = description ? "sticker" : ["sticker", emoji].filter(Boolean).join(" ");
+  const titlePart = title ? ` — ${title}` : "";
+  const descriptionPart = description ? `: ${description}` : "";
+  return `(${header}${titlePart}${descriptionPart} | id:${params.fileId})`;
+}
+
+function extractStickerTitle(text: string): string | undefined {
+  const match = text.match(/^\(sticker(?:\s+\S+)? — ([^:|]+?)(?:\s*:|\s*\|)/);
+  return match?.[1]?.trim() || undefined;
 }
 
 /** 简化的消息记录，供 fetchRecentMessages 使用。 */
@@ -210,9 +259,7 @@ export async function fetchRecentMessages(
             const stickerFileId = msg.media.fileId;
             segments.push({
               kind: "media",
-              text: emoji
-                ? `(sticker ${emoji} | id:${stickerFileId})`
-                : `(sticker | id:${stickerFileId})`,
+              text: formatStickerMediaText({ emoji, fileId: stickerFileId }),
             });
             // ADR-119: 收集 VLM 语义描述 + Phase 2 调色板索引
             if (visionEnabled) {
@@ -240,7 +287,9 @@ export async function fetchRecentMessages(
               });
             }
           } else if (mediaType === "photo") segments.push({ kind: "media", text: "(photo 📷)" });
-          else if (mediaType === "voice" || mediaType === "audio") {
+          else if (msg.media instanceof Audio) {
+            segments.push({ kind: "media", text: formatAudioMediaText(msg.media) });
+          } else if (mediaType === "voice") {
             segments.push({ kind: "media", text: "(voice 🎤)" });
             // ADR-119: 收集 ASR 转写
             if (asrEnabled) {
@@ -431,9 +480,11 @@ export async function fetchRecentMessages(
         const title = cached?.title;
         const reversedIdx = records.length - 1 - s.index;
         if (reversedIdx >= 0 && reversedIdx < records.length && title) {
-          const newText = s.emoji
-            ? `(sticker ${s.emoji} — ${title} | id:${s.fileId})`
-            : `(sticker — ${title} | id:${s.fileId})`;
+          const newText = formatStickerMediaText({
+            emoji: s.emoji,
+            title,
+            fileId: s.fileId,
+          });
           records[reversedIdx].text = newText;
           replaceMediaSegment(records[reversedIdx], newText);
         }
@@ -457,18 +508,18 @@ export async function fetchRecentMessages(
           if (isInPalette(db, fileUniqueId)) {
             const cached = getCachedDescription(fileUniqueId);
             // media-cache TTL 过期时从 palette label 取 fallback
-            if (cached) return { index, caption: cached };
+            if (cached) return { index, fileId, caption: cached };
             const paletteLabel = db
               .select({ label: stickerPalette.label })
               .from(stickerPalette)
               .where(eq(stickerPalette.fileUniqueId, fileUniqueId))
               .limit(1)
               .get();
-            return { index, caption: paletteLabel?.label };
+            return { index, fileId, caption: paletteLabel?.label };
           }
           // 缓存命中（之前分析过但不符合入库条件）
           const cached = getCachedDescription(fileUniqueId);
-          if (cached) return { index, caption: cached };
+          if (cached) return { index, fileId, caption: cached };
           try {
             // 下载 buffer
             let buffer: Buffer;
@@ -477,7 +528,7 @@ export async function fetchRecentMessages(
               const thumb = sticker.thumbnails?.find(
                 (t) => t.width > 0 && !Number.isNaN(t.width) && RASTER_THUMB_TYPES.has(t.type),
               );
-              if (!thumb) return { index, caption: undefined };
+              if (!thumb) return { index, fileId, caption: undefined };
               buffer = Buffer.from(await client.downloadAsBuffer(thumb));
             } else {
               buffer = Buffer.from(
@@ -487,19 +538,19 @@ export async function fetchRecentMessages(
               );
             }
             if (buffer.byteLength > 512_000 || buffer.byteLength < 1024) {
-              return { index, caption: undefined };
+              return { index, fileId, caption: undefined };
             }
             const head4 = buffer.subarray(0, 4);
             if (head4[0] === 0x3c && (head4[1] === 0x3f || head4[1] === 0x73)) {
               setCachedDescription(fileUniqueId, "sticker", "(animated sticker)");
-              return { index, caption: "(animated sticker)" };
+              return { index, fileId, caption: "(animated sticker)" };
             }
 
             // ADR-153: AnimeIDF 门控 — 非动漫贴纸不入库
             const isAnime = await isAnimeSticker(buffer, config);
             if (!isAnime) {
               setCachedDescription(fileUniqueId, "sticker", "(non-anime sticker)");
-              return { index, caption: "(non-anime sticker)" };
+              return { index, fileId, caption: "(non-anime sticker)" };
             }
 
             // OCR + VLM 并发（两者互相独立）
@@ -530,22 +581,24 @@ export async function fetchRecentMessages(
               });
             }
 
-            return { index, caption };
+            return { index, fileId, caption };
           } catch {
-            return { index, caption: undefined };
+            return { index, fileId, caption: undefined };
           }
         }),
       );
       // 回填：追加 VLM 描述到已有的 (sticker ...) 文本
       for (const r of stickerResults) {
-        if (r.status === "fulfilled" && r.value.caption) {
-          const ri = records.length - 1 - r.value.index;
-          if (ri >= 0 && ri < records.length) {
-            const newText = records[ri].text.replace(/ \| id:/, `: ${r.value.caption} | id:`);
-            records[ri].text = newText;
-            replaceMediaSegment(records[ri], newText);
-          }
-        }
+        if (r.status !== "fulfilled" || !r.value.caption) continue;
+        const ri = records.length - 1 - r.value.index;
+        if (ri < 0 || ri >= records.length) continue;
+        const newText = formatStickerMediaText({
+          title: extractStickerTitle(records[ri].text),
+          description: r.value.caption,
+          fileId: r.value.fileId,
+        });
+        records[ri].text = newText;
+        replaceMediaSegment(records[ri], newText);
       }
       stickerVisionUsed = Math.min(stickerBatch.length, config.visionMaxPerTick);
     }
@@ -574,12 +627,12 @@ export async function fetchRecentMessages(
         batch.map(async ({ index, fileUniqueId, media }) => {
           try {
             const buffer = await downloadPhotoOnce(fileUniqueId, media);
-            if (buffer.byteLength > 1_048_576) return { index, caption: undefined }; // > 1MB 跳过
+            if (buffer.byteLength > 1_048_576) return { index, fileUniqueId, caption: undefined }; // > 1MB 跳过
             const base64 = buffer.toString("base64");
             const caption = await describeMedia(base64, fileUniqueId, "photo", config);
-            return { index, caption };
+            return { index, fileUniqueId, caption };
           } catch {
-            return { index, caption: undefined };
+            return { index, fileUniqueId, caption: undefined };
           }
         }),
       );
@@ -588,6 +641,7 @@ export async function fetchRecentMessages(
       for (const r of results) {
         if (r.status === "fulfilled" && r.value.caption) {
           visionCaptions.set(r.value.index, r.value.caption);
+          updateAlbumPhotoSemantics(r.value.fileUniqueId, { description: r.value.caption });
         }
       }
     }
@@ -601,20 +655,21 @@ export async function fetchRecentMessages(
         ocrBatch.map(async ({ index, fileUniqueId, media }) => {
           // 缓存命中
           const cached = getCachedOcrText(fileUniqueId);
-          if (cached) return { index, ocrText: cached };
+          if (cached) return { index, fileUniqueId, ocrText: cached };
           try {
             const buffer = await downloadPhotoOnce(fileUniqueId, media);
             const ocrText = await extractText(buffer, config);
             if (ocrText) setCachedOcrText(fileUniqueId, ocrText);
-            return { index, ocrText };
+            return { index, fileUniqueId, ocrText };
           } catch {
-            return { index, ocrText: undefined };
+            return { index, fileUniqueId, ocrText: undefined };
           }
         }),
       );
       for (const r of ocrResults) {
         if (r.status === "fulfilled" && r.value.ocrText) {
           ocrTexts.set(r.value.index, r.value.ocrText);
+          updateAlbumPhotoSemantics(r.value.fileUniqueId, { ocrText: r.value.ocrText });
         }
       }
     }
@@ -622,9 +677,9 @@ export async function fetchRecentMessages(
     // ── Photo 回填：合并 VLM 描述 + OCR 文字 ─────────────────────────
     // | 场景            | 格式                                          |
     // |-----------------|-----------------------------------------------|
-    // | VLM + OCR 都有  | (photo: {VLM描述}) + meta: (text: "{OCR}")    |
+    // | VLM + OCR 都有  | (photo: {VLM描述}) + meta: (image OCR text...)|
     // | 仅 VLM          | (photo: {VLM描述})                            |
-    // | 仅 OCR          | (photo 📷) + meta: (text: "{OCR}")            |
+    // | 仅 OCR          | (photo 📷) + meta: (image OCR text...)        |
     // | 两者都无        | (photo 📷)（不变）                            |
     {
       const allPhotoIndices = new Set([...visionCaptions.keys(), ...ocrTexts.keys()]);
@@ -639,7 +694,7 @@ export async function fetchRecentMessages(
           replaceMediaSegment(record, `(photo: ${vlm})`);
         }
         if (ocr) {
-          appendSegment(record, { kind: "meta", text: `(text: "${ocr}")` });
+          appendSegment(record, { kind: "meta", text: formatImageOcrMetaText(ocr) });
         }
         // 两者都无 → 保持 (photo 📷) 不变
       }
@@ -751,7 +806,7 @@ export async function fetchRecentMessages(
     }
 
     // ADR-97: 回复链逸散 — 沿 replyToId 追溯窗口外的被回复消息
-    const channelId = `channel:${chatId}`;
+    const channelId = telegramChannelId(chatId);
     const diffused = diffuseReplyChain(records, channelId);
     if (diffused.length > 0) {
       const seedIds = new Set(records.map((r) => r.id));
@@ -841,6 +896,7 @@ function dbRecordToMessageRecord(r: DbMessageRecord): MessageRecord {
       sticker: "(sticker)",
       photo: "(photo 📷)",
       voice: "(voice 🎤)",
+      audio: "(audio 🎵)",
       video: "(video 🎬)",
       document: "(document 📎)",
     };

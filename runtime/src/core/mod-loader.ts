@@ -7,7 +7,6 @@
  * 参考: narrative-engine/core/engine.ts (mod registration)
  */
 import { channelMod } from "../mods/channel.mod.js";
-import { clusteringMod } from "../mods/clustering.mod.js";
 import { consciousnessMod } from "../mods/consciousness.mod.js";
 import { consolidationMod } from "../mods/consolidation.mod.js";
 import { diaryMod } from "../mods/diary.mod.js";
@@ -19,6 +18,7 @@ import { observerMod } from "../mods/observer.mod.js";
 import { pressureMod } from "../mods/pressure.mod.js";
 import { relationshipsMod } from "../mods/relationships.mod.js";
 import { schedulerMod } from "../mods/scheduler.mod.js";
+import { socialCaseMod } from "../mods/social-case.mod.js";
 import { soulMod } from "../mods/soul.mod.js";
 import { strategyMod } from "../mods/strategy.mod.js";
 import { threadsMod } from "../mods/threads.mod.js";
@@ -39,6 +39,7 @@ export function loadAllMods(): ModDefinition[] {
     pressureMod,
     memoryMod,
     threadsMod,
+    socialCaseMod,
     relationshipsMod,
     observerMod,
     consolidationMod,
@@ -48,7 +49,6 @@ export function loadAllMods(): ModDefinition[] {
     schedulerMod,
     feedsMod,
     channelMod, // ADR-206: 频道信息流——在 feedsMod 之后
-    clusteringMod, // ADR-226: 话题自动聚类——在 threadsMod 之后、diary 之前
     diaryMod,
     episodeMod, // ADR-215: 认知片段因果图——在 diary 之后
   ];

@@ -5,6 +5,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { type ChatTailResponse, toChatTailMessageDto } from "../../core/chat-tail-contract.js";
 import { getRecentMessagesByChat } from "../../db/queries.js";
 import { ensureChannelId } from "../../graph/constants.js";
 import type { EngineApiDeps } from "../server.js";
@@ -31,6 +32,7 @@ export function handleChatTail(
 
   const limit = parseLimit(req.url);
   const rows = getRecentMessagesByChat(graphId, limit);
+  const body: ChatTailResponse = { messages: rows.map(toChatTailMessageDto) };
   res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ messages: rows }));
+  res.end(JSON.stringify(body));
 }

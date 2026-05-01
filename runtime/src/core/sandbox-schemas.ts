@@ -119,11 +119,19 @@ function trimTrailingPeriod(s: string): string {
   return s.replace(/(?<![.。…])([.。])$/, "");
 }
 
+/**
+ * shell 脚本文本参数里，LLM 常把换行写成字面量 \n。
+ * Telegram 用户应看到真实换行，不应看到反斜杠+n。
+ */
+function decodeEscapedNewlines(s: string): string {
+  return s.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\r/g, "\n");
+}
+
 /** 清洗 LLM 输出文本：剥离泄漏的注解标记 + 句尾句号 + 引号规范化 + 截断。 */
 export function sanitizeOutgoingText(s: string, max = 4096): string {
   return normalizeQuotes(
     trimTrailingPeriod(
-      s
+      decodeEscapedNewlines(s)
         .replace(KEYWORD_ANNOTATION_RE, "")
         .replace(REACTION_ANNOTATION_RE, "")
         .replace(PAREN_ANNOTATION_RE, "")

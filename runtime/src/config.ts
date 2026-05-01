@@ -1,9 +1,15 @@
 /**
- * 全局配置：环境变量 + 压力场模型参数默认值。
+ * 全局配置：TOML 控制面 + env secrets。
+ *
+ * runtime/config.toml 保存可公开的结构化配置；密钥、手机号等敏感值只通过
+ * TOML 中的 *_env 字段引用环境变量。
  */
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parse as parseToml, type TomlTable } from "smol-toml";
 import { z } from "zod";
+import { ensureChannelId, telegramChannelId } from "./graph/constants.js";
 import {
   type AttentionDebtConfig,
   DEFAULT_ATTENTION_DEBT_CONFIG,
@@ -16,9 +22,17 @@ import {
   type SocialCostConfig,
   SocialCostConfigSchema,
 } from "./pressure/social-cost.js";
-import { ensureChannelId } from "./graph/constants.js";
 import { ALICE_STATE_DIR } from "./runtime-paths.js";
 import type { PersonalityWeights, PressureDims } from "./utils/math.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const RUNTIME_ROOT = resolve(__dirname, "..");
+const DEFAULT_CONFIG_PATH = resolve(RUNTIME_ROOT, "config.toml");
+const OptionalEnvNameSchema = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.string().min(1).optional(),
+);
+const OptionalUrlStringSchema = z.union([z.literal(""), z.string().url()]);
 
 // -- D5: Provider Fallback（ADR-123 §D5）-------------------------------------
 // @see docs/adr/123-crystallization-substrate-generalization.md §D5
@@ -26,43 +40,263 @@ import type { PersonalityWeights, PressureDims } from "./utils/math.js";
 export const ProviderConfigSchema = z.object({
   name: z.string().min(1),
   baseUrl: z.string().url(),
-  apiKey: z.string().min(1),
+  apiKey: z.string(),
   model: z.string().min(1),
   modalities: z.array(z.enum(["vision", "tts", "embedding"])).optional(),
 });
 
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 
-/**
- * 从 env 合成 provider fallback 链。
- *
- * 主力：LLM_BASE_URL + LLM_API_KEY + LLM_MODEL
- * 备用：LLM_FALLBACK_BASE_URL + LLM_FALLBACK_API_KEY + LLM_FALLBACK_MODEL
- * 高级：PROVIDERS JSON 数组（覆盖以上所有）
- */
-function parseProviders(): ProviderConfig[] {
-  // 主力 + 可选备用（纯 .env 扁平变量，不再支持 PROVIDERS JSON blob）
-  const providers: ProviderConfig[] = [
-    {
-      name: "primary",
-      baseUrl: process.env.LLM_BASE_URL ?? "https://api.openai.com/v1",
-      apiKey: process.env.LLM_API_KEY ?? "",
-      model: process.env.LLM_MODEL ?? "gpt-4o",
-    },
-  ];
+const LlmEndpointTomlSchema = z.object({
+  name: z.string().min(1),
+  base_url: z.string().url(),
+  api_key_env: z.string().min(1),
+  model: z.string().min(1),
+  modalities: z.array(z.enum(["vision", "tts", "embedding"])).optional(),
+});
 
-  // 备用 provider：主力熔断后自动切换
-  if (process.env.LLM_FALLBACK_BASE_URL && process.env.LLM_FALLBACK_API_KEY) {
-    providers.push({
-      name: "fallback",
-      baseUrl: process.env.LLM_FALLBACK_BASE_URL,
-      apiKey: process.env.LLM_FALLBACK_API_KEY,
-      model: process.env.LLM_FALLBACK_MODEL ?? "gpt-4o",
-    });
-  }
+const LlmRoutingTomlSchema = z.object({
+  first_pass: z.array(z.string().min(1)).min(1),
+  tool_tick: z.array(z.string().min(1)).min(1),
+  eval: z.array(z.string().min(1)).min(1).optional(),
+  auxiliary: z.array(z.string().min(1)).min(1).optional(),
+  reflect: z.array(z.string().min(1)).min(1).optional(),
+});
 
-  return providers;
-}
+const RuntimeTomlSchema = z.object({
+  telegram: z.object({
+    api_id_env: z.string().min(1).default("TELEGRAM_API_ID"),
+    api_hash_env: z.string().min(1).default("TELEGRAM_API_HASH"),
+    phone_env: z.string().min(1).default("TELEGRAM_PHONE"),
+    admin_env: z.string().min(1).default("TELEGRAM_ADMIN"),
+    operator_channel_id: z.string().default(""),
+  }),
+  qq: z
+    .object({
+      onebot_api_base_url: OptionalUrlStringSchema.default(""),
+      onebot_event_ws_url: OptionalUrlStringSchema.default(""),
+      onebot_access_token_env: OptionalEnvNameSchema,
+      onebot_timeout_ms: z.number().int().positive().default(10_000),
+      onebot_reconnect_min_ms: z.number().int().positive().default(1_000),
+      onebot_reconnect_max_ms: z.number().int().positive().default(60_000),
+    })
+    .default({}),
+  llm: z
+    .object({
+      endpoints: z.array(LlmEndpointTomlSchema).min(1),
+      routing: LlmRoutingTomlSchema,
+    })
+    .superRefine((llm, ctx) => {
+      const names = new Set(llm.endpoints.map((endpoint) => endpoint.name));
+      const checkRoute = (routeName: keyof z.infer<typeof LlmRoutingTomlSchema>) => {
+        const route = llm.routing[routeName];
+        if (!route) return;
+        for (const endpointName of route) {
+          if (!names.has(endpointName)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["routing", routeName],
+              message: `Unknown LLM endpoint "${endpointName}" in llm.routing.${routeName}`,
+            });
+          }
+        }
+      };
+      checkRoute("first_pass");
+      checkRoute("tool_tick");
+      checkRoute("eval");
+      checkRoute("auxiliary");
+      checkRoute("reflect");
+    }),
+  vision: z
+    .object({
+      model: z.string().default(""),
+      base_url: z.string().url().optional(),
+      api_key_env: OptionalEnvNameSchema,
+      max_per_tick: z.number().int().nonnegative().default(5),
+    })
+    .default({}),
+  tts: z
+    .object({
+      base_url: z.string().default(""),
+      api_key_env: OptionalEnvNameSchema,
+      model: z.string().default("tts-1"),
+      voice: z.string().default(""),
+      group_id_env: OptionalEnvNameSchema,
+    })
+    .default({}),
+  asr: z
+    .object({
+      base_url: z.string().default(""),
+      api_key_env: OptionalEnvNameSchema,
+      model: z.string().default("whisper-1"),
+    })
+    .default({}),
+  services: z
+    .object({
+      exa_api_key_env: OptionalEnvNameSchema,
+      music_api_base_url: z.string().default(""),
+      youtube_api_key_env: OptionalEnvNameSchema,
+      wd_tagger_url: z.string().default("http://127.0.0.1:39100"),
+      anime_classify_url: z.string().default("http://127.0.0.1:39101"),
+    })
+    .default({}),
+  ocr: z
+    .object({
+      enabled: z.boolean().default(true),
+      max_per_tick: z.number().int().nonnegative().default(3),
+      min_confidence: z.number().min(0).max(1).default(0.6),
+    })
+    .default({}),
+  pressure: z
+    .object({
+      thread_age_scale: z.number().positive().default(86_400),
+      delta: z.number().default(1.0),
+      eta: z.number().default(0.6),
+      k: z.number().default(20),
+      mu: z.number().default(0.3),
+      d: z.number().default(-0.5),
+      kappa: z
+        .tuple([z.number(), z.number(), z.number(), z.number(), z.number(), z.number()])
+        .default([5.0, 8.0, 8.0, 5.0, 3.0, 0.5]),
+      k_steepness: z.number().default(5.0),
+      kappa_prospect: z.number().default(3.0),
+      kappa_adapt_alpha: z.number().default(0.02),
+    })
+    .default({}),
+  action_rate: z
+    .object({
+      window_s: z.number().int().positive().default(3000),
+      floor: z.number().default(0.05),
+      cap_private: z.number().int().nonnegative().default(10),
+      cap_group: z.number().int().nonnegative().default(8),
+      cap_channel: z.number().int().nonnegative().default(3),
+      cap_bot: z.number().int().nonnegative().default(3),
+    })
+    .default({}),
+  personality: z
+    .object({
+      learning_rate: z.number().default(0.0001),
+      mean_reversion: z.number().default(0.002),
+      pi_min: z.number().default(0.05),
+      pi_home: z
+        .tuple([z.number(), z.number(), z.number(), z.number()])
+        .default([0.25, 0.25, 0.25, 0.25]),
+      mood_half_life_s: z.number().positive().default(3600),
+      mood_nudge_scale: z.number().default(0.05),
+    })
+    .default({}),
+  time: z
+    .object({
+      dt_min_ms: z.number().int().positive().default(1000),
+      dt_max_ms: z.number().int().positive().default(300_000),
+      kappa_t: z.number().default(1.0),
+      snapshot_interval_s: z.number().int().positive().default(600),
+      staleness_threshold: z.number().default(0.5),
+      timezone_offset: z.number().default(8),
+      rhythm_profile_rebuild_interval_s: z.number().int().nonnegative().default(21_600),
+    })
+    .default({}),
+  wakeup: z
+    .object({
+      offline_threshold_s: z.number().int().nonnegative().default(600),
+      graduation_ticks: z.number().int().nonnegative().default(10),
+    })
+    .default({}),
+  mode: z
+    .object({
+      theta_silence_s: z.number().int().nonnegative().default(300),
+      theta_low_api: z.number().default(0.05),
+      theta_mem: z.number().default(0.3),
+    })
+    .default({}),
+  dormant: z
+    .object({
+      quiet_window_start: z.number().int().min(0).max(23).default(23),
+      quiet_window_end: z.number().int().min(0).max(23).default(7),
+      theta_api: z.number().default(0.15),
+      wake_tier: z.number().default(150),
+    })
+    .default({}),
+  idle: z
+    .object({
+      threshold_s: z.number().int().nonnegative().default(1800),
+      s10_leak_prob: z.number().default(0.15),
+    })
+    .default({}),
+  exploration: z
+    .object({
+      max_joins_per_day: z.number().int().nonnegative().default(5),
+      max_search_per_hour: z.number().int().nonnegative().default(10),
+      join_cooldown_ms: z.number().int().nonnegative().default(3_600_000),
+      search_cooldown_ms: z.number().int().nonnegative().default(300_000),
+      post_join_search_cooldown_ms: z.number().int().nonnegative().default(1_800_000),
+      silent_duration_s: z.number().int().nonnegative().default(600),
+      apprentice_duration_s: z.number().int().nonnegative().default(1800),
+      apprentice_max_messages: z.number().int().nonnegative().default(3),
+      circuit_breaker_threshold: z.number().int().positive().default(3),
+      circuit_breaker_open_ms: z.number().int().nonnegative().default(3_600_000),
+    })
+    .default({}),
+  belief: z
+    .object({
+      beta: z.number().default(0.1),
+      gamma: z.number().default(0.15),
+      thompson_eta: z.number().default(0.1),
+    })
+    .default({}),
+  iaus: z
+    .object({
+      deterministic: z.boolean().default(false),
+      habituation_alpha: z.number().default(0.5),
+      habituation_half_life_s: z.number().positive().default(1800),
+      momentum_bonus: z.number().default(0.05),
+      momentum_decay_ms: z.number().int().nonnegative().default(300_000),
+      curve_modulation_strength: z.number().default(0.5),
+      desire_boost: z.number().default(0.15),
+    })
+    .default({}),
+  attention_debt: z
+    .object({
+      delta: z.number().default(DEFAULT_ATTENTION_DEBT_CONFIG.delta),
+    })
+    .default({}),
+  budget_zones: z
+    .object({
+      anchor: z.number().optional(),
+      situation: z.number().optional(),
+      conversation: z.number().optional(),
+      memory: z.number().optional(),
+    })
+    .optional(),
+  peripheral: z
+    .object({
+      per_channel_cap: z.number().int().nonnegative().default(3),
+      total_cap: z.number().int().nonnegative().default(8),
+      min_text_length: z.number().int().nonnegative().default(15),
+    })
+    .default({}),
+  generators: z
+    .object({
+      digest_hour: z.number().int().min(0).max(23).default(8),
+      reflection_day: z.number().int().min(0).max(6).default(0),
+      reflection_hour: z.number().int().min(0).max(23).default(20),
+      anomaly_z_threshold: z.number().default(3.0),
+    })
+    .default({}),
+  focus: z
+    .object({
+      whitelist_path: z.string().default(""),
+      whitelist: z.array(z.string().min(1)).default([]),
+    })
+    .default({}),
+  log: z
+    .object({
+      level: z.string().default("info"),
+    })
+    .default({}),
+});
+
+type RuntimeTomlConfig = z.infer<typeof RuntimeTomlSchema>;
 
 const DEFAULT_FOCUS_WHITELIST_FILENAME = "focus-whitelist.txt";
 
@@ -81,8 +315,19 @@ function parseFocusWhitelistFile(content: string): ReadonlySet<string> {
   return targets;
 }
 
-function loadFocusWhitelist(): { path: string; targets: ReadonlySet<string> | null } {
-  const rawPath = process.env.FOCUS_WHITELIST_PATH?.trim() ?? "";
+function loadFocusWhitelistFromConfig(focus: RuntimeTomlConfig["focus"]): {
+  path: string;
+  targets: ReadonlySet<string> | null;
+} {
+  if (focus.whitelist.length > 0) {
+    const normalized = new Set<string>();
+    for (const target of focus.whitelist) {
+      normalized.add(ensureChannelId(target) ?? target);
+    }
+    return { path: "config.toml:focus.whitelist", targets: normalized };
+  }
+
+  const rawPath = focus.whitelist_path.trim();
   if (rawPath) {
     const resolvedPath = resolve(rawPath);
     const content = readFileSync(resolvedPath, "utf-8");
@@ -102,15 +347,90 @@ function loadFocusWhitelist(): { path: string; targets: ReadonlySet<string> | nu
   };
 }
 
+function loadRuntimeToml(): RuntimeTomlConfig {
+  const configPath = resolve(process.env.ALICE_CONFIG_PATH ?? DEFAULT_CONFIG_PATH);
+  if (!existsSync(configPath)) {
+    throw new Error(`Missing runtime config TOML: ${configPath}`);
+  }
+
+  const parsed = parseToml(readFileSync(configPath, "utf-8")) as TomlTable;
+  return RuntimeTomlSchema.parse(parsed);
+}
+
+function secretFromEnv(envName: string | undefined, label: string, required = false): string {
+  if (!envName) return "";
+  const value = process.env[envName] ?? "";
+  if (required && value.length === 0) {
+    throw new Error(`Missing required secret env ${envName} for ${label}`);
+  }
+  return value;
+}
+
+function intSecretFromEnv(envName: string, label: string): number {
+  const raw = secretFromEnv(envName, label);
+  if (!raw) return 0;
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isFinite(value)) {
+    throw new Error(`Invalid integer env ${envName} for ${label}`);
+  }
+  return value;
+}
+
+function providersFromToml(config: RuntimeTomlConfig): ProviderConfig[] {
+  return config.llm.endpoints.map((provider) =>
+    ProviderConfigSchema.parse({
+      name: provider.name,
+      baseUrl: provider.base_url,
+      apiKey: secretFromEnv(provider.api_key_env, `llm.endpoints "${provider.name}"`),
+      model: provider.model,
+      modalities: provider.modalities,
+    }),
+  );
+}
+
+function optionalBudgetZones(
+  budgetZones: RuntimeTomlConfig["budget_zones"],
+): Config["budgetZones"] {
+  if (!budgetZones) return undefined;
+  const result: NonNullable<Config["budgetZones"]> = {};
+  for (const key of ["anchor", "situation", "conversation", "memory"] as const) {
+    const value = budgetZones[key];
+    if (value != null) result[key] = value;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 export interface Config {
   // Telegram
   telegramApiId: number;
   telegramApiHash: string;
   telegramPhone: string;
 
+  // QQ OneBot bridge
+  /** ADR-264/265: OneBot v11 HTTP action base URL. Empty = QQ transport disabled. */
+  qqOneBotApiBaseUrl: string;
+  /** ADR-264/265: OneBot v11 event WebSocket URL. Empty = QQ inbound disabled. */
+  qqOneBotEventWsUrl: string;
+  /** OneBot access token. Empty when the protocol endpoint does not require one. */
+  qqOneBotAccessToken: string;
+  /** OneBot action request timeout. */
+  qqOneBotTimeoutMs: number;
+  /** OneBot event WebSocket reconnect lower bound. */
+  qqOneBotReconnectMinMs: number;
+  /** OneBot event WebSocket reconnect upper bound. */
+  qqOneBotReconnectMaxMs: number;
+
   // LLM
-  /** D5: 多 provider fallback 链（ADR-123 §D5）。 */
+  /** D5: 多 LLM endpoint fallback 链（ADR-123 §D5）。 */
   providers: ProviderConfig[];
+  /** 不同用途的 endpoint 路由。firstPass/toolTick 是 shuffle 池；eval/auxiliary/reflect 是 fallback 顺序。 */
+  llmRouting: {
+    firstPass: string[];
+    toolTick: string[];
+    eval: string[];
+    auxiliary: string[];
+    reflect: string[];
+  };
   llmBaseUrl: string;
   llmApiKey: string;
   llmModel: string;
@@ -120,20 +440,6 @@ export interface Config {
   llmReflectBaseUrl: string;
   /** ADR-226: Reflect Provider API key（空则回退到 llmApiKey）。 */
   llmReflectApiKey: string;
-
-  // ADR-226: 话题自动聚类
-  clustering: {
-    /** 总开关。 */
-    enabled: boolean;
-    /** 每 channel 缓冲消息数量阈值（达到即 flush）。 */
-    bufferSize: number;
-    /** 缓冲最大年龄（ms），超时且 >= minMessages 时 flush。 */
-    maxAgeMs: number;
-    /** 超时 flush 的最小消息数。 */
-    minMessages: number;
-    /** 每 channel 同时存在的 auto-thread 上限。 */
-    maxAutoThreadsPerChannel: number;
-  };
 
   // ADR-88: Vision（图片感知）
   /** Vision 模型名称（如 gpt-4o-mini）。空字符串 = 禁用图片感知。 */
@@ -261,6 +567,8 @@ export interface Config {
 
   // 时区：用户本地时间与 UTC 的偏移（小时），如 UTC+8 → 8
   timezoneOffset: number;
+  /** ADR-261: rhythm_profiles 自动重建间隔。0 = 禁用自动重建。 */
+  rhythmProfileRebuildIntervalS: number;
 
   // 探索保护（ExplorationGuard）
   exploration: {
@@ -341,9 +649,7 @@ export interface Config {
   };
 
   /**
-   * 焦点白名单文件绝对路径。空字符串 = 禁用白名单。
-   * 默认自动发现 `${ALICE_STATE_DIR}/focus-whitelist.txt`，也可用 FOCUS_WHITELIST_PATH 显式覆盖。
-   * 文件格式：每行一个 Telegram chat ID（如 -1001234567890）或兼容的 graph target，支持 `#` 注释。
+   * 焦点白名单来源。推荐使用 config.toml 的 focus.whitelist；兼容文件路径时为绝对路径。
    */
   focusWhitelistPath: string;
   /**
@@ -366,173 +672,191 @@ export interface Config {
   logLevel: string;
 }
 
+export function getLlmProviderByRoute(
+  config: Pick<Config, "providers" | "llmRouting">,
+  route: keyof Config["llmRouting"] = "firstPass",
+): ProviderConfig | undefined {
+  const providerByName = new Map(config.providers.map((provider) => [provider.name, provider]));
+  for (const name of config.llmRouting[route] ?? []) {
+    const provider = providerByName.get(name);
+    if (provider) return provider;
+  }
+  return config.providers[0];
+}
+
 export function loadConfig(): Config {
-  const focusWhitelist = loadFocusWhitelist();
+  const toml = loadRuntimeToml();
+  const providers = providersFromToml(toml);
+  const providerByName = new Map(providers.map((provider) => [provider.name, provider]));
+  const primaryProvider = providerByName.get(toml.llm.routing.first_pass[0]) ?? providers[0];
+  const auxiliaryRoute = toml.llm.routing.auxiliary ?? toml.llm.routing.first_pass;
+  const reflectProvider =
+    providerByName.get(toml.llm.routing.reflect?.[0] ?? auxiliaryRoute[0]) ?? primaryProvider;
+  const telegramAdmin = secretFromEnv(toml.telegram.admin_env, "telegram.admin_env");
+  const focusWhitelist = loadFocusWhitelistFromConfig(toml.focus);
 
   return {
-    telegramApiId: Number(process.env.TELEGRAM_API_ID ?? "0"),
-    telegramApiHash: process.env.TELEGRAM_API_HASH ?? "",
-    telegramPhone: process.env.TELEGRAM_PHONE ?? "",
+    telegramApiId: intSecretFromEnv(toml.telegram.api_id_env, "telegram.api_id_env"),
+    telegramApiHash: secretFromEnv(toml.telegram.api_hash_env, "telegram.api_hash_env"),
+    telegramPhone: secretFromEnv(toml.telegram.phone_env, "telegram.phone_env"),
+    qqOneBotApiBaseUrl: toml.qq.onebot_api_base_url,
+    qqOneBotEventWsUrl: toml.qq.onebot_event_ws_url,
+    qqOneBotAccessToken: secretFromEnv(
+      toml.qq.onebot_access_token_env,
+      "qq.onebot_access_token_env",
+    ),
+    qqOneBotTimeoutMs: toml.qq.onebot_timeout_ms,
+    qqOneBotReconnectMinMs: toml.qq.onebot_reconnect_min_ms,
+    qqOneBotReconnectMaxMs: toml.qq.onebot_reconnect_max_ms,
 
-    providers: parseProviders(),
-    llmBaseUrl: process.env.LLM_BASE_URL ?? "https://api.openai.com/v1",
-    llmApiKey: process.env.LLM_API_KEY ?? "",
-    llmModel: process.env.LLM_MODEL ?? "gpt-4o",
-    llmReflectModel: process.env.LLM_REFLECT_MODEL ?? process.env.LLM_MODEL ?? "gpt-4o",
-    llmReflectBaseUrl:
-      process.env.LLM_REFLECT_BASE_URL ?? process.env.LLM_BASE_URL ?? "https://api.openai.com/v1",
-    llmReflectApiKey: process.env.LLM_REFLECT_API_KEY ?? process.env.LLM_API_KEY ?? "",
-
-    // ADR-226: 话题自动聚类
-    clustering: {
-      enabled: process.env.CLUSTERING_ENABLED !== "false",
-      bufferSize: Number(process.env.CLUSTERING_BUFFER_SIZE ?? "30"),
-      maxAgeMs: Number(process.env.CLUSTERING_MAX_AGE_MS ?? "300000"),
-      minMessages: Number(process.env.CLUSTERING_MIN_MESSAGES ?? "5"),
-      maxAutoThreadsPerChannel: Number(process.env.CLUSTERING_MAX_AUTO_THREADS ?? "3"),
+    providers,
+    llmRouting: {
+      firstPass: toml.llm.routing.first_pass,
+      toolTick: toml.llm.routing.tool_tick,
+      eval: toml.llm.routing.eval ?? toml.llm.routing.first_pass,
+      auxiliary: auxiliaryRoute,
+      reflect: toml.llm.routing.reflect ?? auxiliaryRoute,
     },
+    llmBaseUrl: primaryProvider.baseUrl,
+    llmApiKey: primaryProvider.apiKey,
+    llmModel: primaryProvider.model,
+    llmReflectModel: reflectProvider.model,
+    llmReflectBaseUrl: reflectProvider.baseUrl,
+    llmReflectApiKey: reflectProvider.apiKey,
 
-    // ADR-88: Vision — 空 VISION_MODEL = 禁用图片感知
-    visionModel: process.env.VISION_MODEL ?? "",
-    visionBaseUrl:
-      process.env.VISION_BASE_URL ?? process.env.LLM_BASE_URL ?? "https://api.openai.com/v1",
-    visionApiKey: process.env.VISION_API_KEY ?? process.env.LLM_API_KEY ?? "",
-    visionMaxPerTick: Number(process.env.VISION_MAX_PER_TICK ?? "5"),
+    visionModel: toml.vision.model,
+    visionBaseUrl: toml.vision.base_url ?? primaryProvider.baseUrl,
+    visionApiKey:
+      secretFromEnv(toml.vision.api_key_env, "vision.api_key_env") || primaryProvider.apiKey,
+    visionMaxPerTick: toml.vision.max_per_tick,
 
-    // ADR-88: TTS — 空 TTS_BASE_URL = 禁用语音
-    ttsBaseUrl: process.env.TTS_BASE_URL ?? "",
-    ttsApiKey: process.env.TTS_API_KEY ?? "",
-    ttsModel: process.env.TTS_MODEL ?? "tts-1",
-    ttsVoice: process.env.TTS_VOICE ?? "",
-    ttsGroupId: process.env.TTS_GROUP_ID ?? "",
+    ttsBaseUrl: toml.tts.base_url,
+    ttsApiKey: secretFromEnv(toml.tts.api_key_env, "tts.api_key_env"),
+    ttsModel: toml.tts.model,
+    ttsVoice: toml.tts.voice,
+    ttsGroupId: secretFromEnv(toml.tts.group_id_env, "tts.group_id_env"),
 
-    // ADR-119: ASR — 空 ASR_BASE_URL = 禁用语音识别
-    asrBaseUrl: process.env.ASR_BASE_URL ?? "",
-    asrApiKey: process.env.ASR_API_KEY ?? "",
-    asrModel: process.env.ASR_MODEL ?? "whisper-1",
+    asrBaseUrl: toml.asr.base_url,
+    asrApiKey: secretFromEnv(toml.asr.api_key_env, "asr.api_key_env"),
+    asrModel: toml.asr.model,
 
-    exaApiKey: process.env.EXA_API_KEY ?? "",
-    musicApiBaseUrl: process.env.MUSIC_API_BASE_URL ?? "",
-    youtubeApiKey: process.env.YOUTUBE_API_KEY ?? "",
-    wdTaggerUrl: process.env.WD_TAGGER_URL ?? "http://127.0.0.1:39100",
-    animeClassifyUrl: process.env.ANIME_CLASSIFY_URL ?? "http://127.0.0.1:39101",
+    exaApiKey: secretFromEnv(toml.services.exa_api_key_env, "services.exa_api_key_env"),
+    musicApiBaseUrl: toml.services.music_api_base_url,
+    youtubeApiKey: secretFromEnv(toml.services.youtube_api_key_env, "services.youtube_api_key_env"),
+    wdTaggerUrl: toml.services.wd_tagger_url,
+    animeClassifyUrl: toml.services.anime_classify_url,
 
-    // OCR — 默认启用，本地 PaddleOCR 无 API 费用
-    ocrEnabled: process.env.OCR_ENABLED !== "false",
-    ocrMaxPerTick: Number(process.env.OCR_MAX_PER_TICK ?? "3"),
-    ocrMinConfidence: Number(process.env.OCR_MIN_CONFIDENCE ?? "0.6"),
+    ocrEnabled: toml.ocr.enabled,
+    ocrMaxPerTick: toml.ocr.max_per_tick,
+    ocrMinConfidence: toml.ocr.min_confidence,
 
-    threadAgeScale: 86_400, // ADR-64 VI-1: log(1 + age/τ) 的 τ，86400 秒 = 1 天
-    delta: 1.0,
+    threadAgeScale: toml.pressure.thread_age_scale,
+    delta: toml.pressure.delta,
     // ADR-111: betaR 已迁移为 P3_BETA_R 常量（不再作为运行时配置）
-    eta: 0.6,
-    k: 20,
-    mu: 0.3,
-    d: -0.5,
+    eta: toml.pressure.eta,
+    k: toml.pressure.k,
+    mu: toml.pressure.mu,
+    d: toml.pressure.d,
 
-    kappa: [5.0, 8.0, 8.0, 5.0, 3.0, 0.5], // ADR-64 VI-1: κ₄ 200→5（P4 从百万级降到个位数）
+    kappa: toml.pressure.kappa,
 
-    kSteepness: 5.0,
-    kappaProspect: 3.0,
-    kappaAdaptAlpha: 0.02,
+    kSteepness: toml.pressure.k_steepness,
+    kappaProspect: toml.pressure.kappa_prospect,
+    kappaAdaptAlpha: toml.pressure.kappa_adapt_alpha,
 
-    actionRateWindow: 3000, // ADR-110: 3000 秒（50 分钟）窗口
-    // ADR-113 F15 + ADR-189 D2 + ADR-206: chat-type-aware 硬上限（窗口内绝对计数，四 scope 独立配额）
-    rateCap: { private: 10, group: 8, channel: 3, bot: 3 },
-    actionRateFloor: 0.05,
+    actionRateWindow: toml.action_rate.window_s,
+    rateCap: {
+      private: toml.action_rate.cap_private,
+      group: toml.action_rate.cap_group,
+      channel: toml.action_rate.cap_channel,
+      bot: toml.action_rate.cap_bot,
+    },
+    actionRateFloor: toml.action_rate.floor,
 
-    // 人格漂移速率校准（#8.3）：α=0.001 导致天级漂移，真实人格变化是月-年级
-    // 均值回归强度（#17.1）：γ 需足够强以防止 winner-takes-all 退化
-    learningRate: 0.0001,
-    meanReversion: 0.002,
-    piMin: 0.05,
-    piHome: [0.25, 0.25, 0.25, 0.25], // ADR-98 W3.1: 四声部等权，消除 Diligence 先天优势
+    learningRate: toml.personality.learning_rate,
+    meanReversion: toml.personality.mean_reversion,
+    piMin: toml.personality.pi_min,
+    piHome: toml.personality.pi_home,
 
-    dtMin: Number(process.env.DT_MIN_MS ?? "1000"),
-    dtMax: Number(process.env.DT_MAX_MS ?? "300000"),
-    kappaT: Number(process.env.KAPPA_T ?? "1.0"),
-    snapshotIntervalS: Number(process.env.SNAPSHOT_INTERVAL_S ?? "600"), // 10 分钟
-    stalenessThreshold: 0.5, // 归一化 L2 距离阈值（P1-2: 各维度归一化到 [0,1] 后等权）
+    dtMin: toml.time.dt_min_ms,
+    dtMax: toml.time.dt_max_ms,
+    kappaT: toml.time.kappa_t,
+    snapshotIntervalS: toml.time.snapshot_interval_s,
+    stalenessThreshold: toml.time.staleness_threshold,
 
-    idleThreshold: 1800, // 1800 秒（30 分钟）无行动 → 自启动（ADR-81: 使用已选声部）
+    idleThreshold: toml.idle.threshold_s,
 
-    s10LeakProb: 0.15, // S10: Diligence mark_read → System 2 泄漏概率（群聊参与）
-    moodHalfLife: 3600, // ADR-110: self mood 衰减半衰期 3600 秒（1 小时回归一半）
+    s10LeakProb: toml.idle.s10_leak_prob,
+    moodHalfLife: toml.personality.mood_half_life_s,
 
-    // ADR-190: Wakeup Mode — < 10 分钟的重启直接进 patrol，10 tick × 3-10s = 30-100s 的"翻消息"时间
-    wakeupOfflineThresholdS: Number(process.env.WAKEUP_OFFLINE_THRESHOLD_S ?? "600"),
-    wakeupGraduationTicks: Number(process.env.WAKEUP_GRADUATION_TICKS ?? "10"),
+    wakeupOfflineThresholdS: toml.wakeup.offline_threshold_s,
+    wakeupGraduationTicks: toml.wakeup.graduation_ticks,
 
-    // Agent Mode FSM 阈值（论文 §6.2）
-    thetaSilenceS: 300, // ADR-113 §D3: focus 沉默 5 分钟 → 退出 conversation（异步 IM 场景）
-    thetaLowAPI: 0.05, // API < 0.05 → 可进入 consolidation
-    thetaMem: 0.3, // P2 > 0.3 → consolidation 有意义
+    thetaSilenceS: toml.mode.theta_silence_s,
+    thetaLowAPI: toml.mode.theta_low_api,
+    thetaMem: toml.mode.theta_mem,
 
-    // ADR-225: Dormant Mode
-    quietWindowStart: Number(process.env.QUIET_WINDOW_START ?? "23"),
-    quietWindowEnd: Number(process.env.QUIET_WINDOW_END ?? "7"),
-    thetaDormantAPI: Number(process.env.THETA_DORMANT_API ?? "0.15"),
-    dormantWakeTier: Number(process.env.DORMANT_WAKE_TIER ?? "150"),
+    quietWindowStart: toml.dormant.quiet_window_start,
+    quietWindowEnd: toml.dormant.quiet_window_end,
+    thetaDormantAPI: toml.dormant.theta_api,
+    dormantWakeTier: toml.dormant.wake_tier,
 
-    // ADR-34 F1: 用户时区偏移（默认 UTC+8 中国标准时间）
-    timezoneOffset: Number(process.env.TIMEZONE_OFFSET ?? "8"),
+    timezoneOffset: toml.time.timezone_offset,
+    rhythmProfileRebuildIntervalS: toml.time.rhythm_profile_rebuild_interval_s,
 
     exploration: {
-      maxJoinsPerDay: Number(process.env.EXPLORE_MAX_JOINS_PER_DAY ?? "5"),
-      maxSearchPerHour: Number(process.env.EXPLORE_MAX_SEARCH_PER_HOUR ?? "10"),
-      joinCooldownMs: Number(process.env.EXPLORE_JOIN_COOLDOWN_MS ?? "3600000"),
-      searchCooldownMs: Number(process.env.EXPLORE_SEARCH_COOLDOWN_MS ?? "300000"),
-      postJoinSearchCooldownMs: Number(
-        process.env.EXPLORE_POST_JOIN_SEARCH_COOLDOWN_MS ?? "1800000",
-      ),
-      silentDurationS: Number(process.env.EXPLORE_SILENT_DURATION_S ?? "600"),
-      apprenticeDurationS: Number(process.env.EXPLORE_APPRENTICE_DURATION_S ?? "1800"),
-      apprenticeMaxMessages: Number(process.env.EXPLORE_APPRENTICE_MAX_MSGS ?? "3"),
-      circuitBreakerThreshold: Number(process.env.EXPLORE_CB_THRESHOLD ?? "3"),
-      circuitBreakerOpenMs: Number(process.env.EXPLORE_CB_OPEN_MS ?? "3600000"),
+      maxJoinsPerDay: toml.exploration.max_joins_per_day,
+      maxSearchPerHour: toml.exploration.max_search_per_hour,
+      joinCooldownMs: toml.exploration.join_cooldown_ms,
+      searchCooldownMs: toml.exploration.search_cooldown_ms,
+      postJoinSearchCooldownMs: toml.exploration.post_join_search_cooldown_ms,
+      silentDurationS: toml.exploration.silent_duration_s,
+      apprenticeDurationS: toml.exploration.apprentice_duration_s,
+      apprenticeMaxMessages: toml.exploration.apprentice_max_messages,
+      circuitBreakerThreshold: toml.exploration.circuit_breaker_threshold,
+      circuitBreakerOpenMs: toml.exploration.circuit_breaker_open_ms,
     },
 
     socialCost: SocialCostConfigSchema.parse(DEFAULT_SOCIAL_COST_CONFIG),
 
     saturationCost: SaturationCostConfigSchema.parse(DEFAULT_SATURATION_COST_CONFIG),
 
-    beliefBeta: 0.1,
-    beliefGamma: 0.15,
-    thompsonEta: 0.1,
-    iausDeterministic: false,
-    habituationAlpha: 0.5,
-    habituationHalfLifeS: 1800,
-    momentumBonus: 0.05,
-    momentumDecayMs: 300_000,
-    curveModulationStrength: 0.5,
-    desireBoost: Number(process.env.DESIRE_BOOST ?? "0.15"),
-    moodNudgeScale: Number(process.env.MOOD_NUDGE_SCALE ?? "0.05"),
+    beliefBeta: toml.belief.beta,
+    beliefGamma: toml.belief.gamma,
+    thompsonEta: toml.belief.thompson_eta,
+    iausDeterministic: toml.iaus.deterministic,
+    habituationAlpha: toml.iaus.habituation_alpha,
+    habituationHalfLifeS: toml.iaus.habituation_half_life_s,
+    momentumBonus: toml.iaus.momentum_bonus,
+    momentumDecayMs: toml.iaus.momentum_decay_ms,
+    curveModulationStrength: toml.iaus.curve_modulation_strength,
+    desireBoost: toml.iaus.desire_boost,
+    moodNudgeScale: toml.personality.mood_nudge_scale,
 
-    attentionDebt: { ...DEFAULT_ATTENTION_DEBT_CONFIG },
+    attentionDebt: { delta: toml.attention_debt.delta },
+    budgetZones: optionalBudgetZones(toml.budget_zones),
 
     peripheral: {
-      perChannelCap: Number(process.env.PERIPHERAL_PER_CHANNEL_CAP ?? "3"),
-      totalCap: Number(process.env.PERIPHERAL_TOTAL_CAP ?? "8"),
-      minTextLength: Number(process.env.PERIPHERAL_MIN_TEXT_LENGTH ?? "15"),
+      perChannelCap: toml.peripheral.per_channel_cap,
+      totalCap: toml.peripheral.total_cap,
+      minTextLength: toml.peripheral.min_text_length,
     },
 
     generators: {
-      digestHour: 8,
-      reflectionDay: 0, // Sunday
-      reflectionHour: 20,
-      anomalyZThreshold: 3.0,
+      digestHour: toml.generators.digest_hour,
+      reflectionDay: toml.generators.reflection_day,
+      reflectionHour: toml.generators.reflection_hour,
+      anomalyZThreshold: toml.generators.anomaly_z_threshold,
     },
 
     focusWhitelistPath: focusWhitelist.path,
     focusWhitelist: focusWhitelist.targets,
 
-    // ADR-172: 系统线程路由目标。未设置时从 TELEGRAM_ADMIN 推导
     operatorChannelId:
-      process.env.OPERATOR_CHANNEL_ID ??
-      (process.env.TELEGRAM_ADMIN ? `channel:${process.env.TELEGRAM_ADMIN}` : ""),
+      toml.telegram.operator_channel_id || (telegramAdmin ? telegramChannelId(telegramAdmin) : ""),
 
-    telegramAdmin: process.env.TELEGRAM_ADMIN ?? "",
+    telegramAdmin,
 
-    logLevel: process.env.LOG_LEVEL ?? "info",
+    logLevel: toml.log.level,
   };
 }

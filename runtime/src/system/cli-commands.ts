@@ -9,10 +9,166 @@
  * @see docs/adr/239-gh-cli-style-output-pipeline.md
  */
 
+import type { ChatTailResponse } from "../core/chat-tail-contract.js";
+import { sanitizeOutgoingText } from "../core/sandbox-schemas.js";
+import type { ExecutionObservation } from "../core/script-execution.js";
+import { telegramChannelId, telegramContactId } from "../graph/constants.js";
+import {
+  parseTelegramNativeId,
+  parseTransportMessageId,
+  parseTransportTargetId,
+  stableTransportMessageId,
+  type TransportTargetRef,
+} from "../platform/transport.js";
+import { ALLOWED_REACTIONS, normalizeReactionEmoji } from "../telegram/actions/shared.js";
 import { renderConfirm, renderHuman, truncate } from "./cli-bridge.js";
-import { type CliContext, makeDie, type SendResult } from "./cli-types.js";
+import {
+  type CliContext,
+  type CliErrorDetail,
+  CliExecutionError,
+  makeDie,
+  type SendResult,
+} from "./cli-types.js";
 
 const ACTION_PREFIX = "__ALICE_ACTION__:";
+export const OBSERVATION_PREFIX = "__ALICE_OBSERVATION__:";
+
+interface TransportSendResult {
+  platform?: string;
+  target?: string;
+  messageId?: string | null;
+  nativeMessageId?: number | string | null;
+}
+
+interface ResolveTargetResult {
+  target?: string;
+}
+
+interface TransportCommandTarget {
+  ref: TransportTargetRef;
+  chatId?: number;
+}
+
+function telegramTarget(chatId: number): string {
+  return `channel:telegram:${chatId}`;
+}
+
+function telegramMessage(chatId: number, msgId: number): string {
+  return stableTransportMessageId("telegram", String(chatId), msgId);
+}
+
+function nativeMsgId(result: SendResult | TransportSendResult | null): number | undefined {
+  if (!result) return undefined;
+  if (typeof (result as SendResult).msgId === "number") return (result as SendResult).msgId;
+  const native = (result as TransportSendResult).nativeMessageId;
+  return typeof native === "number" ? native : undefined;
+}
+
+async function resolveTransportTarget(
+  ctx: CliContext,
+  raw?: string,
+): Promise<TransportCommandTarget> {
+  const stable = parseTransportTargetId(raw?.trim());
+  if (stable) {
+    return {
+      ref: stable,
+      chatId:
+        stable.platform === "telegram"
+          ? (parseTelegramNativeId(stable.nativeId) ?? undefined)
+          : undefined,
+    };
+  }
+
+  const trimmed = raw?.trim();
+  if (trimmed && !/^[@~]?-?\d+$/.test(trimmed)) {
+    const resolved = (await ctx.engine.post("/resolve/target", { target: trimmed })) as {
+      result?: ResolveTargetResult | null;
+    } | null;
+    const resolvedTarget = parseTransportTargetId(resolved?.result?.target);
+    if (resolvedTarget) {
+      return {
+        ref: resolvedTarget,
+        chatId:
+          resolvedTarget.platform === "telegram"
+            ? (parseTelegramNativeId(resolvedTarget.nativeId) ?? undefined)
+            : undefined,
+      };
+    }
+  }
+
+  const chatId = await ctx.resolveTarget(raw);
+  return {
+    ref: parseTransportTargetId(telegramTarget(chatId)) as TransportTargetRef,
+    chatId,
+  };
+}
+
+function messageRefForTarget(target: TransportCommandTarget, raw: string): string {
+  const stable = parseTransportMessageId(raw.trim());
+  if (stable) return stable.stableId;
+
+  const msgId = parseMsgId(raw);
+  if (target.ref.platform !== "telegram" || target.chatId == null) {
+    throw new CliExecutionError(
+      "command_invalid_message_id",
+      `invalid message ID: "${raw}" (use a stable message ref for ${target.ref.platform})`,
+    );
+  }
+  return telegramMessage(target.chatId, msgId);
+}
+
+function nativeTelegramMsgIdFromRef(messageRef: string): number | undefined {
+  const parsed = parseTransportMessageId(messageRef);
+  if (!parsed || parsed.platform !== "telegram") return undefined;
+  return parseTelegramNativeId(parsed.messageNativeId) ?? undefined;
+}
+
+export function assertCurrentChatForSend(
+  ctx: CliContext,
+  chatId: number,
+  die: (msg: string, code?: "command_cross_chat_send", detail?: CliErrorDetail) => never,
+  source = "irc.send",
+  payload?: Record<string, unknown>,
+) {
+  if (ctx.currentChatId == null || chatId === ctx.currentChatId) return;
+  die(
+    `refusing cross-chat send: current chat is @${ctx.currentChatId}, requested @${chatId}. No message was sent there. If you need that chat to become current, use self switch-chat --to @${chatId} --reason "...". Use irc forward for sharing content here.`,
+    "command_cross_chat_send",
+    {
+      code: "command_cross_chat_send",
+      source,
+      currentChatId: String(ctx.currentChatId),
+      requestedChatId: String(chatId),
+      ...(payload ? { payload } : {}),
+    },
+  );
+}
+
+function assertCurrentTransportTargetForSend(
+  ctx: CliContext,
+  target: TransportCommandTarget,
+  die: (msg: string, code?: "command_cross_chat_send", detail?: CliErrorDetail) => never,
+  source = "irc.send",
+  payload?: Record<string, unknown>,
+) {
+  if (ctx.currentChatId == null) return;
+  if (target.ref.platform === "telegram" && target.chatId === ctx.currentChatId) return;
+  const requestedLabel =
+    target.ref.platform === "telegram" && target.chatId != null
+      ? `@${target.chatId}`
+      : target.ref.stableId;
+  die(
+    `refusing cross-chat send: current chat is @${ctx.currentChatId}, requested ${requestedLabel}. No message was sent there. If you need that chat to become current, use self switch-chat --to ${requestedLabel} --reason "...". Use irc forward for sharing content here.`,
+    "command_cross_chat_send",
+    {
+      code: "command_cross_chat_send",
+      source,
+      currentChatId: String(ctx.currentChatId),
+      requestedChatId: target.ref.stableId,
+      ...(payload ? { payload } : {}),
+    },
+  );
+}
 
 // ── Command Result Types ──
 
@@ -20,6 +176,8 @@ const ACTION_PREFIX = "__ALICE_ACTION__:";
 export interface CommandResult {
   /** action trace 行（如 `__ALICE_ACTION__:sent:chatId=xxx:msgId=yyy`）。 */
   action?: string;
+  /** structured observation fact；控制流只读这个，不从 output 文本猜语义。 */
+  observation?: ExecutionObservation;
   /** 主输出内容（人类可读文本）。 */
   output: string;
   /** 原始结果对象（用于 JSON 字段过滤）。 */
@@ -31,6 +189,18 @@ export type CommandHandler<T = Record<string, unknown>> = (
   ctx: CliContext,
   args: T,
 ) => Promise<CommandResult>;
+
+function chatObservationMeta(
+  ctx: CliContext,
+  chatId: number,
+  payload?: Record<string, unknown>,
+): Pick<ExecutionObservation, "currentChatId" | "targetChatId" | "payload"> {
+  return {
+    currentChatId: ctx.currentChatId == null ? null : String(ctx.currentChatId),
+    targetChatId: String(chatId),
+    ...(payload ? { payload } : {}),
+  };
+}
 
 // ── Say Command ──
 
@@ -45,23 +215,28 @@ export interface SayArgs {
 export async function sayCommand(ctx: CliContext, args: SayArgs): Promise<CommandResult> {
   const die = makeDie(ctx.output, "irc");
 
-  const chatId = await ctx.resolveTarget(args.in);
-  const text = args.text;
+  const target = await resolveTransportTarget(ctx, args.in);
+  const text = sanitizeOutgoingText(args.text);
 
-  if (!text.trim()) die("say requires non-empty text");
+  if (!text.trim()) die("say requires non-empty text", "command_missing_argument");
+  assertCurrentTransportTargetForSend(ctx, target, die, "irc.say");
 
-  const result = (await ctx.engine.post("/telegram/send", { chatId, text })) as SendResult | null;
+  const result = (await ctx.engine.post("/transport/send", {
+    target: target.ref.stableId,
+    text,
+  })) as TransportSendResult | null;
 
+  const msgId = nativeMsgId(result);
   const action =
-    result?.msgId != null
-      ? `${ACTION_PREFIX}sent:chatId=${chatId}:msgId=${result.msgId}`
+    msgId != null && target.chatId != null
+      ? `${ACTION_PREFIX}sent:chatId=${target.chatId}:msgId=${msgId}:message=${telegramMessage(target.chatId, msgId)}`
       : undefined;
 
   // ADR-240: resolve thread after sending message
   if (args["resolve-thread"]) {
     const threadId = Number(args["resolve-thread"]);
     if (!Number.isFinite(threadId) || threadId <= 0) {
-      die("--resolve-thread requires a positive integer thread ID");
+      die("--resolve-thread requires a positive integer thread ID", "command_arg_format");
     }
     try {
       await ctx.engine.post("/dispatch/resolve_topic", { threadId });
@@ -75,7 +250,12 @@ export async function sayCommand(ctx: CliContext, args: SayArgs): Promise<Comman
   return {
     action,
     output: renderConfirm("Sent", `"${truncate(text)}"`),
-    rawResult: { msgId: result?.msgId, chatId },
+    rawResult: {
+      msgId,
+      chatId: target.chatId,
+      target: target.ref.stableId,
+      messageId: result?.messageId,
+    },
   };
 }
 
@@ -90,8 +270,26 @@ export interface ReplyArgs {
 
 /** 解析消息 ID（纯函数）。 */
 export function parseMsgId(raw: string): number {
-  const n = Number(raw.replace(/^#/, ""));
-  if (!Number.isFinite(n)) throw new Error(`invalid message ID: ${raw}`);
+  const normalized = raw.trim().replace(/^#/, "");
+  if (/^(latest|last|recent)$/i.test(normalized)) {
+    throw new CliExecutionError(
+      "command_invalid_message_id",
+      `invalid message ID: ${raw}; use a visible current-chat msgId, never latest`,
+    );
+  }
+  if (!/^\d+$/.test(normalized)) {
+    throw new CliExecutionError(
+      "command_invalid_message_id",
+      `invalid message ID: ${raw}; use a visible current-chat msgId`,
+    );
+  }
+  const n = Number(normalized);
+  if (!Number.isSafeInteger(n) || n <= 0) {
+    throw new CliExecutionError(
+      "command_invalid_message_id",
+      `invalid message ID: ${raw}; use a visible current-chat msgId`,
+    );
+  }
   return n;
 }
 
@@ -99,27 +297,48 @@ export function parseMsgId(raw: string): number {
 export async function replyCommand(ctx: CliContext, args: ReplyArgs): Promise<CommandResult> {
   const die = makeDie(ctx.output, "irc");
 
-  const chatId = await ctx.resolveTarget(args.in);
-  const replyTo = parseMsgId(args.ref);
-  const text = args.text;
+  const target = await resolveTransportTarget(ctx, args.in);
+  let replyToMessage = "";
+  try {
+    replyToMessage = messageRefForTarget(target, args.ref);
+  } catch (err) {
+    die(
+      err instanceof Error ? err.message : "invalid reply ref; use a visible current-chat msgId",
+      "command_invalid_reply_ref",
+    );
+  }
+  const text = sanitizeOutgoingText(args.text);
+  const replyTo = nativeTelegramMsgIdFromRef(replyToMessage);
 
-  if (!text.trim()) die("reply requires non-empty text");
+  if (!text.trim()) die("reply requires non-empty text", "command_missing_argument");
+  assertCurrentTransportTargetForSend(ctx, target, die, "irc.reply", { replyToMessage });
 
-  const result = (await ctx.engine.post("/telegram/send", {
-    chatId,
+  const result = (await ctx.engine.post("/transport/send", {
+    target: target.ref.stableId,
     text,
-    replyTo,
-  })) as SendResult | null;
+    replyTo: replyToMessage,
+  })) as TransportSendResult | null;
 
+  const msgId = nativeMsgId(result);
   const action =
-    result?.msgId != null
-      ? `${ACTION_PREFIX}sent:chatId=${chatId}:msgId=${result.msgId}`
+    msgId != null && target.chatId != null
+      ? `${ACTION_PREFIX}sent:chatId=${target.chatId}:msgId=${msgId}:message=${telegramMessage(target.chatId, msgId)}`
       : undefined;
 
   return {
     action,
-    output: renderConfirm("Replied to", `#${replyTo}: "${truncate(text)}"`),
-    rawResult: { msgId: result?.msgId, chatId, replyTo },
+    output: renderConfirm(
+      "Replied to",
+      `${replyTo == null ? replyToMessage : `#${replyTo}`}: "${truncate(text)}"`,
+    ),
+    rawResult: {
+      msgId,
+      chatId: target.chatId,
+      target: target.ref.stableId,
+      messageId: result?.messageId,
+      replyTo,
+      replyToMessage,
+    },
   };
 }
 
@@ -132,19 +351,43 @@ export interface ReactArgs {
   emoji: string;
 }
 
+function allowedReactionList(): string {
+  return Array.from(ALLOWED_REACTIONS).join(" ");
+}
+
 /** react 命令逻辑。 */
 export async function reactCommand(ctx: CliContext, args: ReactArgs): Promise<CommandResult> {
   const die = makeDie(ctx.output, "irc");
+  const target = await resolveTransportTarget(ctx, args.in);
+  const messageRef = messageRefForTarget(target, args.ref);
+  const msgId = nativeTelegramMsgIdFromRef(messageRef);
+  const emoji = normalizeReactionEmoji(args.emoji);
+  if (!ALLOWED_REACTIONS.has(emoji)) {
+    die(
+      `invalid reaction ${JSON.stringify(args.emoji)}; use one of: ${allowedReactionList()}`,
+      "invalid_reaction",
+    );
+  }
 
-  const chatId = await ctx.resolveTarget(args.in);
-  const msgId = parseMsgId(args.ref);
-  const emoji = args.emoji;
-
-  const result = await ctx.engine.post("/telegram/react", { chatId, msgId, emoji });
+  await ctx.engine.post("/transport/react", {
+    target: target.ref.stableId,
+    message: messageRef,
+    emoji,
+  });
 
   return {
-    output: renderConfirm(`Reacted ${emoji} to`, `#${msgId}`),
-    rawResult: { success: true, chatId, msgId },
+    action:
+      msgId != null && target.chatId != null
+        ? `${ACTION_PREFIX}react:chatId=${target.chatId}:msgId=${msgId}`
+        : undefined,
+    output: renderConfirm(`Reacted ${emoji} to`, msgId == null ? messageRef : `#${msgId}`),
+    rawResult: {
+      success: true,
+      chatId: target.chatId,
+      msgId,
+      target: target.ref.stableId,
+      message: messageRef,
+    },
   };
 }
 
@@ -161,7 +404,10 @@ export async function stickerCommand(ctx: CliContext, args: StickerArgs): Promis
   const die = makeDie(ctx.output, "irc");
 
   const chatId = await ctx.resolveTarget(args.in);
-  const keyword = args.keyword;
+  const keyword = args.keyword.trim();
+
+  if (!keyword) die("sticker requires non-empty keyword", "command_missing_argument");
+  assertCurrentChatForSend(ctx, chatId, die, "irc.sticker");
 
   const result = (await ctx.engine.post("/telegram/sticker", {
     chatId,
@@ -195,25 +441,41 @@ export async function voiceCommand(ctx: CliContext, args: VoiceArgs): Promise<Co
   const die = makeDie(ctx.output, "irc");
 
   const chatId = await ctx.resolveTarget(args.in);
-  const text = args.text.trim();
+  const text = sanitizeOutgoingText(args.text);
 
-  if (!text) die("voice requires non-empty text");
+  if (!text) die("voice requires non-empty text", "command_missing_argument");
+  assertCurrentChatForSend(
+    ctx,
+    chatId,
+    die,
+    "irc.voice",
+    args.ref ? { replyRef: args.ref } : undefined,
+  );
 
   const body: Record<string, unknown> = { chatId, text };
   if (args.emotion) body.emotion = args.emotion;
   if (args.ref) body.replyTo = parseMsgId(args.ref);
 
   const result = (await ctx.engine.post("/telegram/voice", body)) as SendResult | null;
+  const deliveredAs = result?.deliveredAs ?? "voice";
 
   const action =
     result?.msgId != null
-      ? `${ACTION_PREFIX}voice:chatId=${chatId}:msgId=${result.msgId}`
+      ? `${ACTION_PREFIX}${deliveredAs === "text" ? "sent" : "voice"}:chatId=${chatId}:msgId=${result.msgId}`
       : undefined;
 
   return {
     action,
-    output: renderConfirm("Sent voice", `"${truncate(text)}"`),
-    rawResult: { msgId: result?.msgId, chatId },
+    output: renderConfirm(
+      deliveredAs === "text" ? "Sent text fallback" : "Sent voice",
+      `"${truncate(text)}"`,
+    ),
+    rawResult: {
+      msgId: result?.msgId,
+      chatId,
+      deliveredAs,
+      fallbackReason: result?.fallbackReason,
+    },
   };
 }
 
@@ -226,12 +488,22 @@ export interface ReadArgs {
 
 /** read 命令逻辑。 */
 export async function readCommand(ctx: CliContext, args: ReadArgs): Promise<CommandResult> {
-  const die = makeDie(ctx.output, "irc");
-
-  const chatId = await ctx.resolveTarget(args.in);
-  await ctx.engine.post("/telegram/read", { chatId });
+  const target = await resolveTransportTarget(ctx, args.in);
+  await ctx.engine.post("/transport/read", { target: target.ref.stableId });
 
   return {
+    observation: {
+      kind: "read_ack",
+      source: "irc.read",
+      text: `marked chat ${target.ref.stableId} as read`,
+      enablesContinuation: false,
+      ...(target.chatId == null
+        ? {
+            currentChatId: ctx.currentChatId == null ? null : String(ctx.currentChatId),
+            targetChatId: target.ref.stableId,
+          }
+        : chatObservationMeta(ctx, target.chatId)),
+    },
     output: renderConfirm("Marked as read"),
     rawResult: { success: true },
   };
@@ -252,29 +524,48 @@ export async function tailCommand(ctx: CliContext, args: TailArgs): Promise<Comm
   const chatId = await ctx.resolveTarget(args.in);
   const count = Number(args.count);
 
-  if (!Number.isFinite(count)) die("tail count must be a number");
+  if (!Number.isFinite(count)) die("tail count must be a number", "command_arg_format");
 
-  const result = await ctx.engine.get(`/chat/${chatId}/tail?limit=${count}`);
+  const result = (await ctx.engine.get(
+    `/chat/${chatId}/tail?limit=${count}`,
+  )) as ChatTailResponse | null;
 
   // 标注来源（用于远程聊天）
   const isRemote = args.in != null;
   const header = isRemote ? `[tail @${chatId}]\n` : "";
 
-  const messages = Array.isArray(result) ? result : [];
+  const messages = result?.messages ?? [];
   if (messages.length === 0) {
-    return { output: header + "(no messages)", rawResult: [] };
+    return {
+      observation: {
+        kind: "empty",
+        source: "irc.tail",
+        text: `no messages in chat ${chatId}`,
+        enablesContinuation: false,
+        ...chatObservationMeta(ctx, chatId, { count }),
+      },
+      output: `${header}(no messages)`,
+      rawResult: [],
+    };
   }
 
   const lines: string[] = [];
   for (let i = 0; i < messages.length; i++) {
-    const m = messages[i] as { sender?: string; text?: string; id?: number; timestamp?: string };
+    const m = messages[i];
     const sender = m.sender ?? "?";
     const text = m.text ?? "";
-    const prefix = m.id != null ? `(#${m.id}) ` : "";
+    const prefix = m.id != null ? `(msgId ${m.id}) ` : "";
     lines.push(`${i + 1}. ${prefix}${sender}: "${truncate(text, 80)}"`);
   }
 
   return {
+    observation: {
+      kind: "new_message_context",
+      source: "irc.tail",
+      text: header + lines.join("\n"),
+      enablesContinuation: true,
+      ...chatObservationMeta(ctx, chatId, { count, messageCount: messages.length }),
+    },
     output: header + lines.join("\n"),
     rawResult: messages,
   };
@@ -306,21 +597,31 @@ export async function whoisCommand(ctx: CliContext, args: WhoisArgs): Promise<Co
     let contactId: string;
 
     if (Number.isFinite(n)) {
-      contactId = `contact:${n}`;
+      contactId = telegramContactId(n);
     } else {
       // 尝试名称解析
       const resolveResult = (await ctx.engine.post("/resolve/name", { name: target })) as {
         result?: { telegramId: number | null } | null;
       };
       if (resolveResult?.result?.telegramId != null) {
-        contactId = `contact:${resolveResult.result.telegramId}`;
+        contactId = telegramContactId(resolveResult.result.telegramId);
       } else {
         throw new Error(`contact not found: "${target}"`);
       }
     }
 
     const result = await ctx.engine.query("/query/contact_profile", { contactId });
-    return { output: renderHuman(result), rawResult: result };
+    const output = renderHuman(result);
+    return {
+      observation: {
+        kind: result == null ? "empty" : "query_result",
+        source: "irc.whois",
+        text: output,
+        enablesContinuation: result != null,
+      },
+      output,
+      rawResult: result,
+    };
   }
 
   // whois（无参数）→ 聊天室信息
@@ -353,7 +654,16 @@ export async function whoisCommand(ctx: CliContext, args: WhoisArgs): Promise<Co
     data.role ? `Your role: ${data.role}` : null,
   ].filter((l): l is string => l != null);
 
-  return { output: lines.join("\n"), rawResult: data };
+  return {
+    observation: {
+      kind: "state_snapshot",
+      source: "irc.whois",
+      text: lines.join("\n"),
+      enablesContinuation: true,
+    },
+    output: lines.join("\n"),
+    rawResult: data,
+  };
 }
 
 // ── Motd Command ──
@@ -365,12 +675,20 @@ export interface MotdArgs {
 
 /** motd 命令逻辑。 */
 export async function motdCommand(ctx: CliContext, args: MotdArgs): Promise<CommandResult> {
-  const die = makeDie(ctx.output, "irc");
-
   const chatId = await ctx.resolveTarget(args.in);
-  const result = await ctx.engine.query("/query/chat_mood", { chatId: `channel:${chatId}` });
+  const result = await ctx.engine.query("/query/chat_mood", { chatId: telegramChannelId(chatId) });
 
-  return { output: renderHuman(result), rawResult: result };
+  const output = renderHuman(result);
+  return {
+    observation: {
+      kind: result == null ? "empty" : "query_result",
+      source: "irc.motd",
+      text: output,
+      enablesContinuation: result != null,
+    },
+    output,
+    rawResult: result,
+  };
 }
 
 // ── Threads Command ──
@@ -380,9 +698,20 @@ export interface ThreadsArgs {
 }
 
 /** threads 命令逻辑。 */
-export async function threadsCommand(ctx: CliContext, args: ThreadsArgs): Promise<CommandResult> {
+export async function threadsCommand(ctx: CliContext, _args: ThreadsArgs): Promise<CommandResult> {
   const result = await ctx.engine.query("/query/open_topics", {});
-  return { output: renderHuman(result), rawResult: result };
+  const output = renderHuman(result);
+  const hasThreads = Array.isArray(result) ? result.length > 0 : result != null;
+  return {
+    observation: {
+      kind: hasThreads ? "query_result" : "empty",
+      source: "irc.threads",
+      text: output,
+      enablesContinuation: hasThreads,
+    },
+    output,
+    rawResult: result,
+  };
 }
 
 // ── Join Command ──
@@ -397,7 +726,7 @@ export async function joinCommand(ctx: CliContext, args: JoinArgs): Promise<Comm
   const die = makeDie(ctx.output, "irc");
 
   const chatIdOrLink = args.target.trim();
-  if (!chatIdOrLink) die("join requires a target");
+  if (!chatIdOrLink) die("join requires a target", "command_missing_argument");
 
   const result = await ctx.engine.post("/telegram/join", { chatIdOrLink });
 
@@ -413,8 +742,6 @@ export interface LeaveArgs {
 
 /** leave 命令逻辑。 */
 export async function leaveCommand(ctx: CliContext, args: LeaveArgs): Promise<CommandResult> {
-  const die = makeDie(ctx.output, "irc");
-
   const chatId = await ctx.resolveTarget(args.in);
   const result = await ctx.engine.post("/telegram/leave", { chatId });
 

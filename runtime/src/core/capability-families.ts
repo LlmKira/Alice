@@ -1,7 +1,7 @@
 import type { ToolCategory } from "../engine/tick/types.js";
 
 export interface CapabilityFamily {
-  /** Capability Guide 中显示的「何时激活」描述 */
+  /** shell manual / legacy category summary 中显示的「何时使用」描述 */
   whenToUse: string;
   /** Activated Tools 段头部的简短描述 */
   label: string;
@@ -18,40 +18,40 @@ export const CAPABILITY_FAMILIES: Partial<Record<ToolCategory, CapabilityFamily>
     whenToUse: "深度情绪分析/反馈",
     label: "环境/状态感知",
     tutorials: [
-      "// self --help -> rate_outcome, flag_risk...",
-      '// rate_outcome({ quality: "good", reason: "她笑了" })',
+      "# self --help -> rate-outcome, flag-risk...",
+      'self rate-outcome --target self --action_ms 1777550000000 --quality good --reason "她笑了"',
     ],
   },
   social: {
     whenToUse: "关系档案管理",
     label: "人际认知",
     tutorials: [
-      "// self --help -> note_active_hour, tag_interest...",
-      "// note_active_hour({ contactId: TARGET_CONTACT, hour: 14 })",
+      "# self --help -> note-active-hour, tag-interest...",
+      "self note-active-hour --contactId @1000000001 --hour 14",
     ],
   },
   threads: {
     whenToUse: "线程生命周期管理",
     label: "线程管理",
     tutorials: [
-      "// self --help -> intend, resolve_topic...",
-      '// intend({ intent: "下次见面时问问结果" })',
+      "# self --help -> intend, resolve-topic...",
+      'self intend --description "下次见面时问问结果" --priority minor',
     ],
   },
   memory: {
     whenToUse: "知识维护与反思",
     label: "知识持久化",
     tutorials: [
-      "// self --help -> diary, recall_fact...",
-      '// diary("今天聊了很多 感觉关系更近了")',
+      "# self --help -> diary, recall-fact...",
+      'self diary --content "今天聊了很多 感觉关系更近了"',
     ],
   },
   scheduler: {
     whenToUse: "任务调度",
     label: "任务调度",
     tutorials: [
-      "// self --help -> schedule_task, cancel_task...",
-      '// schedule_task({ type: "at", delay: 5, action: "remind about meeting" })  // 5 minutes from now',
+      "# self --help -> schedule-task, cancel-task...",
+      'self schedule-task --type at --delay 5 --action "remind about meeting"',
     ],
   },
   skills: {
@@ -70,48 +70,34 @@ export const CAPABILITY_FAMILIES: Partial<Record<ToolCategory, CapabilityFamily>
     whenToUse: "搜索聊天记录/日记/线程",
     label: "聊天记录搜索",
     tutorials: [
-      '// search("餐厅", { chatId: TARGET_CHAT })',
-      "// tail(10)",
-      "// whois()",
-      "// topic()",
-      "// -> results appear automatically in next round",
+      "irc tail --count 10",
+      "irc whois",
+      "irc threads",
+      "# results appear in command output or the next round",
     ],
   },
   contact_info: {
     whenToUse: "Bot 交互/联系人查询",
     label: "联系人与 Bot",
-    tutorials: [
-      '// inline_query("musicbot", "lofi beats")',
-      '// send_inline_result("query_abc", "result_0")',
-      "// bestTimeToChat()  // 查看最佳联系时间",
-    ],
+    tutorials: ["irc whois --target @1000000001", "irc whois"],
   },
   sticker: {
     whenToUse: "浏览/管理贴纸集",
     label: "贴纸",
-    tutorials: [
-      "// list_stickers()  // 列出所有可用贴纸集",
-      '// get_sticker_set("sticker_set_name")',
-    ],
+    tutorials: ["irc sticker --keyword happy", "irc sticker --help"],
   },
   media: {
     whenToUse: "发送图片/文件/媒体",
     label: "媒体",
     tutorials: [
-      '// send_media({ fileId: "CAACAgI..." })  // forward existing media by file ID',
-      "// download + process + send-file: irc download → convert → irc send-file",
+      'irc send-file --path ./file.png --caption "给你看这个"',
+      "# download + process + send-file: irc download -> convert -> irc send-file",
     ],
   },
   group_admin: {
     whenToUse: "群组发现/加入/管理",
     label: "群组管理",
-    tutorials: [
-      '// search_public("tech community")',
-      '// preview_chat("@channel_name")',
-      '// join("@channel_name")',
-      "// part()",
-      "// create_invite_link(chatId)",
-    ],
+    tutorials: ['irc join --target "@channel_name"', "irc leave"],
   },
 };
 

@@ -57,6 +57,139 @@
       "when": 1775032799350,
       "tag": "0007_oval_mandarin",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1777027141792,
+      "tag": "0008_host_continuation_trace",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1777104000000,
+      "tag": "0009_decision_trace",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1777107600000,
+      "tag": "0010_canonical_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1777115158082,
+      "tag": "0011_intervention_outcome_evidence",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1777212359305,
+      "tag": "0012_misty_mach_iv",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1777223100000,
+      "tag": "0014_focus_transition_shadow",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1777226700000,
+      "tag": "0015_group_photo_album",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1777313100000,
+      "tag": "0016_rhythm_profiles",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1777313700000,
+      "tag": "0017_album_photo_fts_rebuild",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1777350000000,
+      "tag": "0018_rhythm_profile_coverage",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1777356000000,
+      "tag": "0019_focus_transition_intent",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1777384800000,
+      "tag": "0020_social_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1777471200000,
+      "tag": "0021_thread_lifecycle_event",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1777474800000,
+      "tag": "0022_social_case_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1777557600000,
+      "tag": "0023_action_log_llm_model",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1777561200000,
+      "tag": "0024_action_result_execution_observations",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1777564800000,
+      "tag": "0025_message_log_platform_ids",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1777608000000,
+      "tag": "0026_emotion_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "6",
+      "when": 1777611600000,
+      "tag": "0027_emotion_repairs",
+      "breakpoints": true
     }
   ]
 }

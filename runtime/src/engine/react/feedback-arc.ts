@@ -16,10 +16,24 @@
  */
 
 import { checkFeedbackGap } from "../../core/action-executor.js";
-import type { ScriptExecutionResult } from "../../core/script-execution.js";
+import type {
+  ScriptExecutionErrorCode,
+  ScriptExecutionResult,
+} from "../../core/script-execution.js";
 import { hasCompletedSend } from "../../core/script-execution.js";
 import { getDb } from "../../db/connection.js";
+import { writeDecisionTrace } from "../../db/decision-trace.js";
+import { writeFocusTransitionShadows } from "../../db/focus-transition-shadow.js";
+import {
+  makeActionId,
+  pressureVectorFromDims,
+  writeActionResult,
+  writeFactMutation,
+  writePressureDeltasForAction,
+} from "../../db/observation-spine.js";
 import { actionLog, personalityEvolutionLog } from "../../db/schema.js";
+import { appraiseActionFailureEmotion } from "../../emotion/appraisal.js";
+import { recordEmotionEpisode } from "../../emotion/graph.js";
 import {
   ALICE_SELF,
   chatIdToContactId,
@@ -28,7 +42,7 @@ import {
 } from "../../graph/constants.js";
 import { findActiveConversation } from "../../graph/queries.js";
 import type { WorldModel } from "../../graph/world-model.js";
-import { computeExternalFeedback } from "../../mods/observer.mod.js";
+import { computeExternalFeedback } from "../../mods/observer/external-feedback.js";
 import { ACT_SILENCE_SAFETY_THRESHOLD } from "../../pressure/signal-decay.js";
 import { createLogger } from "../../utils/logger.js";
 import {
@@ -43,6 +57,7 @@ import {
 } from "../../voices/personality.js";
 import type { ActionQueueItem } from "../action-queue.js";
 import { closeEpisodeFromAct } from "../episode.js";
+import type { TickTcMeta } from "../tick/types.js";
 import type { ActContext } from "./orchestrator.js";
 
 const log = createLogger("react:feedback");
@@ -92,24 +107,130 @@ function extractFirstSentMessageText(_result: ScriptExecutionResult): string | n
   return null;
 }
 
-/**
- * 从 completedActions 推导 actionType 字符串（用于 action_log）。
- */
-function deriveActionType(
+function extractFirstExternalMessageId(result: ScriptExecutionResult): string | null {
+  const sent = result.completedActions.find((action) => action.startsWith("sent:"));
+  if (!sent) return null;
+  const msgId = /(?:^|:)msgId=([^:]+)/.exec(sent)?.[1];
+  const chatId = /(?:^|:)chatId=([^:]+)/.exec(sent)?.[1];
+  if (chatId && msgId) return `${chatId}:${msgId}`;
+  return msgId ?? sent;
+}
+
+function isCommandMisuseError(result: ScriptExecutionResult): boolean {
+  return result.errorCodes.some(
+    (code) =>
+      code === "command_cross_chat_send" ||
+      code === "command_invalid_target" ||
+      code === "command_invalid_message_id" ||
+      code === "command_invalid_reply_ref",
+  );
+}
+
+type ExecutionOutcomeKind =
+  | "message_sent"
+  | "silence"
+  | "provider_failed"
+  | "validation_failed"
+  | "command_misuse"
+  | "telegram_failed"
+  | "script_failed"
+  | "observe_success";
+
+interface ExecutionOutcome {
+  kind: ExecutionOutcomeKind;
+  actionType: string;
+  success: boolean;
+  finalDecision: "execute" | "fail" | "stop";
+}
+
+function isTelegramFailure(result: ScriptExecutionResult): boolean {
+  return result.errorCodes.some(
+    (code) =>
+      code === "invalid_reaction" ||
+      code === "invalid_sticker_keyword" ||
+      code === "unreachable_telegram_user" ||
+      code === "voice_messages_forbidden" ||
+      code === "telegram_hard_permanent" ||
+      code === "telegram_soft_permanent" ||
+      code === "timeout",
+  );
+}
+
+function classifyExecutionOutcome(
   result: ScriptExecutionResult,
   llmFailed: boolean,
   messageSent: boolean,
-): string {
-  if (llmFailed) return "llm_failed";
-  if (messageSent) return "message";
-  if (result.silenceReason) return "silence";
-  if (result.completedActions.length > 0) {
-    // 从第一条 completedAction 推导类型
-    const first = result.completedActions[0];
-    const colonIdx = first.indexOf(":");
-    return colonIdx > 0 ? first.slice(0, colonIdx) : first;
+  failureKind?: EngagementMetrics["failureKind"],
+): ExecutionOutcome {
+  if (messageSent) {
+    return {
+      kind: "message_sent",
+      actionType: "message",
+      success: true,
+      finalDecision: "execute",
+    };
   }
-  return "observe";
+
+  if (result.silenceReason && result.errors.length === 0) {
+    return {
+      kind: "silence",
+      actionType: "silence",
+      success: true,
+      finalDecision: "stop",
+    };
+  }
+
+  if (isCommandMisuseError(result)) {
+    return {
+      kind: "command_misuse",
+      actionType: "command_misuse",
+      success: false,
+      finalDecision: "fail",
+    };
+  }
+
+  if (isTelegramFailure(result)) {
+    return {
+      kind: "telegram_failed",
+      actionType: "telegram_failed",
+      success: false,
+      finalDecision: "fail",
+    };
+  }
+
+  if (llmFailed && failureKind === "provider_unavailable") {
+    return {
+      kind: "provider_failed",
+      actionType: "provider_failed",
+      success: false,
+      finalDecision: "fail",
+    };
+  }
+
+  if (llmFailed || result.errorCodes.includes("script_validation")) {
+    return {
+      kind: "validation_failed",
+      actionType: "validation_failed",
+      success: false,
+      finalDecision: "fail",
+    };
+  }
+
+  if (result.errors.length > 0 || result.instructionErrors.length > 0) {
+    return {
+      kind: "script_failed",
+      actionType: "script_failed",
+      success: false,
+      finalDecision: "fail",
+    };
+  }
+
+  return {
+    kind: "observe_success",
+    actionType: "observe",
+    success: true,
+    finalDecision: "execute",
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -140,6 +261,8 @@ export function applyOutcomeMoodNudge(
   llmFailed: boolean,
   nudgeScale: number,
   subcycles?: number,
+  targetId?: string,
+  failureKind?: EngagementMetrics["failureKind"],
 ): void {
   if (!G.has(ALICE_SELF)) return;
 
@@ -159,17 +282,37 @@ export function applyOutcomeMoodNudge(
   }
   // silence → delta = 0, 直接返回
 
+  if (llmFailed || executionResult.errorCodes.length > 0) {
+    appraiseActionFailureEmotion(G, {
+      targetId,
+      errorCodes: executionResult.errorCodes,
+      failureKind,
+      nowMs: Date.now(),
+    });
+    return;
+  }
+
   if (delta === 0) return;
 
-  const selfAttrs = G.getAgent(ALICE_SELF);
-  const current = selfAttrs.mood_valence ?? 0;
-  const nudged = Math.max(-1, Math.min(1, current + delta));
-
-  // 更新 mood_valence + 重置衰减时钟（让 nudge 在 mood_effective 中可见）
-  G.updateAgent(ALICE_SELF, {
-    mood_valence: nudged,
-    mood_set_ms: Date.now(),
+  recordEmotionEpisode(G, {
+    kind: llmFailed ? "tired" : "pleased",
+    valence: llmFailed ? -0.25 : 0.25,
+    arousal: llmFailed ? 0.35 : 0.25,
+    intensity: Math.min(0.45, Math.abs(delta) * 4),
+    confidence: 0.7,
+    nowMs: Date.now(),
+    cause: {
+      type: "action_result",
+      summary: llmFailed
+        ? "The last response attempt failed before it could land."
+        : subcycles != null && subcycles > 2
+          ? "A deeper exchange completed successfully."
+          : "A message was sent successfully.",
+    },
   });
+
+  // ADR-268: self affect authority is the emotion episode ledger.
+  // Do not mirror this into legacy self mood_valence / mood_set_ms.
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -196,68 +339,25 @@ export type FailureType = "permanent" | "transient";
  */
 export type FailureSubtype = "hard" | "soft";
 
-// ADR-90 W4: 分级 permanent patterns
-/** 用户维度不可逆 — 账号注销、平台封禁 */
-const HARD_PERMANENT_PATTERNS = [
-  "user_deactivated",
-  "input_user_deactivated",
-  "user_banned_in_channel",
-  "banned",
-];
-/** 频道级不可达 — 被踢、未加入（可能被重新邀请） */
-const SOFT_PERMANENT_PATTERNS = [
-  "kicked",
-  "haven't joined",
-  "chat_write_forbidden",
-  "chat_not_found",
-  "peer_id_invalid",
-  "not found in local cache",
-  "channel_private",
-  "chat_forbidden",
-];
-
 /**
- * ADR-191: 可机械重试的暂时性错误模式。
- * 这些错误是 Telegram API 层面的临时故障，直接重试原始动作即可，无需 LLM 参与。
- * @see docs/adr/191-correction-tick-hybrid-fix.md
- */
-export const MECHANICAL_RETRY_PATTERNS = [
-  "flood_wait",
-  "timeout",
-  "connection",
-  "restart",
-  "server_error",
-];
-
-/**
- * ADR-191: 判断错误是否可机械重试（无需 LLM 修改参数）。
- * @see docs/adr/191-correction-tick-hybrid-fix.md
- */
-export function isMechanicallyRetryable(error: string): boolean {
-  const lower = error.toLowerCase();
-  return MECHANICAL_RETRY_PATTERNS.some((p) => lower.includes(p));
-}
-
-/**
- * ADR-79 M1 + ADR-90 W4: 从沙箱错误中推断失败类型和子类型。
+ * ADR-79 M1 + ADR-90 W4: 从结构化错误码推导失败类型和子类型。
  * permanent → 目标不可达（被踢/封禁/账号注销）
  * transient → 临时故障（超时/限流/网络抖动）
  */
 export function classifyFailure(executionResult: {
-  errors: string[];
-  instructionErrors: string[];
+  errorCodes: readonly ScriptExecutionErrorCode[];
 }): {
   type: FailureType;
   subtype: FailureSubtype | null;
 } {
-  const allErrors = [...executionResult.errors, ...executionResult.instructionErrors];
-  const errorText = allErrors.join(" ").toLowerCase();
-
-  for (const pattern of HARD_PERMANENT_PATTERNS) {
-    if (errorText.includes(pattern)) return { type: "permanent", subtype: "hard" };
+  if (executionResult.errorCodes.includes("telegram_hard_permanent")) {
+    return { type: "permanent", subtype: "hard" };
   }
-  for (const pattern of SOFT_PERMANENT_PATTERNS) {
-    if (errorText.includes(pattern)) return { type: "permanent", subtype: "soft" };
+  if (
+    executionResult.errorCodes.includes("telegram_soft_permanent") ||
+    executionResult.errorCodes.includes("unreachable_telegram_user")
+  ) {
+    return { type: "permanent", subtype: "soft" };
   }
   return { type: "transient", subtype: null };
 }
@@ -274,7 +374,7 @@ export function updateReachability(
   G: WorldModel,
   target: string,
   success: boolean,
-  executionResult: { errors: string[]; instructionErrors: string[] },
+  executionResult: { errorCodes: readonly ScriptExecutionErrorCode[] },
 ): void {
   if (!target || !G.has(target)) return;
 
@@ -295,12 +395,15 @@ export function updateReachability(
     };
     if (subtype) failPatch.failure_subtype = subtype;
 
-    // ADR-90 W4: 只有 hard permanent 才清零社交义务
-    // soft permanent（被踢/未加入）保留义务——对方可能在其他频道继续对话
-    if (failureType === "permanent" && subtype === "hard") {
+    // 目标 channel 已被证明不可达时，清掉这个 channel 上的本地待回复义务。
+    // 如果同一个人在其他 channel 继续对话，应由那个 channel 的事实重新产生义务。
+    if (failureType === "permanent") {
       failPatch.pending_directed = 0;
       failPatch.mentions_alice = false;
-      log.info("Reachability hard permanent — cleared social obligations", { target });
+      log.info("Reachability permanent — cleared target-local social obligations", {
+        target,
+        subtype,
+      });
     }
     G.updateChannel(target, failPatch);
 
@@ -415,19 +518,14 @@ export interface EngagementMetrics {
   subcycles: number;
   durationMs: number;
   outcome: string;
+  failureKind?: import("../tick/callLLM.js").TickFailureKind;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // processResult — 后处理：反馈闭环 + 行动日志 + 人格演化
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** ADR-235: TC 循环可观测性元数据。 */
-interface TcMeta {
-  toolCallCount: number;
-  budgetExhausted: boolean;
-  afterward: string;
-  commandLog: string;
-}
+type TcMeta = TickTcMeta;
 
 /** 后处理：反馈闭环 + 行动日志 + 人格演化。 */
 export function processResult(
@@ -442,11 +540,21 @@ export function processResult(
 ): void {
   // ADR-129: LLM 调用失败时正确标记 success=false
   const llmFailed = engagementMetrics?.outcome === "llm_failed";
-  const success = !llmFailed && errorCount === 0 && executionResult.errors.length === 0;
   const messageSent = hasCompletedSend(executionResult);
+  const outcome = classifyExecutionOutcome(
+    executionResult,
+    llmFailed,
+    messageSent,
+    engagementMetrics?.failureKind,
+  );
+  const success = outcome.success && errorCount === 0 && executionResult.errors.length === 0;
 
-  // Pillar 4 OL-2: 可达性反馈弧移至 orchestrator applyFeedbackArc（per-target 粒度）
-  // processResult 不再调用 updateReachability——由 SPEAK 阶段按执行结果逐目标更新。
+  if (item.target && ctx.G.has(item.target) && ctx.G.getNodeType(item.target) === "channel") {
+    const shouldUpdateReachability = messageSent || isTelegramFailure(executionResult);
+    if (shouldUpdateReachability) {
+      updateReachability(ctx.G, item.target, success, executionResult);
+    }
+  }
 
   // ADR-95 W1+W2+W4: 沉默冷却 + 沉默即感知 + directed 信号衰减
   // @see docs/adr/95-prompt-log-behavioral-audit.md §5
@@ -457,8 +565,10 @@ export function processResult(
   if (item.target && ctx.G.has(item.target) && ctx.G.getNodeType(item.target) === "channel") {
     if (messageSent) {
       // ADR-158: 出站反馈弧补全。
+      const pd = Number(ctx.G.getChannel(item.target).pending_directed ?? 0);
       ctx.G.updateChannel(item.target, {
         consecutive_act_silences: 0,
+        pending_directed: Math.max(0, pd - 1),
         unread: 0,
         unread_ewms: 0,
       });
@@ -474,6 +584,10 @@ export function processResult(
           last_activity_ms: Date.now(),
         });
       }
+    } else if (llmFailed && engagementMetrics?.failureKind === "provider_unavailable") {
+      log.warn("LLM provider unavailable — not treating as social silence", {
+        target: item.target,
+      });
     } else if (llmFailed) {
       // ADR-156 环路 2 修复：LLM 失败 ≈ 强制沉默。
       const prevSil = Number(ctx.G.getChannel(item.target).consecutive_act_silences ?? 0);
@@ -506,6 +620,12 @@ export function processResult(
       if (pd > 0) silPatch.pending_directed = pd - 1;
 
       ctx.G.updateChannel(item.target, silPatch);
+    } else if (outcome.kind === "command_misuse") {
+      log.warn("Command misuse — not treating as social silence", {
+        target: item.target,
+        errorCount,
+        scriptErrors: executionResult.errors.length,
+      });
     } else if (!success) {
       // 脚本错误（目标不可达、500 等）≈ 失败的行动尝试。
       // 压力释放等同于沉默——Alice 尝试了但没送达，不应无限重试。
@@ -572,11 +692,15 @@ export function processResult(
     llmFailed,
     ctx.config.moodNudgeScale,
     engagementMetrics?.subcycles,
+    item.target ?? undefined,
+    engagementMetrics?.failureKind,
   );
+
+  const unresolvedFeedbackGap = feedbackGap.isMissing && autoWriteback.feel == null;
 
   // 记录行动日志
   try {
-    const actionType = deriveActionType(executionResult, llmFailed, messageSent);
+    const actionType = outcome.actionType;
     const messageText = extractFirstSentMessageText(executionResult);
     let reasoning: string | null =
       executionResult.thinks.length > 0
@@ -596,7 +720,7 @@ export function processResult(
     // ADR-69: EA_proxy 诊断指标
     const eaProxy = computeEAProxy(executionResult);
 
-    getDb()
+    const actionRow = getDb()
       .insert(actionLog)
       .values({
         tick,
@@ -607,8 +731,8 @@ export function processResult(
         messageText,
         confidence: null, // ADR-131 D4: 不填假数据，null = 尚无置信度评估能力
         reasoning,
-        success: messageSent ? true : success,
-        observationGap: feedbackGap.isMissing ? 1 : 0,
+        success: outcome.success,
+        observationGap: unresolvedFeedbackGap ? 1 : 0,
         closureDepth: closureDepth ?? null,
         eaProxy,
         engagementSubcycles: engagementMetrics?.subcycles ?? null,
@@ -619,8 +743,107 @@ export function processResult(
         tcBudgetExhausted: tcMeta?.budgetExhausted ?? null,
         tcAfterward: tcMeta?.afterward ?? null,
         tcCommandLog: tcMeta?.commandLog ?? null,
+        tcHostContinuationTrace: tcMeta?.hostContinuationTrace
+          ? JSON.stringify(tcMeta.hostContinuationTrace)
+          : null,
+        llmProvider: tcMeta?.provider ?? null,
+        llmModel: tcMeta?.model ?? null,
       })
-      .run();
+      .returning({ id: actionLog.id })
+      .get();
+    const actionId = makeActionId(actionRow.id);
+    const typedResult = outcome.success
+      ? outcome.kind === "observe_success" || outcome.kind === "silence"
+        ? "no_op"
+        : "success"
+      : "typed_failure";
+    const failureCode = outcome.success
+      ? "N/A"
+      : (executionResult.errorCodes[0] ?? outcome.kind ?? "unknown_failure");
+
+    writeActionResult({
+      actionId,
+      tick,
+      enqueueId: item.observation?.enqueueId ?? null,
+      candidateId: item.observation?.candidateId ?? null,
+      actionLogId: actionRow.id,
+      target: item.target,
+      actionType,
+      result: typedResult,
+      failureCode,
+      externalMessageId: extractFirstExternalMessageId(executionResult),
+      completedActionRefs: executionResult.completedActions,
+      executionObservations: executionResult.observations,
+    });
+    writeFocusTransitionShadows({
+      tick,
+      actionId,
+      actionLogId: actionRow.id,
+      candidateId: item.observation?.candidateId ?? null,
+      sourceTarget: item.target,
+      errorDetails: executionResult.errorDetails ?? [],
+      observations: executionResult.observations,
+      completedActions: executionResult.completedActions,
+    });
+    writeFactMutation({
+      mutationId: `mutation:${actionId}:auto_writeback`,
+      actionId,
+      sourceTick: tick,
+      factNamespace: Object.keys(autoWriteback).length > 0 ? "graph" : "diagnostic",
+      entityNamespace: item.target ? "channel" : "none",
+      entityId: item.target,
+      mutationKind: Object.keys(autoWriteback).length > 0 ? "update" : "none",
+      delta: Object.keys(autoWriteback).length > 0 ? autoWriteback : undefined,
+      authorityTable: Object.keys(autoWriteback).length > 0 ? "graph_nodes" : "action_log",
+    });
+    const pressureAfter = ctx.getCurrentPressures();
+    writePressureDeltasForAction({
+      sourceTick: item.enqueueTick,
+      actionTick: tick,
+      relatedCandidateId: item.observation?.candidateId ?? null,
+      relatedActionId: actionId,
+      pressureBefore: pressureVectorFromDims(
+        item.pressureSnapshot,
+        item.observation?.api ?? item.pressureSnapshot.reduce((sum, value) => sum + value, 0),
+        item.observation?.apiPeak ?? null,
+      ),
+      pressureAfter: pressureVectorFromDims(
+        pressureAfter,
+        pressureAfter.reduce((sum, value) => sum + value, 0),
+      ),
+    });
+
+    writeDecisionTrace({
+      tick,
+      phase: "act",
+      target: item.target,
+      actionLogId: actionRow.id,
+      finalDecision: outcome.finalDecision,
+      reason: actionType,
+      payload: {
+        selectedAction: item.action,
+        block: {
+          completedActions: executionResult.completedActions,
+          errors: executionResult.errors,
+          instructionErrors: executionResult.instructionErrors,
+          errorCodes: executionResult.errorCodes,
+          errorDetails: executionResult.errorDetails ?? [],
+          silenceReason: executionResult.silenceReason,
+        },
+        hostExecution: {
+          success: outcome.success,
+          messageSent,
+          llmFailed,
+          outcome: outcome.kind,
+          errorCount,
+          closureDepth: closureDepth ?? null,
+          feedbackGap: unresolvedFeedbackGap,
+          engagement: engagementMetrics ?? null,
+          tcMeta: tcMeta ?? null,
+        },
+        observations: executionResult.logs,
+      },
+    });
   } catch (e) {
     log.warn("Failed to write action log", e);
   }
@@ -636,6 +859,7 @@ export function processResult(
       else if (ca.startsWith("downloaded:")) stateChanges.push("downloaded media");
       else if (ca.startsWith("sent-file:")) stateChanges.push("sent a file");
     }
+    if (stateChanges.length === 0 && messageSent) stateChanges.push("sent a message");
     const autoWbEntries = Object.entries(autoWriteback).map(([k, v]) => `auto-${k}:${v}`);
     ctx.dispatcher.dispatch("SET_LAST_ACTION_RECAP", {
       tick,
@@ -729,7 +953,9 @@ export function processResult(
     scriptErrors: executionResult.errors.length,
     afterward: engagementMetrics?.outcome ?? null,
     subcycles: engagementMetrics?.subcycles ?? 1,
-    success,
+    outcome: outcome.kind,
+    success: outcome.success,
+    hostClean: success,
   });
 }
 

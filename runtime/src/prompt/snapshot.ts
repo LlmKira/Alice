@@ -10,7 +10,16 @@
 
 import { and, desc, eq, gt, isNotNull, lte } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
-import { episodes, messageLog, scheduledTasks } from "../db/schema.js";
+import { episodes, messageLog, rhythmProfiles, scheduledTasks } from "../db/schema.js";
+import {
+  type RhythmConfidence,
+  type RhythmEntityType,
+  type RhythmProfileProjection,
+  renderTimingLine,
+  type TimeWindow,
+} from "../diagnostics/rhythm-spectrum.js";
+import { readEmotionControlPatch, readEmotionState } from "../emotion/graph.js";
+import { renderEmotionProjection } from "../emotion/projection.js";
 import type { MessageRecord } from "../engine/act/messages.js";
 import { computeChannelPresence } from "../engine/act/presence.js";
 import {
@@ -38,6 +47,7 @@ import { safeDisplayName } from "../graph/display.js";
 import {
   isBlockedByContact,
   readForwardRegistry,
+  readLastSharedMs,
   readSocialReception,
 } from "../graph/dynamic-props.js";
 import type { DunbarTier } from "../graph/entities.js";
@@ -46,7 +56,6 @@ import type { WorldModel } from "../graph/world-model.js";
 import type { ChatInfo } from "../llm/group-cache.js";
 import { getCachedChatInfo } from "../llm/group-cache.js";
 import { getCachedBio } from "../telegram/bio-cache.js";
-import { createLogger } from "../utils/logger.js";
 import { humanDuration } from "../utils/time-format.js";
 import { getFacetWhisper } from "../voices/palette.js";
 import type {
@@ -63,8 +72,6 @@ import type {
   UserPromptSnapshot,
 } from "./types.js";
 import { ChatTarget } from "./types.js";
-
-const log = createLogger("snapshot");
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 快照构建参数
@@ -106,12 +113,38 @@ export interface SnapshotInput {
   /** 策略 C: Feed 条目（来自 feeds mod cache）。 */
   feedItems?: Array<{ title: string; url: string; snippet: string }>;
 
+  /** 行动反馈事实（来自 observer/outcome contribution，经 prompt-builder 明确投影）。 */
+  feedbackEntries?: string[];
+
+  /** ADR-262: 当前场景可见的 social case brief lines。 */
+  socialCaseLines?: string[];
+
   /** 策略 D: Peripheral vision 配置参数。 */
   peripheralConfig?: {
     perChannelCap: number;
     totalCap: number;
     minTextLength: number;
   };
+}
+
+function renderEmotionStyleHint(G: WorldModel, nowMs: number): string | undefined {
+  const control = readEmotionControlPatch(G, nowMs);
+  const lines: string[] = [];
+
+  if (control.styleBudget.preferShort || control.styleBudget.maxCharsMultiplier < 0.85) {
+    lines.push("This round fits a shorter, lower-effort reply.");
+  }
+  if (control.styleBudget.allowVulnerability) {
+    lines.push("A small bit of warmth can show.");
+  }
+  if (control.styleBudget.avoidSelfProof) {
+    lines.push("There is no need to prove yourself.");
+  }
+  if (control.actionCaps.proactiveMessages != null) {
+    lines.push("If you reach out, keep it to one soft touch and then wait.");
+  }
+
+  return lines.length > 0 ? lines.join("\n") : undefined;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -193,36 +226,17 @@ function buildTargetRef(G: WorldModel, target: string): EntityRef | null {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 心情标签
-// ═══════════════════════════════════════════════════════════════════════════
-
-function deriveMoodLabel(G: WorldModel): string {
-  if (!G.has(ALICE_SELF)) return "neutral";
-  const selfAttrs = G.getAgent(ALICE_SELF);
-  const effective = selfAttrs.mood_effective ?? 0;
-  const valence = selfAttrs.mood_valence ?? 0;
-
-  // 优先用 effective（综合了 arousal），但当 effective 接近零而 valence 强烈时
-  // 说明情绪被 arousal 掩盖——应该反映真实 valence
-  const signal = Math.abs(effective) > 0.2 ? effective : valence;
-
-  if (signal > 0.6) return "quite positive";
-  if (signal > 0.3) return "mildly positive";
-  if (signal < -0.6) return "quite negative";
-  if (signal < -0.3) return "mildly negative";
-  return "neutral";
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // 社交全景（频道用）— 从 Graph 构建
 // ═══════════════════════════════════════════════════════════════════════════
 
 const PANORAMA_MAX_CONTACTS = 8;
 const PANORAMA_MAX_GROUPS = 4;
 const PANORAMA_MAX_INTERESTS = 2;
+const SHARED_RECENTLY_WINDOW_MS = 60 * 60_000;
 
 function buildContactPanorama(
   G: WorldModel,
+  nowMs: number,
   contactProfiles?: SnapshotInput["contactProfiles"],
 ): ContactSlot[] {
   const results: Array<
@@ -309,6 +323,9 @@ function buildContactPanorama(
 
     // 读取该联系人私聊 channel 的社交接收度（转发反馈信号）
     const contactReception = channelId ? readSocialReception(G, channelId) : 0;
+    const lastSharedMs = channelId ? readLastSharedMs(G, channelId) : 0;
+    const sharedRecently =
+      lastSharedMs > 0 && nowMs >= lastSharedMs && nowMs - lastSharedMs < SHARED_RECENTLY_WINDOW_MS;
 
     const ref: EntityRef = { id: numId, displayName: String(displayName) };
     results.push({
@@ -317,6 +334,7 @@ function buildContactPanorama(
       topTrait,
       interests,
       bio,
+      ...(sharedRecently ? { sharedRecently: true } : {}),
       tier,
       lastActiveMs: attrs.last_active_ms ?? 0,
       hasInterests: interests.length > 0,
@@ -338,12 +356,13 @@ function buildContactPanorama(
 
   return results
     .slice(0, PANORAMA_MAX_CONTACTS)
-    .map(({ ref, tierLabel: tl, topTrait: tt, interests, bio: b }) => ({
+    .map(({ ref, tierLabel: tl, topTrait: tt, interests, bio: b, sharedRecently: sr }) => ({
       ref,
       tierLabel: tl,
       topTrait: tt,
       interests,
       ...(b ? { bio: b } : {}),
+      ...(sr ? { sharedRecently: true } : {}),
     }));
 }
 
@@ -538,8 +557,8 @@ function buildRoundHint(round: number, maxSteps: number): string | undefined {
 }
 
 /**
- * ADR-232: TC episode 提示 — 当 LLM 使用 watching 续轮时，
- * 告知它命令结果已在 observations 中，可以继续决策。
+ * Episode 提示：当 block 在同一 tick 内被 host 续轮时，
+ * 告知 LLM 命令结果已在 observations 中，可以继续决策。
  */
 function buildEpisodeHint(episodeRound: number): string | undefined {
   if (episodeRound <= 0) return undefined;
@@ -551,6 +570,7 @@ function buildEpisodeHint(episodeRound: number): string | undefined {
 // ═══════════════════════════════════════════════════════════════════════════
 
 const SEVEN_DAYS_MS = 7 * 24 * 3600_000;
+const MAX_TIMING_SIGNALS = 2;
 
 /**
  * 层③ 全局感知信号。
@@ -601,23 +621,20 @@ function buildSituationSignals(
   }
 
   // ADR-221 No-Silent-Drop: pending_directed > 0 的信号必须呈现。
-  // 私聊 channel 的 display_name 可能为空 → 从 contact 节点解析。
+  // 非当前私聊只给汇总，不暴露姓名/@ID，避免当前 target 的 act prompt 诱导跨私聊主动发话。
+  let otherPrivateDirected = 0;
   for (const chId of joined) {
     if (!G.has(chId) || G.getNodeType(chId) !== "channel") continue;
     if (chId === target) continue;
     const ch = G.getChannel(chId);
     if ((ch.pending_directed ?? 0) <= 0) continue;
-
-    // Fallback 链：channel display_name → contact display_name → safeDisplayName
-    let name = ch.display_name;
-    if (!name || String(name).trim() === "") {
-      if (ch.chat_type === "private") {
-        const contactId = ensureContactId(chId);
-        if (contactId && G.has(contactId)) {
-          name = G.getContact(contactId).display_name;
-        }
-      }
+    if (ch.chat_type === "private") {
+      otherPrivateDirected += 1;
+      continue;
     }
+
+    // Fallback 链：channel display_name → safeDisplayName。私聊已在上方汇总，不在当前 target 暴露。
+    let name = ch.display_name;
     if (!name || String(name).trim() === "") {
       name = safeDisplayName(G, chId);
     }
@@ -626,9 +643,16 @@ function buildSituationSignals(
     const numericId = extractNumericId(chId);
     const idPart = numericId != null ? ` @${numericId}` : "";
 
-    const label = ch.chat_type === "private" ? "sent you a DM" : "is waiting for your reply";
-    signals.push(`${name}${idPart} ${label}`);
+    signals.push(`${name}${idPart} is waiting for your reply`);
     if (signals.length >= 7) break;
+  }
+
+  if (otherPrivateDirected > 0 && signals.length < 7) {
+    signals.push(
+      otherPrivateDirected === 1
+        ? "Someone else sent you a DM; handle it in its own turn, not from this chat."
+        : `${otherPrivateDirected} other DMs are pending; handle them in their own turns, not from this chat.`,
+    );
   }
 
   return signals;
@@ -803,6 +827,196 @@ function buildScheduledEvents(nowMs: number): string[] {
   } catch {
     return [];
   }
+}
+
+type RhythmProfileRow = typeof rhythmProfiles.$inferSelect;
+
+/**
+ * 层③ 当前对象节律提示。
+ *
+ * 只读取当前 target 的 projection，把数学参数压成一句人话。
+ * Prompt 是观测面：这里只呈现 timing fact，不参与打分，也不承担硬刹车。
+ */
+function buildTimingSignals(
+  G: WorldModel,
+  target: string | null,
+  targetRef: EntityRef | undefined,
+  chatTarget: ChatTarget,
+  timezoneOffset: number,
+): string[] {
+  if (!target) return [];
+
+  try {
+    const db = getDb();
+    const signals: string[] = [];
+    const seenTiming = new Set<string>();
+
+    for (const candidate of rhythmProfileCandidates(G, target, targetRef, chatTarget)) {
+      const row = db
+        .select()
+        .from(rhythmProfiles)
+        .where(eq(rhythmProfiles.entityId, candidate.entityId))
+        .get();
+      if (!row) continue;
+
+      const profile = rhythmProfileFromRow(row);
+      if (!profile) continue;
+      if (profile.timezoneOffsetHours !== timezoneOffset) continue;
+
+      const line = renderTimingLine(profile, candidate.label);
+      if (!line) continue;
+      const signature = timingSignalSignature(profile);
+      if (seenTiming.has(signature)) continue;
+      seenTiming.add(signature);
+      signals.push(line);
+      if (signals.length >= MAX_TIMING_SIGNALS) break;
+    }
+
+    return signals;
+  } catch {
+    return [];
+  }
+}
+
+function timingSignalSignature(profile: RhythmProfileProjection): string {
+  const active = profile.activeNowScore >= 0.7;
+  const quiet = profile.quietNowScore >= 0.7;
+  const unusual = profile.unusualActivityScore >= 0.8;
+  const peak = profile.peakWindows[0];
+  const quietWindow = profile.quietWindows[0];
+  return JSON.stringify({
+    active,
+    quiet,
+    unusual,
+    peak,
+    quietWindow,
+  });
+}
+
+function rhythmProfileCandidates(
+  G: WorldModel,
+  target: string,
+  targetRef: EntityRef | undefined,
+  chatTarget: ChatTarget,
+): Array<{ entityId: string; label: string }> {
+  const candidates: Array<{ entityId: string; label: string }> = [];
+  const seen = new Set<string>();
+  const targetLabel = targetRef?.displayName ?? readableTargetName(G, target);
+
+  const push = (entityId: string | null, label: string) => {
+    if (!entityId || seen.has(entityId)) return;
+    seen.add(entityId);
+    candidates.push({ entityId, label });
+  };
+
+  if (chatTarget.isPrivate) {
+    push(ensureContactId(target), targetLabel);
+    push(ensureChannelId(target), `与 ${targetLabel} 的聊天`);
+    return candidates;
+  }
+
+  push(ensureChannelId(target), targetLabel);
+  return candidates;
+}
+
+function readableTargetName(G: WorldModel, target: string): string {
+  const channelId = ensureChannelId(target);
+  if (channelId && G.has(channelId)) {
+    const name = G.getChannel(channelId).display_name;
+    if (name && String(name).trim() !== "") return String(name);
+  }
+
+  const contactId = ensureContactId(target);
+  if (contactId && G.has(contactId)) {
+    const name = G.getContact(contactId).display_name;
+    if (name && String(name).trim() !== "") return String(name);
+  }
+
+  return "当前聊天";
+}
+
+function rhythmProfileFromRow(row: RhythmProfileRow): RhythmProfileProjection | null {
+  const entityType = parseRhythmEntityType(row.entityType);
+  const confidence = parseRhythmConfidence(row.confidence);
+  if (!entityType || !confidence) return null;
+
+  return {
+    entityId: row.entityId,
+    entityType,
+    sourceWindowStartMs: row.sourceWindowStartMs,
+    sourceWindowEndMs: row.sourceWindowEndMs,
+    sampleCount: row.sampleCount,
+    bucketCount: row.bucketCount,
+    activeBucketCount: row.activeBucketCount,
+    observedSpanHours: row.observedSpanHours,
+    observedDays: row.observedDays,
+    timezoneOffsetHours: row.timezoneOffsetHours,
+    enabledPeriodsHours: parseNumberArray(row.enabledPeriodsJson),
+    activeNowScore: row.activeNowScore,
+    quietNowScore: row.quietNowScore,
+    unusualActivityScore: row.unusualActivityScore,
+    peakWindows: parseTimeWindows(row.peakWindowsJson),
+    quietWindows: parseTimeWindows(row.quietWindowsJson),
+    confidence,
+    stale: row.stale,
+    diagnostics: emptyRhythmDiagnostics(),
+  };
+}
+
+function parseRhythmEntityType(value: string): RhythmEntityType | null {
+  if (value === "contact" || value === "channel" || value === "self") return value;
+  return null;
+}
+
+function parseRhythmConfidence(value: string): RhythmConfidence | null {
+  if (value === "low" || value === "medium" || value === "high") return value;
+  return null;
+}
+
+function parseTimeWindows(value: string): TimeWindow[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item): TimeWindow[] => {
+      if (!item || typeof item !== "object") return [];
+      const startHour = Number((item as { startHour?: unknown }).startHour);
+      const endHour = Number((item as { endHour?: unknown }).endHour);
+      if (!Number.isInteger(startHour) || !Number.isInteger(endHour)) return [];
+      if (startHour < 0 || startHour > 23 || endHour < 0 || endHour > 24) return [];
+      return [{ startHour, endHour }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function parseNumberArray(value: string): number[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item): number[] => {
+      const n = Number(item);
+      return Number.isFinite(n) ? [n] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function emptyRhythmDiagnostics(): RhythmProfileProjection["diagnostics"] {
+  return {
+    r2: 0,
+    dailyStrength: 0,
+    halfDailyStrength: 0,
+    weeklyStrength: 0,
+    activeBucketCount: 0,
+    observedSpanHours: 0,
+    observedDays: 0,
+    timezoneOffsetHours: 0,
+    enabledPeriodsHours: [],
+    coefficients: { intercept: 0, terms: [] },
+    hourlyScores: [],
+  };
 }
 
 /**
@@ -1179,8 +1393,9 @@ export function buildUserPromptSnapshot(input: SnapshotInput): UserPromptSnapsho
   // ── 目标 EntityRef ──
   const target = item.target ? (buildTargetRef(G, item.target) ?? undefined) : undefined;
 
-  // ── 心情 ──
-  const moodLabel = deriveMoodLabel(G);
+  // ── ADR-268: self affect natural projection ──
+  const emotionProjection = renderEmotionProjection(readEmotionState(G, nowMs)) ?? undefined;
+  const emotionStyleHint = renderEmotionStyleHint(G, nowMs);
 
   // ── 内心低语 ──
   const whisper = getFacetWhisper(item.facetId, item.action, isGroup);
@@ -1208,8 +1423,11 @@ export function buildUserPromptSnapshot(input: SnapshotInput): UserPromptSnapsho
   // ─��� 线程 ──
   const threads = isChannel ? [] : buildThreads(board.contextVars);
 
+  // ── ADR-262 social case replay ──
+  const socialCaseLines = input.socialCaseLines ?? [];
+
   // ── 频道社交全景 ──
-  const contacts = isChannel ? buildContactPanorama(G, input.contactProfiles) : [];
+  const contacts = isChannel ? buildContactPanorama(G, nowMs, input.contactProfiles) : [];
   const groups = isChannel ? buildGroupPanorama(G) : [];
   // ADR-237: Alice 的频道（作为转发目标或发帖场景）
   const ownedChannels = isChannel ? buildOwnedChannels(G) : [];
@@ -1222,7 +1440,7 @@ export function buildUserPromptSnapshot(input: SnapshotInput): UserPromptSnapsho
 
   // ── 轮次感知 ──
   const roundHint = buildRoundHint(round, board.maxSteps);
-  // ADR-232: TC episode 提示（watching 续轮时）
+  // ADR-232: TC episode 提示（host 触发 block 续轮时）
   const episodeHint = buildEpisodeHint(episodeRound);
 
   // ── 关系描述（私聊）──
@@ -1230,7 +1448,9 @@ export function buildUserPromptSnapshot(input: SnapshotInput): UserPromptSnapsho
     chatTarget.isPrivate && item.target ? buildRelationshipDesc(G, item.target) : undefined;
 
   // ── 行动反馈（observations 中的跨聊天内容由 timeline source 处理）──
-  const feedback: UserPromptSnapshot["feedback"] = [];
+  const feedback: UserPromptSnapshot["feedback"] = (input.feedbackEntries ?? []).map((text) => ({
+    text,
+  }));
 
   // ── 层① 对话回顾 ──
   const conversationRecap = isChannel ? [] : buildConversationRecap(item.target ?? null, nowMs);
@@ -1249,6 +1469,15 @@ export function buildUserPromptSnapshot(input: SnapshotInput): UserPromptSnapsho
 
   // ── 层③ 全局感知信号 ──
   const situationSignals = buildSituationSignals(G, item.target ?? null, nowMs, round);
+
+  // ── 层③ 当前对象节律提示 ──
+  const timingSignals = buildTimingSignals(
+    G,
+    item.target ?? null,
+    target,
+    chatTarget,
+    input.timezoneOffset,
+  );
 
   // ── 层③ 定时任务 ──
   const scheduledEvents = buildScheduledEvents(nowMs);
@@ -1282,7 +1511,8 @@ export function buildUserPromptSnapshot(input: SnapshotInput): UserPromptSnapsho
     chatTargetType,
     nowMs,
     timezoneOffset: input.timezoneOffset,
-    moodLabel,
+    emotionProjection,
+    emotionStyleHint,
     target,
     groupMeta,
     contacts,
@@ -1291,6 +1521,7 @@ export function buildUserPromptSnapshot(input: SnapshotInput): UserPromptSnapsho
     timeline: { lines: timeline.lines },
     presence,
     threads,
+    socialCaseLines,
     feedback,
     whisper,
     roundHint,
@@ -1301,6 +1532,7 @@ export function buildUserPromptSnapshot(input: SnapshotInput): UserPromptSnapsho
     contactMood,
     jargon,
     situationSignals,
+    timingSignals,
     scheduledEvents,
     riskFlags,
     socialReception,

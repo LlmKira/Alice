@@ -328,7 +328,7 @@ export function commitActEvents(
 
   // ADR-204 C11: tool:* kind — Skill/shell 执行事件
   // completedActions 来自 shell-executor 的 __ALICE_ACTION__ 控制行
-  if (sub.completedActions) {
+  if (sub.completedActions && sub.completedActions.length > 0) {
     for (const ca of sub.completedActions) {
       // 格式: "sent:chatId=X:msgId=Y", "downloaded:chatId=X:...", "sent-file:chatId=X:..."
       const kind = ca.startsWith("downloaded:")

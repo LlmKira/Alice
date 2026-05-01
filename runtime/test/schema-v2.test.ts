@@ -15,9 +15,11 @@ function makeResult(completedActions: string[] = []): ScriptExecutionResult {
     logs: [],
     errors: [],
     instructionErrors: [],
+    errorCodes: [],
     duration: 0,
     thinks: [],
     queryLogs: [],
+    observations: [],
     completedActions,
     silenceReason: null,
   };
@@ -41,11 +43,11 @@ describe("checkFeedbackGap (shell-native)", () => {
     expect(gap.isMissing).toBe(false);
   });
 
-  it("只有 sticker: completedAction → hasSendMessage=false", () => {
+  it("只有 sticker: completedAction → 也算出站社交动作", () => {
     const result = makeResult(["sticker:chatId=123:msgId=456"]);
     const gap = checkFeedbackGap(result);
-    expect(gap.hasSendMessage).toBe(false);
-    expect(gap.isMissing).toBe(false);
+    expect(gap.hasSendMessage).toBe(true);
+    expect(gap.isMissing).toBe(true);
   });
 
   it("shell-native 下 hasObserveMood 始终 false", () => {

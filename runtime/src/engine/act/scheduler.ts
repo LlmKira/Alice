@@ -52,18 +52,29 @@ export const SWITCH_COST_MS = 1500;
 
 // ── EngagementSlot ─────────────────────────────────────────────────────
 
-/** 调度槽位状态。 */
-export type SlotState = "ready" | "waiting" | "watching" | "done";
+/** 调度槽位状态。运行时专用，不复用 LLM afterward 词汇。 */
+export type SlotState = "ready" | "reply_watch" | "linger_watch" | "done";
 
-/** waiting_reply / watching 类型标签——记录 watcher 的来源语义。 */
-export type WatchKind = "waiting_reply" | "watching";
+/** 需要被非阻塞观察的 afterward 结果。 */
+export type DeferredTurnOutcome = "waiting_reply" | "watching";
+
+/** 调度器内部 watch 计划。运行时专用，不暴露给 LLM。 */
+export type WatchPlan = "reply_window" | "linger_window";
+
+export function watchPlanFromOutcome(outcome: DeferredTurnOutcome): WatchPlan {
+  return outcome === "waiting_reply" ? "reply_window" : "linger_window";
+}
 
 /** Watcher 非阻塞观察器的运行时状态。 */
 export interface ActiveWatcher {
-  readonly kind: WatchKind;
+  readonly plan: WatchPlan;
   readonly handle: ReturnType<typeof prepareEngagementWatch>;
   readonly promise: Promise<WatchResult>;
   readonly timeout: number;
+}
+
+function isWatchState(state: SlotState): state is "reply_watch" | "linger_watch" {
+  return state === "reply_watch" || state === "linger_watch";
 }
 
 /**
@@ -169,7 +180,7 @@ export function selectNextEngagement(active: EngagementSlot[]): EngagementSlot |
 }
 
 /**
- * 检查 waiting/watching 的 slot 是否有事件唤醒。
+ * 检查 watch slot 是否有事件唤醒。
  * 非阻塞——只检查 watcher 是否仍然存活。
  *
  * 安全性依赖 Node.js 单线程模型：handleWatchResult 的
@@ -178,7 +189,7 @@ export function selectNextEngagement(active: EngagementSlot[]): EngagementSlot |
  */
 export function checkWatchers(active: EngagementSlot[]): void {
   for (const slot of active) {
-    if ((slot.state === "waiting" || slot.state === "watching") && slot.watcher === null) {
+    if (isWatchState(slot.state) && slot.watcher === null) {
       // watcher 已被消费或不存在——标记 done
       slot.state = "done";
     }
@@ -186,7 +197,7 @@ export function checkWatchers(active: EngagementSlot[]): void {
 }
 
 /**
- * 等待任一 waiting/watching slot 的 watcher 完成或超时。
+ * 等待任一 watch slot 的 watcher 完成或超时。
  * 当所有 slot 都不是 ready 时调用（阻塞直到有 slot 可调度）。
  * 同时也等待 ActionQueue 中的新 item（队列不为空时唤醒）。
  */
@@ -194,7 +205,7 @@ export async function awaitAnyWakeup(active: EngagementSlot[], _queue: ActionQue
   const promises: Promise<unknown>[] = [];
 
   for (const slot of active) {
-    if ((slot.state === "waiting" || slot.state === "watching") && slot.watcher) {
+    if (isWatchState(slot.state) && slot.watcher) {
       promises.push(slot.watcher.promise);
     }
   }
@@ -213,7 +224,7 @@ export async function awaitAnyWakeup(active: EngagementSlot[], _queue: ActionQue
 
 /** Watcher 配置：工厂函数 + 超时 + 对应 slot 状态。 */
 interface WatchConfig {
-  readonly slotState: "waiting" | "watching";
+  readonly slotState: "reply_watch" | "linger_watch";
   readonly timeout: number;
   readonly create: (
     ctx: ActContext,
@@ -222,39 +233,39 @@ interface WatchConfig {
   ) => ReturnType<typeof prepareEngagementWatch>;
 }
 
-/** watcher 类型 → 配置映射。 */
-const WATCH_CONFIG: Record<WatchKind, WatchConfig> = {
-  waiting_reply: {
-    slotState: "waiting",
+/** runtime watch 计划 → 配置映射。 */
+const WATCH_CONFIG: Record<WatchPlan, WatchConfig> = {
+  reply_window: {
+    slotState: "reply_watch",
     timeout: EXPECT_REPLY_TIMEOUT,
     create: (ctx, channelId, holdStrength) =>
       prepareEngagementWatch(ctx, channelId, holdStrength, { typingAware: true }),
   },
-  watching: {
-    slotState: "watching",
+  linger_window: {
+    slotState: "linger_watch",
     timeout: STAY_TIMEOUT,
     create: (ctx, channelId, holdStrength) => prepareStayWatch(ctx, channelId, holdStrength),
   },
 };
 
 /**
- * 为 slot 启动非阻塞 watcher（waiting_reply 或 watching）。
+ * 为 slot 启动非阻塞 watcher。
  * watcher 结果通过 promise .then 自动流入 handleWatchResult。
  */
-export function startWatcher(ctx: ActContext, slot: EngagementSlot, kind: WatchKind): void {
+export function startWatcher(ctx: ActContext, slot: EngagementSlot, plan: WatchPlan): void {
   if (!slot.targetChannelId) {
     slot.state = "done";
     return;
   }
 
-  const config = WATCH_CONFIG[kind];
+  const config = WATCH_CONFIG[plan];
   const handle = config.create(ctx, slot.targetChannelId, slot.holdStrength);
   const promise = handle.await(config.timeout).then((result) => {
     handleWatchResult(ctx, slot, result);
     return result;
   });
 
-  slot.watcher = { kind, handle, promise, timeout: config.timeout };
+  slot.watcher = { plan, handle, promise, timeout: config.timeout };
   slot.state = config.slotState;
 }
 
@@ -262,7 +273,7 @@ export function startWatcher(ctx: ActContext, slot: EngagementSlot, kind: WatchK
  * 处理 watcher 结果——更新 slot 状态。
  * 在 watcher promise resolve 时自动调用。
  *
- * timeout outcome 由 `watcher.kind` 决定（而非 `slot.state`），
+ * timeout outcome 由 `watcher.plan` 决定（而非 `slot.state`），
  * 避免 handleWatchResult 依赖 slot 当前状态——在 promise 异步 resolve 时
  * slot.state 可能已被其他路径修改。
  */
@@ -271,8 +282,8 @@ function handleWatchResult(ctx: ActContext, slot: EngagementSlot, result: WatchR
   // 跳过整个 handler——避免在已 finalized 的 slot 上产生副作用。
   if (!slot.watcher) return;
 
-  // 捕获 kind 后清除 watcher（kind 用于 timeout outcome 判断）
-  const kind = slot.watcher.kind;
+  // 捕获 plan 后清除 watcher（plan 用于 timeout outcome 判断）
+  const plan = slot.watcher.plan;
   slot.session.elapsed += result.elapsed;
   slot.watcher = null;
 
@@ -307,14 +318,14 @@ function handleWatchResult(ctx: ActContext, slot: EngagementSlot, result: WatchR
       break;
 
     case "timeout":
-      // timeout outcome 取决于 watcher 来源语义：
-      // waiting_reply 超时 = 对方未回复 → "timeout"
-      // watching 超时 = 正常逗留结束 → "complete"
-      slot.session.outcome = kind === "waiting_reply" ? "timeout" : "complete";
+      // timeout outcome 取决于 runtime watch 计划：
+      // reply_window 超时 = 对方未回复 → "timeout"
+      // linger_window 超时 = 正常逗留结束 → "complete"
+      slot.session.outcome = plan === "reply_window" ? "timeout" : "complete";
       slot.state = "done";
       log.info("Watcher timeout", {
         target: slot.item.target,
-        kind,
+        plan,
         elapsed: result.elapsed,
       });
       break;

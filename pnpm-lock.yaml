@@ -99,6 +99,12 @@ importers:
       '@ai-sdk/openai-compatible':
         specifier: ^2.0.30
         version: 2.0.30(zod@3.25.76)
+      '@ax-llm/ax':
+        specifier: ^20.0.0
+        version: 20.0.0(zod@3.25.76)
+      '@faker-js/faker':
+        specifier: ^10.4.0
+        version: 10.4.0
       '@gutenye/ocr-node':
         specifier: ^1.4.8
         version: 1.4.8
@@ -135,6 +141,9 @@ importers:
       sharp:
         specifier: ^0.34.5
         version: 0.34.5
+      smol-toml:
+        specifier: ^1.6.1
+        version: 1.6.1
       sqlite-better-trigram:
         specifier: ^0.0.5
         version: 0.0.5
@@ -206,6 +215,15 @@ packages:
   '@alcalzone/ansi-tokenize@0.2.5':
     resolution: {integrity: sha512-3NX/MpTdroi0aKz134A6RC2Gb2iXVECN4QaAXnvCIxxIm3C3AVB1mkUe8NaaiyvOpDfsrqWhYtj+Q6a62RrTsw==}
     engines: {node: '>=18'}
+
+  '@ax-llm/ax@20.0.0':
+    resolution: {integrity: sha512-x2r7pVA+i3hZT3k9JnbkTjXS5eEqHoV7C3xT/R1Y84GWCSd4kZCia0fCikaRsCESUsoplT8rOwp5NFfSq+3N7w==}
+    hasBin: true
+    peerDependencies:
+      zod: ^3.24.0 || ^4.0.0
+    peerDependenciesMeta:
+      zod:
+        optional: true
 
   '@biomejs/biome@2.3.15':
     resolution: {integrity: sha512-u+jlPBAU2B45LDkjjNNYpc1PvqrM/co4loNommS9/sl9oSxsAQKsNZejYuUztvToB5oXi1tN/e62iNd6ESiY3g==}
@@ -713,6 +731,10 @@ packages:
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
+
+  '@faker-js/faker@10.4.0':
+    resolution: {integrity: sha512-sDBWI3yLy8EcDzgobvJTWq1MJYzAkQdpjXuPukga9wXonhpMRvd1Izuo2Qgwey2OiEoRIBr35RMU9HJRoOHzpw==}
+    engines: {node: ^20.19.0 || ^22.13.0 || ^23.5.0 || >=24.0.0, npm: '>=10'}
 
   '@fuman/io@0.0.19':
     resolution: {integrity: sha512-B+2n3GVa9PCYMJ9xfsdXUlUV9yXO4gKLYfxm815PeJ+MGOw5TbEp166drRmBq1AtxVnP0efy6Oz9rYpKVODgow==}
@@ -1442,6 +1464,9 @@ packages:
 
   csstype@3.2.3:
     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
+
+  dayjs@1.11.20:
+    resolution: {integrity: sha512-YbwwqR/uYpeoP4pu043q+LTDLFBLApUP6VxRihdfNTqu4ubqMlGDLd6ErXhEgsyvY0K6nCs7nggYumAN+9uEuQ==}
 
   debug@4.4.3:
     resolution: {integrity: sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==}
@@ -2534,6 +2559,13 @@ snapshots:
       ansi-styles: 6.2.3
       is-fullwidth-code-point: 5.1.0
 
+  '@ax-llm/ax@20.0.0(zod@3.25.76)':
+    dependencies:
+      '@opentelemetry/api': 1.9.0
+      dayjs: 1.11.20
+    optionalDependencies:
+      zod: 3.25.76
+
   '@biomejs/biome@2.3.15':
     optionalDependencies:
       '@biomejs/cli-darwin-arm64': 2.3.15
@@ -2810,6 +2842,8 @@ snapshots:
 
   '@esbuild/win32-x64@0.27.3':
     optional: true
+
+  '@faker-js/faker@10.4.0': {}
 
   '@fuman/io@0.0.19':
     dependencies:
@@ -3424,6 +3458,8 @@ snapshots:
   convert-to-spaces@2.0.1: {}
 
   csstype@3.2.3: {}
+
+  dayjs@1.11.20: {}
 
   debug@4.4.3:
     dependencies:

@@ -12,11 +12,21 @@ import { DEFAULT_DOCKER_IMAGE } from "../skills/backends/docker.js";
 import { ALICE_HOME, executeAliceSandboxProcess } from "../skills/container-runner.js";
 import { buildInstalledSkillEnv } from "../skills/registry.js";
 import { createLogger } from "../utils/logger.js";
-import type { ScriptExecutionResult } from "./script-execution.js";
+import {
+  type ExecutionObservation,
+  isExecutionObservation,
+  isScriptExecutionErrorCode,
+  isScriptExecutionErrorDetail,
+  type ScriptExecutionErrorDetail,
+  type ScriptExecutionResult,
+} from "./script-execution.js";
 import { validateScript } from "./script-validator.js";
 
 const log = createLogger("shell-executor");
 const ACTION_PREFIX = "__ALICE_ACTION__:";
+const ERROR_PREFIX = "__ALICE_ERROR__:";
+const ERROR_DETAIL_PREFIX = "__ALICE_ERROR_DETAIL__:";
+const OBSERVATION_PREFIX = "__ALICE_OBSERVATION__:";
 
 /**
  * 中心化清洗：剥离 CLI 输出中 LLM 不应看到的噪音。
@@ -67,7 +77,7 @@ export { ALICE_HOME };
  * @see src/skills/registry.ts — BUILTIN_SYSTEM_REGISTRY
  */
 // 预留：命令检测正则（preprocessScript 重构时使用）
-// const ALICE_COMMANDS = /\b(irc|self|engine|alice-pkg)\b/;
+// const ALICE_COMMANDS = /\b(irc|album|self|engine|alice-pkg)\b/;
 
 function preprocessScript(script: string): string {
   let s = script.trim();
@@ -76,6 +86,9 @@ function preprocessScript(script: string): string {
     s = s.replace(/\n?```$/, "");
   }
   s = s.trim();
+  // Structured outputs sometimes preserve the markdown language label as the
+  // first script line. The executor already invokes /bin/sh; strip the label.
+  s = s.replace(/^(?:sh|bash|shell)\s*\n/i, "").trim();
 
   // ── 单行归一化 ──
   // LLM 有时输出单行脚本：`# 思考1# 思考2irc say "hello" self feel ...`
@@ -87,7 +100,10 @@ function preprocessScript(script: string): string {
     // 2. 在已知命令名前插入换行（拆分命令）
     //    (?<=['"。！？.!?\s]) 要求前面是引号、标点或空白——避免拆碎单词
     //    \b 要求是完整命令名——`self-conscious` 中的 self 后面跟 `-` 不匹配
-    s = s.replace(/(?<=['"\u3002\uff01\uff1f.!?\s])((?:irc|self|engine|alice-pkg)\b)/g, "\n$1");
+    s = s.replace(
+      /(?<=['"\u3002\uff01\uff1f.!?\s])((?:irc|album|self|engine|alice-pkg)\b)/g,
+      "\n$1",
+    );
   }
 
   return s.trim();
@@ -144,6 +160,30 @@ function buildContextEnv(contextVars?: Record<string, unknown>): Record<string, 
   return env;
 }
 
+function parseObservationControlLine(line: string): ExecutionObservation | string {
+  const payload = line.slice(OBSERVATION_PREFIX.length);
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    if (isExecutionObservation(parsed)) return parsed;
+    return "invalid __ALICE_OBSERVATION__: expected {kind,source,text,enablesContinuation}";
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `invalid __ALICE_OBSERVATION__: ${message}`;
+  }
+}
+
+function parseErrorDetailControlLine(line: string): ScriptExecutionErrorDetail | string {
+  const payload = line.slice(ERROR_DETAIL_PREFIX.length);
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    if (isScriptExecutionErrorDetail(parsed)) return parsed;
+    return "invalid __ALICE_ERROR_DETAIL__: expected structured error detail";
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `invalid __ALICE_ERROR_DETAIL__: ${message}`;
+  }
+}
+
 export async function executeShellScript(
   script: string,
   opts: { contextVars?: Record<string, unknown> },
@@ -154,9 +194,12 @@ export async function executeShellScript(
     logs: [],
     errors: [],
     instructionErrors: [],
+    errorCodes: [],
+    errorDetails: [],
     duration: 0,
     thinks: [],
     queryLogs: [],
+    observations: [],
     completedActions: [],
     silenceReason: null,
   };
@@ -176,6 +219,7 @@ export async function executeShellScript(
     result.instructionErrors.push(
       ...validation.errors.map((err) => `line ${err.line}: ${err.message}`),
     );
+    result.errorCodes.push("script_validation");
     result.duration = Date.now() - startedAt;
     return result;
   }
@@ -187,7 +231,7 @@ export async function executeShellScript(
     extraEnv: buildContextEnv(opts.contextVars),
   });
 
-  const execResult = await executeInContainer(processed, env);
+  const execResult = await executeInContainer(`set -e\n${processed}`, env);
 
   // 中心化清洗：在数据入口点一处清洗，全链路受益
   const cleanStdout = sanitizeForLLM(execResult.stdout);
@@ -203,18 +247,48 @@ export async function executeShellScript(
       result.completedActions.push(line.slice(ACTION_PREFIX.length));
       return false; // 过滤掉，不进入 visible logs
     }
+    if (line.startsWith(OBSERVATION_PREFIX)) {
+      const observation = parseObservationControlLine(line);
+      if (typeof observation === "string") {
+        result.instructionErrors.push(observation);
+      } else {
+        result.observations.push(observation);
+      }
+      return false;
+    }
     return true;
   });
   if (visibleStdout.length > 0) {
     result.logs.push(...visibleStdout);
   }
 
-  const stderrText = cleanStderr.trim();
-  if (stderrText) {
-    result.errors.push(stderrText);
+  const stderrLines = cleanStderr
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0);
+  const visibleStderr = stderrLines.filter((line) => {
+    if (line.startsWith(ERROR_DETAIL_PREFIX)) {
+      const detail = parseErrorDetailControlLine(line);
+      if (typeof detail === "string") {
+        result.instructionErrors.push(detail);
+      } else {
+        result.errorDetails?.push(detail);
+      }
+      return false;
+    }
+    if (line.startsWith(ERROR_PREFIX)) {
+      const code = line.slice(ERROR_PREFIX.length);
+      if (isScriptExecutionErrorCode(code)) result.errorCodes.push(code);
+      return false;
+    }
+    return true;
+  });
+  if (visibleStderr.length > 0) {
+    result.errors.push(visibleStderr.join("\n"));
   }
-  if (execResult.code !== 0 && !stderrText) {
+  if (execResult.code !== 0 && visibleStderr.length === 0) {
     result.errors.push(`Shell exited with status ${execResult.code}`);
+    result.errorCodes.push("shell_nonzero");
   }
 
   result.duration = Date.now() - startedAt;

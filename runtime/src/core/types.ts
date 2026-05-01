@@ -84,7 +84,10 @@ export interface InstructionDefinition {
    * 上下文注入：当 LLM 未传某 param 时，从 sandbox contextVars 自动填充。
    * key = param 名, value = 从 contextVars 派生默认值的函数。
    */
-  deriveParams?: Record<string, (contextVars: Record<string, unknown>) => unknown>;
+  deriveParams?: Record<
+    string,
+    (contextVars: Record<string, unknown>, args?: Record<string, unknown>) => unknown
+  >;
 
   /**
    * 每轮调用上限。数字 = 独立配额，{ limit, group } = 共享配额。
@@ -109,7 +112,10 @@ export interface QueryDefinition {
   returnHint?: string;
   impl: (ctx: ModContext, args: Record<string, unknown>) => unknown;
   /** 上下文注入：当 LLM 未传某 param 时，从 sandbox contextVars 自动注入。 */
-  deriveParams?: Record<string, (contextVars: Record<string, unknown>) => unknown>;
+  deriveParams?: Record<
+    string,
+    (contextVars: Record<string, unknown>, args?: Record<string, unknown>) => unknown
+  >;
   /**
    * 将 impl 返回值格式化为 LLM 可读文本。
    * 省略时 fallback 到 JSON.stringify。

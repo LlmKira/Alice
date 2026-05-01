@@ -13,7 +13,7 @@ import {
   searchThreadsFts,
 } from "../../db/fts.js";
 import { activationRetrieval } from "../../graph/activation.js";
-import { CHANNEL_PREFIX, CONTACT_PREFIX } from "../../graph/constants.js";
+import { telegramChannelId, telegramContactId } from "../../graph/constants.js";
 import { defineAction } from "../action-builder.js";
 import { readNotesContract, unifiedSearchContract } from "../action-contracts.js";
 import type {
@@ -69,9 +69,8 @@ export const searchActions: TelegramActionDef[] = [
       if (!expression) return false;
 
       const source = (args.source ?? "all") as "messages" | "diary" | "threads" | "all";
-      // ADR-155: number Telegram ID → graph ID 格式（channel:xxx / contact:xxx）给 FTS 查询
-      const chatId = args.chatId != null ? `${CHANNEL_PREFIX}${args.chatId}` : undefined;
-      const senderId = args.senderId != null ? `${CONTACT_PREFIX}${args.senderId}` : undefined;
+      const chatId = args.chatId != null ? telegramChannelId(args.chatId) : undefined;
+      const senderId = args.senderId != null ? telegramContactId(args.senderId) : undefined;
       const limit = args.limit != null ? Math.min(args.limit, 20) : 10;
 
       let afterTs: number | undefined;

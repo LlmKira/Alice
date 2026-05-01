@@ -2,25 +2,45 @@
  * EVOLVE 线程：定时 tick 循环 (ADR-26 v5)。
  *
  * 每 tick：
- * 1. Self 维护（mood 衰减）
+ * 1. Self 维护（情绪 projection 刷新）
  * 2. PERCEIVE（消费事件）
  * 3. 计算压力 → 张力 Map → 焦点集 → 声部 → 选行动/目标
  * 4. 门控（行动频率限制 + Social Value Gate）
  * 5. 通过则 enqueue 到 ActionQueue
  *
- * ADR-30: self mood decay, digest 行动, System1Options.
+ * ADR-268: self affect projection, digest 行动, System1Options.
  */
 
+import { eq } from "drizzle-orm";
 import type { Config } from "../config.js";
 import type { Dispatcher } from "../core/dispatcher.js";
 import { typedQuery } from "../core/query-helpers.js";
 import { writeAuditEvent } from "../db/audit.js";
 import { getDb } from "../db/connection.js";
+import { type DecisionTracePayload, writeDecisionTrace } from "../db/decision-trace.js";
 import { gcExpiredFacts } from "../db/maintenance.js";
-import { silenceLog, tickLog } from "../db/schema.js";
+import {
+  makeCandidateId,
+  makeEnqueueId,
+  makeRankedCandidateId,
+  pressureVectorFromDims,
+  writeCandidateTrace,
+  writePressureDeltasForPreviousTrace,
+  writeQueueTrace,
+  writeTickTrace,
+} from "../db/observation-spine.js";
+import { rhythmProfiles, silenceLog, tickLog } from "../db/schema.js";
 import { flushGraph } from "../db/snapshot.js";
 import { computeClosureHealth } from "../diagnostics/closure-health.js";
-import { ALICE_SELF, chatIdToContactId } from "../graph/constants.js";
+import { appraiseLonelySilence } from "../emotion/appraisal.js";
+import { updateEmotionStateOnGraph } from "../emotion/graph.js";
+import {
+  ALICE_SELF,
+  chatIdToContactId,
+  ensureChannelId,
+  ensureContactId,
+  extractNumericId,
+} from "../graph/constants.js";
 import type { DunbarTier } from "../graph/entities.js";
 import { buildTensionMap, routeContributions } from "../graph/tension.js";
 import type { WorldModel } from "../graph/world-model.js";
@@ -105,7 +125,10 @@ import { runGenerators, updateChannelRateEma } from "./generators.js";
 import {
   assembleIAUSReason,
   type CandidateContext,
+  type IAUSCandidate,
   type IAUSConfig,
+  type IAUSScoredCandidate,
+  type RhythmTimingProfile,
   scoreAllCandidates,
 } from "./iaus-scorer.js";
 import { perceiveTick } from "./perceive.js";
@@ -113,6 +136,12 @@ import { classifySilence, computeVoINull } from "./silence.js";
 import { trySystem1 } from "./system1.js";
 
 const log = createLogger("evolve");
+
+/** ADR-252 Wave 1: queue/ACT active saturation at or above this value suppresses non-bypass IAUS winners. */
+const IAUS_QUEUE_BACKPRESSURE_SATURATION = 0.8;
+/** Post-wakeup recovery: briefly keep Alice on a small set of already-open targets. */
+export const POST_WAKEUP_RECOVERY_MS = 10 * 60 * 1000;
+const POST_WAKEUP_RECOVERY_TARGET_BUDGET = 2;
 
 /**
  * ADR-64 II-2: 记录沉默事件到 silence_log 表。
@@ -212,6 +241,8 @@ export interface EvolveState {
   wakeupTicksElapsed: number;
   /** ADR-190: wakeup 期间已主动接触的目标（允许继续同一对话，限制新目标扩散）。 */
   wakeupEngagedTargets: Set<string>;
+  /** Post-wakeup recovery window end timestamp. Ordinary proactive stays near wakeup targets. */
+  wakeupRecoveryUntilMs?: number;
   /** 最近一次 API 聚合值（供 startEvolveLoop 计算 interval 使用）。 */
   lastAPI: number;
   /** ADR-195: Peak-based API — 驱动 tick 间隔调度。 */
@@ -287,28 +318,25 @@ function enqueueAndRecord(
   pressures: AllPressures,
   focalEntities: string[],
   reason?: string,
-  vmaxScored?: Array<{
-    action: string;
-    target: string | null;
-    V: number;
-    bypassGates: boolean;
-    bottleneck: string;
-  }>,
+  vmaxScored?: IAUSScoredCandidate[],
   vmaxSpread?: number,
   facetId?: string,
 ): void {
-  state.queue.enqueue({
+  const candidateId = makeCandidateId(tick, action, target);
+  const enqueueId = makeEnqueueId(tick, action, target);
+  const pressureSnapshot: [number, number, number, number, number, number] = [
+    pressures.P1,
+    pressures.P2,
+    pressures.P3,
+    pressures.P4,
+    pressures.P5,
+    pressures.P6,
+  ];
+  const item = {
     enqueueTick: tick,
     action,
     target,
-    pressureSnapshot: [
-      pressures.P1,
-      pressures.P2,
-      pressures.P3,
-      pressures.P4,
-      pressures.P5,
-      pressures.P6,
-    ],
+    pressureSnapshot,
     contributions: pressures.contributions,
     focalEntities,
     reason,
@@ -320,7 +348,35 @@ function enqueueAndRecord(
     episodeId:
       state.episodeState.currentId ??
       (target && target !== state.episodeState.currentTarget ? `episode:${tick}` : undefined),
+    observation: { candidateId, enqueueId, api: pressures.API, apiPeak: pressures.API_peak },
+  };
+  const result = state.queue.enqueue(item);
+  const metrics = state.queue.getMetrics();
+  writeQueueTrace({
+    tick,
+    candidateId,
+    enqueueId,
+    enqueueOutcome: result.outcome,
+    fate: result.outcome === "accepted" ? "accepted" : "dropped",
+    queueDepth: metrics.queued,
+    activeCount: metrics.active,
+    saturation: metrics.saturation,
+    reasonCode: result.outcome === "accepted" ? `enqueue_${result.delivery}` : "rejected_overflow",
   });
+  if (result.evicted?.observation) {
+    writeQueueTrace({
+      tick,
+      candidateId: result.evicted.observation.candidateId,
+      enqueueId: result.evicted.observation.enqueueId,
+      enqueueOutcome: "accepted",
+      fate: "dropped",
+      queueDepth: metrics.queued,
+      activeCount: metrics.active,
+      saturation: metrics.saturation,
+      supersededByEnqueueId: enqueueId,
+      reasonCode: "overflow_evicted",
+    });
+  }
   state.lastActionMs = nowMs;
   // ADR-173: recentActions 不在此写入——由 act 确认后通过 recordAction 回调写入。
   // lastActionMs 保留乐观更新：语义是"Alice 上次打算行动的时间"（idle 判断），
@@ -355,13 +411,7 @@ type TickPlan =
       /** ADR-115: softmax 选中概率。 */
       selectedProbability?: number;
       /** D8: V-max 评分候选（fan-out 用）。 */
-      vmaxScored?: Array<{
-        action: string;
-        target: string | null;
-        V: number;
-        bypassGates: boolean;
-        bottleneck: string;
-      }>;
+      vmaxScored?: IAUSScoredCandidate[];
       /** D8: V-max 候选 spread（fan-out 触发条件）。 */
       vmaxSpread?: number;
       /** ADR-174: 人格面向 ID。 */
@@ -386,6 +436,8 @@ type TickPlan =
       focalEntities: string[];
       /** ADR-75: VoI-deferred 时携带的高 V 冲动（applyPlan 中执行 addImpulse）。 */
       impulseToRetain?: Omit<PendingImpulse, "decay" | "salience">;
+      /** ADR-258: 即使最终沉默，也保留本 tick 曾评分的 IAUS 候选池。 */
+      vmaxScored?: IAUSScoredCandidate[];
     }
   | { type: "skip"; reason: string };
 
@@ -400,6 +452,298 @@ function formatGateVerdict(plan: TickPlan): string {
       return `silent:${plan.level}`;
     case "skip":
       return `skip:${plan.reason}`;
+  }
+}
+
+function pressureTracePayload(pressures: AllPressures): Record<string, number> {
+  return {
+    p1: pressures.P1,
+    p2: pressures.P2,
+    p3: pressures.P3,
+    p4: pressures.P4,
+    p5: pressures.P5,
+    p6: pressures.P6,
+    api: pressures.API,
+    apiPeak: pressures.API_peak,
+  };
+}
+
+function pressureVectorSnapshot(pressures: AllPressures) {
+  return pressureVectorFromDims(
+    [pressures.P1, pressures.P2, pressures.P3, pressures.P4, pressures.P5, pressures.P6],
+    pressures.API,
+    pressures.API_peak,
+  );
+}
+
+function silenceValuesFromCandidate(
+  candidate: IAUSCandidate,
+  bestV: number,
+  apiValue: number,
+  extra: SilenceValues = {},
+): SilenceValues {
+  return {
+    ...extra,
+    netValue: bestV,
+    deltaP: candidate.deltaP,
+    socialCost: candidate.socialCost,
+    apiValue,
+  };
+}
+
+function makeRhythmTimingProfileReader(): (
+  target: string,
+  chatType?: string,
+) => RhythmTimingProfile | null {
+  const cache = new Map<string, RhythmTimingProfile | null>();
+
+  return (target: string, chatType?: string) => {
+    const cacheKey = `${chatType ?? "unknown"}:${target}`;
+    if (cache.has(cacheKey)) return cache.get(cacheKey) ?? null;
+
+    try {
+      for (const entityId of rhythmProfileLookupIds(target, chatType)) {
+        const row = getDb()
+          .select({
+            activeNowScore: rhythmProfiles.activeNowScore,
+            quietNowScore: rhythmProfiles.quietNowScore,
+            confidence: rhythmProfiles.confidence,
+            stale: rhythmProfiles.stale,
+          })
+          .from(rhythmProfiles)
+          .where(eq(rhythmProfiles.entityId, entityId))
+          .get();
+
+        const profile = row ? rhythmTimingProfileFromRow(row) : null;
+        if (profile) {
+          cache.set(cacheKey, profile);
+          return profile;
+        }
+      }
+
+      const profile = null;
+      cache.set(cacheKey, profile);
+      return profile;
+    } catch {
+      cache.set(cacheKey, null);
+      return null;
+    }
+  };
+}
+
+function rhythmProfileLookupIds(target: string, chatType?: string): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const push = (id: string | null) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    ids.push(id);
+  };
+
+  push(target);
+  const channelId = ensureChannelId(target);
+  const contactId = positiveContactId(target);
+  if (chatType === "private") {
+    push(contactId);
+    push(channelId);
+    return ids;
+  }
+
+  push(channelId);
+  if (chatType !== "channel") push(contactId);
+  return ids;
+}
+
+function positiveContactId(target: string): string | null {
+  const numericId = extractNumericId(target);
+  if (numericId == null || numericId < 0) return null;
+  return ensureContactId(String(numericId));
+}
+
+function rhythmTimingProfileFromRow(row: {
+  activeNowScore: number;
+  quietNowScore: number;
+  confidence: string;
+  stale: boolean;
+}): RhythmTimingProfile | null {
+  if (row.confidence !== "low" && row.confidence !== "medium" && row.confidence !== "high") {
+    return null;
+  }
+  return {
+    activeNowScore: row.activeNowScore,
+    quietNowScore: row.quietNowScore,
+    confidence: row.confidence,
+    stale: row.stale,
+  };
+}
+
+type CandidateTracePayload = {
+  [key: string]: number | IAUSScoredCandidate["diagnostics"] | undefined;
+  __diagnostics?: IAUSScoredCandidate["diagnostics"];
+};
+
+function traceConsiderations(
+  candidate: IAUSScoredCandidate | null | undefined,
+): CandidateTracePayload {
+  if (!candidate) return {};
+  if (!candidate.diagnostics || Object.keys(candidate.diagnostics).length === 0) {
+    return candidate.considerations;
+  }
+  return {
+    ...candidate.considerations,
+    __diagnostics: candidate.diagnostics,
+  };
+}
+
+function planCandidateId(tick: number, plan: Exclude<TickPlan, { type: "skip" }>): string | null {
+  if (plan.type === "system1") return null;
+  if (plan.type === "enqueue") return makeCandidateId(tick, plan.action, plan.target);
+  return makeCandidateId(tick, plan.voice, plan.target);
+}
+
+function recordObservationSpineTick(tick: number, nowMs: number, plan: TickPlan): void {
+  if (plan.type === "skip") return;
+  const pressureVector = pressureVectorSnapshot(plan.pressures);
+  try {
+    writePressureDeltasForPreviousTrace(tick, pressureVector);
+    const candidateId = planCandidateId(tick, plan);
+    writeTickTrace({
+      tick,
+      occurredAtMs: nowMs,
+      pressureVector,
+      schedulerPhase: plan.type,
+      selectedCandidateId: candidateId,
+      silenceMarker: plan.type === "silent" ? plan.reason : null,
+      sampleStatus: "real",
+    });
+    if (plan.type === "enqueue") {
+      const selectedRank = plan.vmaxScored?.findIndex(
+        (candidate) => candidate.action === plan.action && candidate.target === plan.target,
+      );
+      const selected =
+        selectedRank !== undefined && selectedRank >= 0 ? plan.vmaxScored?.[selectedRank] : null;
+      writeCandidateTrace({
+        candidateId: candidateId ?? makeCandidateId(tick, plan.action, plan.target),
+        tick,
+        target: plan.target,
+        actionType: plan.action,
+        normalizedConsiderations: traceConsiderations(selected),
+        deltaP: plan.deltaP ?? null,
+        socialCost: plan.socialCost ?? null,
+        netValue: plan.netValue,
+        bottleneck: selected?.bottleneck ?? null,
+        gatePlane: plan.reason === "directed_override" ? "directed_override" : "none",
+        selected: true,
+        candidateRank: selectedRank !== undefined && selectedRank >= 0 ? selectedRank : null,
+        silenceReason: "N/A",
+        sampleStatus: "real",
+      });
+      for (const [rank, candidate] of (plan.vmaxScored ?? []).entries()) {
+        if (rank === selectedRank) continue;
+        writeCandidateTrace({
+          candidateId: makeRankedCandidateId(tick, candidate.action, candidate.target, rank),
+          tick,
+          target: candidate.target,
+          actionType: candidate.action,
+          normalizedConsiderations: traceConsiderations(candidate),
+          deltaP: candidate.deltaP,
+          socialCost: candidate.socialCost,
+          netValue: candidate.netValue,
+          bottleneck: candidate.bottleneck,
+          gatePlane: "iaus_competition",
+          selected: false,
+          candidateRank: rank,
+          silenceReason: "lost_candidate",
+          sampleStatus: "real",
+        });
+      }
+    } else if (plan.type === "silent") {
+      writeCandidateTrace({
+        candidateId: candidateId ?? makeCandidateId(tick, plan.voice, plan.target),
+        tick,
+        target: plan.target,
+        actionType: plan.voice,
+        normalizedConsiderations: plan.values,
+        deltaP: plan.values.deltaP ?? null,
+        socialCost: plan.values.socialCost ?? null,
+        netValue: plan.values.netValue ?? null,
+        bottleneck: plan.reason,
+        gatePlane: "policy",
+        selected: false,
+        candidateRank: null,
+        silenceReason: plan.reason,
+        retainedImpulse: plan.impulseToRetain ?? null,
+        sampleStatus: plan.values.netValue == null ? "partial" : "real",
+      });
+      for (const [rank, candidate] of (plan.vmaxScored ?? []).entries()) {
+        writeCandidateTrace({
+          candidateId: makeRankedCandidateId(tick, candidate.action, candidate.target, rank),
+          tick,
+          target: candidate.target,
+          actionType: candidate.action,
+          normalizedConsiderations: traceConsiderations(candidate),
+          deltaP: candidate.deltaP,
+          socialCost: candidate.socialCost,
+          netValue: candidate.netValue,
+          bottleneck: candidate.bottleneck,
+          gatePlane: "iaus_competition",
+          selected: false,
+          candidateRank: rank,
+          silenceReason: "lost_candidate",
+          sampleStatus: "real",
+        });
+      }
+    }
+  } catch (e) {
+    log.warn("Failed to write ADR-258 observation spine", e);
+  }
+}
+
+function isPostWakeupRecoveryActive(state: EvolveState, nowMs: number): boolean {
+  return state.mode !== "wakeup" && (state.wakeupRecoveryUntilMs ?? 0) > nowMs;
+}
+
+/** ADR-248 W1: EVOLVE decision_trace 写入。只写审计事实，不参与控制流。 */
+function recordEvolveDecisionTrace(tick: number, plan: TickPlan): void {
+  if (plan.type === "skip") return;
+
+  const payload: DecisionTracePayload = {
+    pressureOutput: pressureTracePayload(plan.pressures),
+    selectedVoice: plan.voice,
+    selectedAction:
+      plan.type === "enqueue" ? plan.action : plan.type === "system1" ? plan.decision.action : null,
+    gateResults: [{ verdict: formatGateVerdict(plan) }],
+  };
+
+  if (plan.type === "enqueue") {
+    payload.candidates = plan.vmaxScored;
+    payload.netValue = plan.netValue;
+    payload.deltaP = plan.deltaP ?? null;
+    payload.socialCost = plan.socialCost ?? null;
+    payload.selectedProbability = plan.selectedProbability ?? null;
+    payload.facetId = plan.facetId ?? null;
+    payload.reason = plan.reason ?? null;
+  } else if (plan.type === "silent") {
+    payload.silenceLevel = plan.level;
+    payload.values = plan.values;
+    payload.reason = plan.reason;
+    payload.retainedImpulse = plan.impulseToRetain ?? null;
+  } else {
+    payload.reason = `system1:${plan.decision.action}`;
+  }
+
+  try {
+    writeDecisionTrace({
+      tick,
+      phase: "evolve",
+      target: "target" in plan ? plan.target : null,
+      finalDecision:
+        plan.type === "enqueue" ? "enqueue" : plan.type === "silent" ? "silence" : "execute",
+      reason: formatGateVerdict(plan),
+      payload,
+    });
+  } catch (e) {
+    log.warn("Failed to write evolve decision trace", e);
   }
 }
 
@@ -724,7 +1068,6 @@ function computeTickPlan(
   // System 1 快速路径
   const s1 = trySystem1(action, focalSets, G, tick, {
     leakProb: config.s10LeakProb,
-    moodDecayHalfLife: config.moodHalfLife,
     isConversationContinuation: isContinuation,
     nowMs, // ADR-124: effectiveObligation 需要墙钟时间
   });
@@ -768,6 +1111,7 @@ function computeTickPlan(
   const candidateCtx: CandidateContext = {
     G,
     nowMs,
+    getRhythmTimingProfile: makeRhythmTimingProfileReader(),
     // ADR-153: Hawkes 对话热度 discount — λ(t) 高 → discount 低 → 社交成本降低
     getHawkesDiscount: (target: string) => {
       if (!G.has(target)) return 1.0;
@@ -882,10 +1226,29 @@ function computeTickPlan(
   };
 
   let iausResult = scoreAllCandidates(tensionMap, G, tick, state.recentActions, iausConfig);
+  let lastIausScored: IAUSScoredCandidate[] | undefined = iausResult?.scored;
   let perTargetRetryCount = 0;
+  let postWakeupRecoverySuppression: {
+    action: VoiceAction;
+    target: string | null;
+    bestV: number;
+    deltaP: number;
+    socialCost: number;
+    focalEntities: string[];
+  } | null = null;
+  let queueBackpressureSuppression: {
+    action: VoiceAction;
+    target: string | null;
+    bestV: number;
+    deltaP: number;
+    socialCost: number;
+    focalEntities: string[];
+    metrics: ReturnType<ActionQueue["getMetrics"]>;
+  } | null = null;
 
   // eslint-disable-next-line no-constant-condition
   while (iausResult) {
+    lastIausScored = iausResult.scored;
     const { candidate: best, bestV } = iausResult;
 
     // Engagement Exclusivity: IAUS 赢家的 target 可能已有活跃 engagement。
@@ -901,6 +1264,7 @@ function computeTickPlan(
           ...iausConfig,
           excludeTargets: excludedTargets,
         });
+        lastIausScored = iausResult?.scored ?? lastIausScored;
         continue;
       }
       iausResult = null;
@@ -917,6 +1281,61 @@ function computeTickPlan(
         });
         iausResult = null;
         break; // → directedCandidate fallback（义务消息仍可通过）
+      }
+    }
+
+    // Post-wakeup recovery: wakeup 毕业后短时间仍保留“先处理已打开目标”的惯性。
+    // 只压普通 proactive 的新目标扩散；directed / continuation bypass 不受影响。
+    if (
+      isPostWakeupRecoveryActive(state, nowMs) &&
+      best.target &&
+      !iausResult.winnerBypassGates &&
+      !state.wakeupEngagedTargets.has(best.target) &&
+      state.wakeupEngagedTargets.size >= POST_WAKEUP_RECOVERY_TARGET_BUDGET
+    ) {
+      log.info("Post-wakeup recovery — suppressing new proactive target", {
+        target: best.target,
+        engaged: state.wakeupEngagedTargets.size,
+        recoveryRemainingMs: Math.max(0, (state.wakeupRecoveryUntilMs ?? 0) - nowMs),
+      });
+      postWakeupRecoverySuppression = {
+        action: best.action,
+        target: best.target ?? null,
+        bestV,
+        deltaP: best.deltaP,
+        socialCost: best.socialCost,
+        focalEntities: best.focalEntities,
+      };
+      iausResult = null;
+      break; // → directedCandidate fallback；无义务则记录 post_wakeup_recovery
+    }
+
+    // ADR-252 Wave 1: Queue/ACT 背压属于 Execution Resource Plane。
+    // 只抑制普通 proactive 赢家；directed / continuation 等 bypass 义务继续入队。
+    {
+      const queueMetrics = state.queue.getMetrics();
+      if (
+        !iausResult.winnerBypassGates &&
+        queueMetrics.saturation >= IAUS_QUEUE_BACKPRESSURE_SATURATION
+      ) {
+        log.info("IAUS queue backpressure — suppressing non-bypass winner", {
+          target: best.target,
+          action: best.action,
+          saturation: queueMetrics.saturation,
+          active: queueMetrics.active,
+          maxDepth: queueMetrics.maxDepth,
+        });
+        queueBackpressureSuppression = {
+          action: best.action,
+          target: best.target ?? null,
+          bestV,
+          deltaP: best.deltaP,
+          socialCost: best.socialCost,
+          focalEntities: best.focalEntities,
+          metrics: queueMetrics,
+        };
+        iausResult = null;
+        break; // → directedCandidate fallback；无义务则走普通沉默路径
       }
     }
 
@@ -945,8 +1364,9 @@ function computeTickPlan(
         target: best.target ?? null,
         reason: "voi_deferred",
         level: silLvl,
-        values: { netValue: bestV, apiValue: pressures.API },
+        values: silenceValuesFromCandidate(best, bestV, pressures.API),
         focalEntities: best.focalEntities,
+        vmaxScored: iausResult.scored,
         impulseToRetain:
           best.netValue >= IMPULSE_MIN_VALUE
             ? {
@@ -985,8 +1405,9 @@ function computeTickPlan(
         target: best.target ?? null,
         reason: apiVerdict.reason,
         level: silLvl,
-        values: apiVerdict.values ?? {},
+        values: silenceValuesFromCandidate(best, bestV, pressures.API, apiVerdict.values ?? {}),
         focalEntities: best.focalEntities,
+        vmaxScored: iausResult.scored,
       };
     }
 
@@ -1014,8 +1435,9 @@ function computeTickPlan(
           target: best.target ?? null,
           reason: coolVerdict.reason,
           level: silLvl,
-          values: coolVerdict.values ?? {},
+          values: silenceValuesFromCandidate(best, bestV, pressures.API, coolVerdict.values ?? {}),
           focalEntities: best.focalEntities,
+          vmaxScored: iausResult.scored,
         };
       }
     }
@@ -1104,9 +1526,67 @@ function computeTickPlan(
           reason: "directed_override",
           focalEntities: directedCandidate.focalEntities,
           netValue: 0.01,
+          vmaxScored: lastIausScored,
           facetId: facet.id,
         };
       }
+    }
+
+    if (postWakeupRecoverySuppression) {
+      const {
+        action: suppressedAction,
+        bestV,
+        deltaP,
+        focalEntities,
+        socialCost,
+        target: suppressedTarget,
+      } = postWakeupRecoverySuppression;
+      const silLvl = classifySilence(pressures.API, config.actionRateFloor, bestV, 0, true);
+      return {
+        type: "silent",
+        pressures,
+        voice: suppressedAction,
+        target: suppressedTarget,
+        reason: "post_wakeup_recovery",
+        level: silLvl,
+        values: { netValue: bestV, deltaP, socialCost, apiValue: pressures.API },
+        focalEntities,
+        vmaxScored: lastIausScored,
+      };
+    }
+
+    if (queueBackpressureSuppression) {
+      const {
+        action: suppressedAction,
+        bestV,
+        deltaP,
+        focalEntities,
+        metrics,
+        socialCost,
+        target: suppressedTarget,
+      } = queueBackpressureSuppression;
+      const silLvl = classifySilence(pressures.API, config.actionRateFloor, bestV, 0, true);
+      return {
+        type: "silent",
+        pressures,
+        voice: suppressedAction,
+        target: suppressedTarget,
+        reason: "queue_backpressure",
+        level: silLvl,
+        values: {
+          netValue: bestV,
+          deltaP,
+          socialCost,
+          apiValue: pressures.API,
+          queueQueued: metrics.queued,
+          queueProcessing: metrics.processing,
+          queueActive: metrics.active,
+          queueSaturation: metrics.saturation,
+          queueBackpressureThreshold: IAUS_QUEUE_BACKPRESSURE_SATURATION,
+        },
+        focalEntities,
+        vmaxScored: lastIausScored,
+      };
     }
 
     // 所有候选被过滤 — 沉默
@@ -1122,6 +1602,7 @@ function computeTickPlan(
       level: silLvl,
       values: { apiValue: pressures.API },
       focalEntities: focal.entities,
+      vmaxScored: lastIausScored,
     };
   }
 
@@ -1224,6 +1705,9 @@ function applyPlan(state: EvolveState, plan: TickPlan, tick: number, nowMs: numb
     }
   }
 
+  recordObservationSpineTick(tick, nowMs, plan);
+  recordEvolveDecisionTrace(tick, plan);
+
   // 2. 按 plan 类型执行
   switch (plan.type) {
     case "skip":
@@ -1258,8 +1742,8 @@ function applyPlan(state: EvolveState, plan: TickPlan, tick: number, nowMs: numb
       // ADR-180: consecutive_caution_acts 追踪已移除——IAUS 不产出 "caution" action type，
       // Caution 已折叠为 U_conflict_avoidance 共享 Consideration。
 
-      // ADR-190: wakeup 期间追踪已接触目标
-      if (state.mode === "wakeup" && plan.target) {
+      // ADR-190 + post-wakeup recovery: 追踪已接触目标，限制恢复期新目标扩散。
+      if ((state.mode === "wakeup" || isPostWakeupRecoveryActive(state, nowMs)) && plan.target) {
         state.wakeupEngagedTargets.add(plan.target);
       }
 
@@ -1324,7 +1808,7 @@ function updateSlidingWindows(state: EvolveState, eventCount: number): void {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function dominantDimension(p: AllPressures): string {
-  const dims: [string, number][] = [
+  const dims: [[string, number], ...[string, number][]] = [
     ["P1", p.P1],
     ["P2", p.P2],
     ["P3", p.P3],
@@ -1332,7 +1816,7 @@ function dominantDimension(p: AllPressures): string {
     ["P5", p.P5],
     ["P6", p.P6],
   ];
-  let best = dims[0]!;
+  let best = dims[0];
   for (const d of dims) {
     if (d[1] > best[1]) best = d;
   }
@@ -1413,8 +1897,10 @@ function transitionMode(
         state.mode = "patrol";
         state.focusTarget = undefined;
         state.modeEnteredMs = now;
+        state.wakeupRecoveryUntilMs = now + POST_WAKEUP_RECOVERY_MS;
         log.info("Mode transition: wakeup → patrol (graduated)", {
           ticksElapsed: state.wakeupTicksElapsed,
+          recoveryMs: POST_WAKEUP_RECOVERY_MS,
         });
       }
       // wakeup 期间不转换到其他模态
@@ -1536,6 +2022,8 @@ function transitionMode(
         state.focusTarget = undefined;
         state.modeEnteredMs = now;
         state.wakeupTicksElapsed = 0;
+        state.wakeupEngagedTargets.clear();
+        state.wakeupRecoveryUntilMs = undefined;
         log.info("Mode transition: dormant → wakeup (quiet window ended)", { localHour });
         break;
       }
@@ -1546,6 +2034,8 @@ function transitionMode(
         state.focusTarget = undefined;
         state.modeEnteredMs = now;
         state.wakeupTicksElapsed = 0;
+        state.wakeupEngagedTargets.clear();
+        state.wakeupRecoveryUntilMs = undefined;
         log.info("Mode transition: dormant → wakeup (intimate directed)", { localHour });
         break;
       }
@@ -1585,7 +2075,8 @@ export function evolveTick(state: EvolveState): boolean {
 
   try {
     // Phase 1: 图准备（压力计算前的必要突变）
-    selfMoodDecay(state.G, nowMs, state.config.moodHalfLife);
+    appraiseLonelySilence(state.G, nowMs);
+    updateEmotionStateOnGraph(state.G, nowMs);
     state.G.beliefs.decayAll(nowMs);
     const { eventCount, channelCounts } = perceiveTick(
       state.G,
@@ -1699,6 +2190,9 @@ export function evolveTick(state: EvolveState): boolean {
     const timeSinceFlushS = (now - state.lastFlushMs) / 1000;
     if (timeSinceFlushS > state.config.snapshotIntervalS) {
       try {
+        if (state.G.has(ALICE_SELF)) {
+          state.G.updateAgent(ALICE_SELF, { runtime_last_seen_ms: now });
+        }
         flushGraph(state.G);
         state.lastFlushMs = now;
       } catch (e) {
@@ -1793,34 +2287,6 @@ export function evolveTick(state: EvolveState): boolean {
 }
 
 // -- ADR-30: Self mood decay ------------------------------------------------
-
-/**
- * ADR-89: 温暖基线 — 情绪衰减的终点不是"无感"(0)，是"温柔"(0.05)。
- * 人类在无刺激时不会完全情绪归零，而是回到一个轻微正向的基线状态。
- */
-const WARM_BASELINE = 0.05;
-
-/**
- * ADR-110: Self 节点情绪衰减：每 tick 执行一次（压力计算之前）。
- *
- * 衰减向 WARM_BASELINE 而非 0 收敛：
- *   mood_effective = WARM_BASELINE + (mood_valence - WARM_BASELINE) × decay
- *
- * halfLife 单位为秒。读取 mood_set_ms 墙钟时间戳。
- * 仅更新 mood_effective，保留 mood_valence 原始值（供 feel() 覆盖）。
- * @see docs/adr/89-impression-formation-system.md §Wave 3A
- */
-function selfMoodDecay(G: WorldModel, nowMs: number, halfLife: number): void {
-  if (!G.has(ALICE_SELF)) return;
-  const selfAttrs = G.getAgent(ALICE_SELF);
-  const baseMood = selfAttrs.mood_valence ?? 0;
-
-  const moodSetMs = Number(selfAttrs.mood_set_ms ?? 0);
-  const elapsedS = moodSetMs > 0 ? Math.max(0, (nowMs - moodSetMs) / 1000) : 0;
-  const decay = elapsedS > 0 ? 0.5 ** (elapsedS / halfLife) : 1;
-  // 向温暖基线收敛，而非向 0 收敛
-  G.updateAgent(ALICE_SELF, { mood_effective: WARM_BASELINE + (baseMood - WARM_BASELINE) * decay });
-}
 
 // -- M2: Circadian 调制器 --------------------------------------------------
 

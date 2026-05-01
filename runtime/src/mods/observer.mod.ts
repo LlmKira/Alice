@@ -5,10 +5,9 @@
  * 这些属性后续被压力公式和声部竞争消费（Wave 5+），
  * 当前仅写入，确保优雅退化（LLM 不标注时行为等价 v4）。
  *
- * 指令：DECLARE_ACTION, rate_outcome, self_feel, flag_risk, observe_activity, intend, self_sense
+ * 指令：DECLARE_ACTION, rate_outcome, self_feel, flag_risk, observe_activity, attention_pull, switch_chat, intend, self_sense
  * 查询：chatMood
  */
-import { and, eq, gt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { createMod } from "../core/mod-builder.js";
 import { PromptBuilder, type PromptLine } from "../core/prompt-style.js";
@@ -16,11 +15,13 @@ import { DEADLINE_LABELS, deadlineToHorizon } from "../core/sandbox-schemas.js";
 import type { ContributionItem, ModContext } from "../core/types.js";
 import { readModState, readPressureApi, section } from "../core/types.js";
 import { getDb } from "../db/connection.js";
-import { messageLog } from "../db/schema.js";
+import { writeFocusTransitionIntent } from "../db/focus-transition-intent.js";
+import { appraiseActivityEmotion, appraiseRiskEmotion } from "../emotion/appraisal.js";
+import { readEmotionState, recordEmotionEpisode } from "../emotion/graph.js";
+import { EMOTION_KINDS, type EmotionKind } from "../emotion/types.js";
 import { reinforce as reinforceConsciousness } from "../engine/consciousness.js";
 import { ensureChannelId, ensureContactId, resolveContactAndChannel } from "../graph/constants.js";
 import { resolveDisplayName, safeDisplayName } from "../graph/display.js";
-import { readSocialReception, readSocialReceptionMs } from "../graph/dynamic-props.js";
 import { findActiveConversation } from "../graph/queries.js";
 import {
   CHEMISTRY_STIMULUS,
@@ -29,10 +30,10 @@ import {
   RV_VELOCITY_ALPHA,
   updateVelocity,
 } from "../graph/relationship-vector.js";
-import type { WorldModel } from "../graph/world-model.js";
 import { hasObligation, OBLIGATION_THRESHOLDS } from "../pressure/signal-decay.js";
-import { createLogger } from "../utils/logger.js";
 import { QUALITY_MAP } from "../voices/beat-feedback.js";
+import { computeExternalFeedback } from "./observer/external-feedback.js";
+import { updateGroupReception } from "./observer/group-reception.js";
 
 // -- 类型 --------------------------------------------------------------------
 
@@ -43,121 +44,6 @@ interface RateOutcomeRecord {
   reason: string;
   beatType: string;
   ms: number;
-}
-
-// -- V-1: 外部反馈锚 ---------------------------------------------------------
-// @see docs/adr/64-runtime-theory-alignment-audit.md §V-1
-// LLM 自评是写入-读取回路的自强化源。外部行为信号作为真理锚，校准 rate_outcome。
-
-interface ExternalFeedback {
-  score: number; // [-1, 1]
-  confidence: number; // [0, 1] 基于可用信号数量
-  signals: string[];
-}
-
-/**
- * 计算外部行为反馈分数。
- *
- * 从图属性中提取 actionMs 之后的外部行为信号：
- * 1. 对方是否回复（last_active_ms > actionMs）
- * 2. 对方是否给了 reaction（last_reaction_ms > actionMs）
- * 3. 对话是否延续（conversation state ∈ {opening, active}）
- * 4. 对方是否主动找 Alice（pending_directed > 0）
- *
- * 返回加权平均分数 ∈ [-1, 1]，confidence 基于可用信号数量。
- */
-export function computeExternalFeedback(
-  G: WorldModel,
-  target: string,
-  actionMs: number,
-  nowMs: number,
-): ExternalFeedback {
-  const signals: string[] = [];
-  let weightedSum = 0;
-  let totalWeight = 0;
-
-  // 解析 contact ID 和 channel ID
-  const { contactId, channelId } = resolveContactAndChannel(target, (id) => G.has(id));
-
-  // 信号 1: 对方是否在 Alice 行动后回复（权重 0.4 — 最强信号）
-  if (contactId && G.has(contactId)) {
-    const attrs = G.getContact(contactId);
-    const lastActiveMs = attrs.last_active_ms ?? 0;
-    if (lastActiveMs > actionMs) {
-      // 对方回复了 → 正反馈
-      signals.push("replied");
-      weightedSum += 0.4 * 0.7;
-      totalWeight += 0.4;
-    } else if ((nowMs - actionMs) / 1000 > 600) {
-      // 超过 600 秒（10 ticks × 60s）仍无回复 → 轻微负反馈
-      signals.push("no_reply");
-      weightedSum += 0.4 * -0.3;
-      totalWeight += 0.4;
-    }
-    // actionMs 之后不到 600 秒 → 还在等，不计入
-  }
-
-  // 信号 2: 对方是否给了 reaction（权重 0.2 — 低成本但明确）
-  if (contactId && G.has(contactId)) {
-    const attrs = G.getContact(contactId);
-    const reactionMs = attrs.last_reaction_ms ?? 0;
-    if (reactionMs > actionMs) {
-      signals.push("reaction");
-      weightedSum += 0.2 * 0.6;
-      totalWeight += 0.2;
-    }
-  }
-
-  // 信号 3: 对话是否延续（权重 0.25 — 对话状态是重要的上下文信号）
-  // 注意：不用 findActiveConversation（只返回 pending/opening/active），
-  // 我们还需要检测 closing/cooldown 状态作为负信号。
-  if (channelId && G.has(channelId)) {
-    // 优先选择最活跃的对话（active > opening > closing > cooldown）
-    let bestConvState: string | null = null;
-    const statePriority: Record<string, number> = {
-      active: 4,
-      opening: 3,
-      closing: 2,
-      cooldown: 1,
-    };
-    let bestPriority = 0;
-    for (const convId of G.getEntitiesByType("conversation")) {
-      const convAttrs = G.getConversation(convId);
-      if (convAttrs.channel !== channelId) continue;
-      const p = statePriority[convAttrs.state] ?? 0;
-      if (p > bestPriority) {
-        bestPriority = p;
-        bestConvState = convAttrs.state;
-      }
-    }
-    if (bestConvState === "active" || bestConvState === "opening") {
-      signals.push("conversation_active");
-      weightedSum += 0.25 * 0.5;
-      totalWeight += 0.25;
-    } else if (bestConvState === "closing" || bestConvState === "cooldown") {
-      signals.push("conversation_ending");
-      weightedSum += 0.25 * -0.4;
-      totalWeight += 0.25;
-    }
-  }
-
-  // 信号 4: 对方是否主动找 Alice（权重 0.15 — 主动性是强正信号）
-  // ADR-124: 使用 hasObligation 替代 pending_directed > 0
-  // @see docs/adr/126-obligation-field-decay.md §D6
-  if (channelId && G.has(channelId)) {
-    if (hasObligation(G, channelId, nowMs, OBLIGATION_THRESHOLDS.signal)) {
-      signals.push("directed_message");
-      weightedSum += 0.15 * 0.8;
-      totalWeight += 0.15;
-    }
-  }
-
-  // 计算最终分数和置信度
-  const score = totalWeight > 0 ? Math.max(-1, Math.min(1, weightedSum / totalWeight)) : 0;
-  // confidence = 可用信号数量 / 4（最大信号数）
-  const confidence = Math.min(1, signals.length / 4);
-
-  return { score, confidence, signals };
 }
 
 // -- 印象形成 — ADR-89 --------------------------------------------------------
@@ -253,6 +139,16 @@ export const AROUSAL_MAP: Record<ArousalLevel, number> = {
   intense: 0.9,
 };
 
+function inferEmotionKind(valence: number, arousal: number): EmotionKind {
+  if (valence > 0.45 && arousal > 0.45) return "touched";
+  if (valence > 0.1) return "pleased";
+  if (valence < -0.55 && arousal > 0.55) return "hurt";
+  if (valence < -0.25 && arousal < 0.35) return "tired";
+  if (valence < -0.25) return "uneasy";
+  if (arousal < 0.25) return "flat";
+  return "flat";
+}
+
 // -- observe_activity 语义枚举 ------------------------------------------------
 // @see AGENTS.md: LLM 语义无障碍——不暴露 [0,1] 数值范围，使用语义标签
 // 结构同 VALENCE_LEVELS / ValenceLevel / VALENCE_MAP（文件内统一模式）
@@ -310,6 +206,36 @@ function qualityLabel(q: number): string {
   if (q > 0.3) return "good";
   if (q < -0.3) return "poor";
   return "fair";
+}
+
+/**
+ * Bot 是 Telegram 工具体，不是社交关系对象。
+ * 只过滤 bot 本身的私聊/contact target；群聊里出现 bot 输出仍属于群聊上下文。
+ * @see docs/GOAL.md §场景 7：工具生态
+ */
+function isBotOutcomeTarget(ctx: ModContext<ObserverState>, target: string): boolean {
+  if (!ctx.graph.has(target)) return false;
+
+  if (ctx.graph.getNodeType(target) === "contact") {
+    return ctx.graph.getContact(target).is_bot === true;
+  }
+
+  if (ctx.graph.getNodeType(target) !== "channel") return false;
+
+  const channel = ctx.graph.getChannel(target);
+  if (channel.chat_type !== "private") return false;
+
+  const contactId = ensureContactId(target) ?? legacyContactIdFromChannel(target);
+  return (
+    contactId != null && ctx.graph.has(contactId) && ctx.graph.getContact(contactId).is_bot === true
+  );
+}
+
+function legacyContactIdFromChannel(target: string): string | null {
+  if (!target.startsWith("channel:")) return null;
+  const rest = target.slice("channel:".length);
+  if (rest.includes(":") || rest.length === 0) return null;
+  return `contact:${rest}`;
 }
 
 /** ms 时间戳 → 人类可读相对时间（用于 format() 渲染）。 */
@@ -477,6 +403,12 @@ export const observerMod = createMod<ObserverState>("observer", {
 
       const target = String(args.target);
 
+      // 北极星场景 7：bot 是工具输出源，不是社交对等体。
+      // bot 成败不应污染 Recent action quality / trust / relationship pressure。
+      if (isBotOutcomeTarget(ctx, target)) {
+        return { success: true, skipped: "bot_tool_target", target };
+      }
+
       // ADR-131: QUALITY_MAP 统一从 beat-feedback.ts 导入（单一真相源）
       const rawQuality = QUALITY_MAP[String(args.quality)] ?? 0;
 
@@ -583,12 +515,13 @@ export const observerMod = createMod<ObserverState>("observer", {
       target: z.string().min(1).describe("对话、联系人或 'self'"),
       valence: z.enum(VALENCE_LEVELS).describe("情绪效价"),
       arousal: z.enum(AROUSAL_LEVELS).default("mild").describe("情绪唤醒度（默认 mild）"),
+      kind: z.enum(EMOTION_KINDS).optional().describe("Alice 自身的具体情绪类型"),
       reason: z.string().optional().describe("情绪变化描述"),
     }),
     deriveParams: {
       target: () => "self",
     },
-    description: "观察情绪状态。target='self' 记录 Alice 自身心情，影响后续行为倾向。",
+    description: "观察情绪状态。target='self' 记录 Alice 自身情绪 episode，影响后续行为倾向。",
     examples: ['feel("positive", "mild")'],
     affordance: {
       priority: "sensor",
@@ -612,32 +545,15 @@ export const observerMod = createMod<ObserverState>("observer", {
       const valence = VALENCE_MAP[String(args.valence) as ValenceLevel] ?? 0;
       const arousal = AROUSAL_MAP[String(args.arousal) as ArousalLevel] ?? 0.5;
 
-      // self 节点使用 EMA 平滑，抗 LLM 反复设极端值导致的情绪自强化螺旋。
-      // 三重缓冲：EMA(α=0.3) + 同方向不重置 decay 时钟 + WARM_BASELINE(0.05) 正基线收敛。
-      // 持续攻击场景下结构信号会衰减，但语义信号不衰减（最新聊天记录始终新鲜），
-      // LLM 行为主要由语义驱动，mood 调制(±30%)是辅助推力而非主要驱动。
-      // @see voices/focus.ts computeFocalSets — mood 的结构影响路径
-      //
-      // 条件重置 mood_set_ms：仅在情绪方向变化或显著波动时重置 decay 时钟。
-      // 同方向重复 feel() 不重置 — 让 decay 自然进行，打断自强化螺旋。
-      // 阈值 0.15: EMA α=0.3 时同 mood 重复调用 delta ≈ 0.03，远小于阈值。
       if (target === "self") {
-        const currentMood = ctx.graph.getAgent("self").mood_valence ?? 0;
-        const SELF_MOOD_ALPHA = 0.3;
-        const smoothed = currentMood * (1 - SELF_MOOD_ALPHA) + valence * SELF_MOOD_ALPHA;
-
-        // ADR-30: 条件重置 mood_set_ms（供 selfMoodDecay 半衰期计算）
-        const MOOD_RESET_THRESHOLD = 0.15;
-        const directionChanged =
-          currentMood !== 0 && Math.sign(smoothed) !== Math.sign(currentMood);
-        const significantShift = Math.abs(smoothed - currentMood) > MOOD_RESET_THRESHOLD;
-        const needsReset = directionChanged || significantShift || currentMood === 0;
-        ctx.graph.updateAgent("self", {
-          mood_valence: smoothed,
-          mood_arousal: arousal,
-          mood_shift_ms: ctx.nowMs,
-          ...(needsReset && { mood_set_ms: ctx.nowMs }),
-          ...(args.reason && { mood_shift: String(args.reason) }),
+        recordEmotionEpisode(ctx.graph, {
+          kind: (args.kind as EmotionKind | undefined) ?? inferEmotionKind(valence, arousal),
+          valence,
+          arousal,
+          intensity: Math.max(0.25, Math.min(1, Math.abs(valence) + arousal * 0.2)),
+          confidence: args.kind ? 0.8 : 0.45,
+          nowMs: ctx.nowMs,
+          cause: { type: "message", summary: String(args.reason ?? "self observed mood shift") },
         });
       } else {
         // ADR-154: 非 self target 类型不定（channel 或 contact），用 setDynamic
@@ -718,6 +634,12 @@ export const observerMod = createMod<ObserverState>("observer", {
       if (args.reason) {
         ctx.graph.setDynamic(chatId, "risk_reason", String(args.reason));
       }
+      appraiseRiskEmotion(ctx.graph, {
+        targetId: chatId,
+        level,
+        reason: args.reason ? String(args.reason) : undefined,
+        nowMs: ctx.nowMs,
+      });
       return { success: true, chatId, level, previous: previous ?? "none" };
     },
   })
@@ -755,23 +677,115 @@ export const observerMod = createMod<ObserverState>("observer", {
       ctx.graph.setDynamic(chatId, "activity_type", activityType);
       // ADR-50: 语义标签 → 数值映射（代码侧完成，LLM 不接触数值）
       // 使用 `in` guard 保证类型安全（同 CONFIDENCE_MAP 模式）
+      let intensityValue: number | null = null;
       if (args.intensity != null) {
         const label = String(args.intensity);
-        const intensityValue =
+        intensityValue =
           label in ACTIVITY_INTENSITY_MAP
             ? ACTIVITY_INTENSITY_MAP[label as ActivityIntensityLevel]
             : ACTIVITY_INTENSITY_MAP.moderate;
         ctx.graph.setDynamic(chatId, "activity_intensity", intensityValue);
       }
+      let relevanceValue: number | null = null;
       if (args.relevance_to_alice != null) {
         const label = String(args.relevance_to_alice);
-        const relevanceValue =
+        relevanceValue =
           label in ACTIVITY_RELEVANCE_MAP
             ? ACTIVITY_RELEVANCE_MAP[label as ActivityRelevanceLevel]
             : ACTIVITY_RELEVANCE_MAP.somewhat_relevant;
         ctx.graph.setDynamic(chatId, "activity_relevance", relevanceValue);
       }
+      appraiseActivityEmotion(ctx.graph, {
+        targetId: chatId,
+        activityType,
+        intensity: intensityValue,
+        relevance: relevanceValue,
+        nowMs: ctx.nowMs,
+      });
       return { success: true, chatId, type: activityType };
+    },
+  })
+  /**
+   * ADR-259 Wave 3: no-side-effect attention pull.
+   *
+   * This records "another chat is pulling attention" as a typed fact. The
+   * LLM-facing surface stays human-world: Alice does not need to know the
+   * internal focus-transition mechanism to use the tool correctly.
+   */
+  .instruction("attention_pull", {
+    params: z.object({
+      to: z.string().trim().min(1).describe("Chat that seems worth looking at"),
+      sourceChatId: z.string().trim().min(1).optional().describe("Current chat"),
+      reason: z
+        .string()
+        .trim()
+        .min(1)
+        .max(240)
+        .describe("Short reason this place is pulling attention"),
+    }),
+    deriveParams: {
+      sourceChatId: (cv: Record<string, unknown>) => cv.TARGET_CHAT,
+    },
+    perTurnCap: { limit: 2, group: "focus_transition_intent" },
+    description:
+      "Notice that another chat is pulling attention. This does not switch chats or send.",
+    affordance: {
+      priority: "capability",
+      category: "social",
+      whenToUse:
+        "When another chat seems worth looking at, but you are still here and should not speak there from this episode",
+      whenNotToUse:
+        "When you only need the current chat, or when you want to send a message somewhere else",
+    },
+    impl(ctx, args) {
+      writeFocusTransitionIntent({
+        tick: ctx.tick,
+        sourceChatId: args.sourceChatId ?? null,
+        requestedChatId: args.to,
+        intentKind: "observe",
+        reason: args.reason,
+      });
+
+      return "Noted. You are still in this chat; no message was sent there.";
+    },
+  })
+  /**
+   * ADR-259 Wave 3b: no-side-effect switch request.
+   *
+   * Alice may say she wants another chat to become current, but approval stays
+   * with the runtime/controller. This command never sends and never switches.
+   */
+  .instruction("switch_chat", {
+    params: z.object({
+      to: z.string().trim().min(1).describe("Chat Alice wants to become current later"),
+      sourceChatId: z.string().trim().min(1).optional().describe("Current chat"),
+      reason: z.string().trim().min(1).max(240).describe("Short reason to request switching there"),
+    }),
+    deriveParams: {
+      sourceChatId: (cv: Record<string, unknown>) => cv.TARGET_CHAT,
+    },
+    perTurnCap: { limit: 2, group: "focus_transition_intent" },
+    description:
+      "Request that another chat become current later. This does not switch chats or send.",
+    affordance: {
+      priority: "capability",
+      category: "social",
+      whenToUse:
+        "When you need to answer another chat, but it is not the current chat in this episode",
+      whenNotToUse:
+        "When you only need to look at another chat, or when the current chat is enough",
+    },
+    impl(ctx, args) {
+      writeFocusTransitionIntent({
+        tick: ctx.tick,
+        sourceChatId: args.sourceChatId ?? null,
+        requestedChatId: args.to,
+        intentKind: "switch_request",
+        reason: args.reason,
+        sourceCommand: "self.switch-chat",
+      });
+
+      return "Switch requested. You are still in this chat; no message was sent there.";
     },
   })
   /**
@@ -858,6 +872,9 @@ export const observerMod = createMod<ObserverState>("observer", {
     }),
     description: "记录对他人性格特质的观察（多次观察逐渐结晶为持久印象）",
     examples: ['self_sense({ who: "David", trait: "kind", intensity: "moderate" })'],
+    deriveParams: {
+      who: (cv: Record<string, unknown>) => cv.TARGET_CONTACT,
+    },
     affordance: {
       priority: "sensor",
       whenToUse: "Recording impressions about contacts after notable interactions",
@@ -1099,12 +1116,15 @@ export const observerMod = createMod<ObserverState>("observer", {
     impl(ctx, args) {
       const limit = Number(args.count);
       // 预解析 display name + 语义标签，format() 无需图访问
-      return ctx.state.outcomeHistory.slice(-limit).map((r) => ({
-        name: safeDisplayName(ctx.graph, r.target),
-        quality: qualityLabel(r.quality),
-        reason: r.reason || undefined,
-        when: relativeTime(r.ms, ctx.nowMs),
-      }));
+      return ctx.state.outcomeHistory
+        .filter((r) => !isBotOutcomeTarget(ctx, r.target))
+        .slice(-limit)
+        .map((r) => ({
+          name: safeDisplayName(ctx.graph, r.target),
+          quality: qualityLabel(r.quality),
+          reason: r.reason || undefined,
+          when: relativeTime(r.ms, ctx.nowMs),
+        }));
     },
     format(result) {
       const rows = result as Array<{
@@ -1184,39 +1204,6 @@ export const observerMod = createMod<ObserverState>("observer", {
     if (readPressureApi(ctx) < 0.6) {
       const relState = readModState(ctx, "relationships");
       items.push(...feedbackLoopReminders(ctx, relState?.targetNodeId ?? null));
-    }
-
-    // ADR-30: self mood 状态注入（让 LLM 看到 Alice 当前心情）
-    if (ctx.graph.has("self")) {
-      const selfAttrs = ctx.graph.getAgent("self");
-      const moodEffective = selfAttrs.mood_effective ?? 0;
-      const moodValence = selfAttrs.mood_valence ?? 0;
-      const moodShift = selfAttrs.mood_shift;
-
-      // 只在有非零心情时显示（零 = 无特殊情绪）
-      if (moodValence !== 0 || moodEffective !== 0) {
-        const moodBuilder = new PromptBuilder();
-        const label =
-          moodEffective > 0.6
-            ? "quite positive"
-            : moodEffective > 0.3
-              ? "mildly positive"
-              : moodEffective < -0.6
-                ? "quite negative"
-                : moodEffective < -0.3
-                  ? "mildly negative"
-                  : "neutral";
-        // ADR-210: 纯事实视角——不用 "Your"
-        moodBuilder.line(`Current mood: ${label}.`);
-        // 陈旧的 shift 描述（如 "feeling hurt from 30 min ago"）不应持续放大负面叙事
-        const shiftMs = Number(selfAttrs.mood_shift_ms ?? 0);
-        if (moodShift && (ctx.nowMs - shiftMs) / 1000 < 1800) {
-          moodBuilder.line(`Recent shift: ${moodShift}`);
-        }
-        // L3→L2: 删除祈使句 "Reflect on how you feel"。
-        // mood 状态已展示，LLM 可自行决定是否更新。函数签名在 .d.ts 手册中。
-        items.push(section("self-mood", moodBuilder.build(), undefined, 20, 70));
-      }
     }
 
     // channel 活动上下文——帮助 LLM "读懂房间"
@@ -1299,8 +1286,11 @@ export const observerMod = createMod<ObserverState>("observer", {
     }
 
     // Outcome 历史摘要（让 LLM 知道最近行动的效果 → 学习反馈）
-    if (ctx.state.outcomeHistory.length > 0) {
-      const recent = ctx.state.outcomeHistory.slice(-5);
+    const visibleOutcomeHistory = ctx.state.outcomeHistory.filter(
+      (r) => !isBotOutcomeTarget(ctx, r.target),
+    );
+    if (visibleOutcomeHistory.length > 0) {
+      const recent = visibleOutcomeHistory.slice(-5);
       const avgQuality = recent.reduce((s, r) => s + r.quality, 0) / recent.length;
       const outcomeBuilder = new PromptBuilder();
       const overallLabel = avgQuality > 0.3 ? "positive" : avgQuality < -0.3 ? "poor" : "mixed";
@@ -1314,6 +1304,7 @@ export const observerMod = createMod<ObserverState>("observer", {
       // ADR-199 W3.5: 延迟评估结果注入 — 让 LLM 知道"对方后来回复了/没回复"
       const DEFERRED_FEEDBACK_TTL_MS = 10 * 60 * 1000;
       for (const channelId of ctx.graph.getEntitiesByType("channel")) {
+        if (isBotOutcomeTarget(ctx, channelId)) continue;
         const ch = ctx.graph.getChannel(channelId);
         const outcomeMs = ch.last_outcome_ms ?? 0;
         const outcomeQuality = ch.last_outcome_quality;
@@ -1450,9 +1441,9 @@ function feedbackLoopReminders(
 
   // 3. Alice 自身情绪未更新
   if (ctx.graph.has("self")) {
-    const selfAttrs = ctx.graph.getAgent("self");
-    const selfMoodMs = selfAttrs.mood_set_ms ?? 0;
-    if ((ctx.nowMs - selfMoodMs) / 1000 > SELF_MOOD_STALE_THRESHOLD_S) {
+    const selfEmotionState = readEmotionState(ctx.graph, ctx.nowMs);
+    const ageMs = selfEmotionState.dominant?.ageMs ?? Number.POSITIVE_INFINITY;
+    if (ageMs / 1000 > SELF_MOOD_STALE_THRESHOLD_S) {
       reminderLines.push(PromptBuilder.of("Mood hasn't been checked in a while."));
     }
   }
@@ -1468,146 +1459,4 @@ function feedbackLoopReminders(
       90, // priority: 高优先级
     ),
   ];
-}
-
-// ── ADR-156: 群组社交接收度更新 ─────────────────────────────────────
-// 每个 tick 检查 Alice 最近在群组中发言后的接收情况。
-// 信号存储在 graph channel node 的 social_reception 动态属性上。
-//
-// 检测逻辑：
-// - 从 message_log 查 Alice 最近 10 分钟在各群的最后一条发言
-// - 检查该发言之后的群消息中是否有人回复或提及 Alice
-// - 检查是否有拒绝关键词
-// - 用 EMA 更新 social_reception
-//
-// @see docs/adr/156-social-reception-feedback/README.md
-
-const log = createLogger("observer/reception");
-
-/** 拒绝/敌意关键词（中英文）。 */
-const HOSTILE_KEYWORDS = [
-  "谁问你了",
-  "闭嘴",
-  "烦",
-  "傻逼",
-  "滚",
-  "屏蔽",
-  "shut up",
-  "nobody asked",
-  "block",
-];
-
-/** EMA 系数：新信号占 30%。 */
-const RECEPTION_ALPHA = 0.3;
-/** 无新信号时，每小时自然衰��率。 */
-const RECEPTION_HOURLY_DECAY = 0.95;
-/** 回溯窗口：检查 Alice 最近 10 分钟的发言。 */
-const RECEPTION_LOOKBACK_MS = 10 * 60 * 1000;
-/** 冷场判定：Alice 发言后 N 条消息无人理。 */
-const COLD_THRESHOLD_MSGS = 5;
-
-function updateGroupReception(ctx: ModContext<ObserverState>): void {
-  const db = getDb();
-  const nowMs = ctx.nowMs;
-  // Drizzle mode:"timestamp" 自动处理 Date ↔ epoch 秒转换，无需手动
-  const cutoff = new Date(nowMs - RECEPTION_LOOKBACK_MS);
-
-  // 查 Alice 最近在各群的最后一条发言（Drizzle ORM，类型安全）
-  let aliceGroupMsgs: Array<{ chatId: string; msgId: number | null; createdAt: Date }>;
-  try {
-    aliceGroupMsgs = db
-      .select({
-        chatId: messageLog.chatId,
-        msgId: messageLog.msgId,
-        createdAt: sql<Date>`MAX(${messageLog.createdAt})`.as("created_at"),
-      })
-      .from(messageLog)
-      .where(and(eq(messageLog.isOutgoing, true), gt(messageLog.createdAt, cutoff)))
-      .groupBy(messageLog.chatId)
-      .all();
-  } catch {
-    return;
-  }
-
-  for (const aliceMsg of aliceGroupMsgs) {
-    const channelId = aliceMsg.chatId;
-    if (!ctx.graph.has(channelId)) continue;
-
-    // 查 Alice 发言之后在该群的消息（Drizzle ORM）
-    let afterMsgs: Array<{
-      senderId: string | null;
-      text: string | null;
-      replyToMsgId: number | null;
-    }>;
-    try {
-      afterMsgs = db
-        .select({
-          senderId: messageLog.senderId,
-          text: messageLog.text,
-          replyToMsgId: messageLog.replyToMsgId,
-        })
-        .from(messageLog)
-        .where(
-          and(
-            eq(messageLog.chatId, channelId),
-            eq(messageLog.isOutgoing, false),
-            gt(messageLog.createdAt, aliceMsg.createdAt),
-          ),
-        )
-        .orderBy(messageLog.createdAt)
-        .limit(10)
-        .all();
-    } catch {
-      continue;
-    }
-
-    if (afterMsgs.length === 0) continue; // 还没有后续消息，等下次
-
-    // 私聊 vs 群聊的冷场阈值不同：
-    // 私聊只有两个人，1 条对方消息不涉及 Alice 就够判定；
-    // 群聊需要 5 条（其他人在聊但没人理 Alice）。
-    const isGroup = channelId.startsWith("channel:-");
-    const coldThreshold = isGroup ? COLD_THRESHOLD_MSGS : 1;
-
-    // 检测接收类型
-    let signal = 0; // neutral
-
-    // 检测敌意关键词（群聊和私聊通用）
-    const hasHostile = afterMsgs.some(
-      (m) => m.text && HOSTILE_KEYWORDS.some((kw) => m.text?.toLowerCase().includes(kw)),
-    );
-    if (hasHostile) {
-      signal = -0.5; // hostile
-    } else {
-      // 检测是否有人回复 Alice 的消息
-      const hasReply = afterMsgs.some((m) => aliceMsg.msgId && m.replyToMsgId === aliceMsg.msgId);
-      if (hasReply) {
-        signal = 0.3; // warm
-      } else if (afterMsgs.length >= coldThreshold) {
-        signal = -0.2; // cold
-      } else {
-        continue; // 数据不足，暂不更新
-      }
-    }
-
-    // EMA 更新
-    const old = readSocialReception(ctx.graph, channelId);
-    const updated = (1 - RECEPTION_ALPHA) * old + RECEPTION_ALPHA * signal;
-    // 自然衰减（距上次更新的时间比例）
-    const lastUpdateMs = readSocialReceptionMs(ctx.graph, channelId) || nowMs;
-    const hoursSinceUpdate = (nowMs - lastUpdateMs) / 3600_000;
-    const decayed = updated * RECEPTION_HOURLY_DECAY ** hoursSinceUpdate;
-
-    const clamped = Math.max(-1, Math.min(1, decayed));
-    ctx.graph.setDynamic(channelId, "social_reception", clamped);
-    ctx.graph.setDynamic(channelId, "social_reception_ms", nowMs);
-    if (signal !== 0) {
-      log.info("Social reception updated", {
-        channel: channelId,
-        signal: signal > 0 ? "warm" : signal > -0.3 ? "cold" : "hostile",
-        old: old.toFixed(2),
-        new: clamped.toFixed(2),
-      });
-    }
-  }
 }

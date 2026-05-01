@@ -69,6 +69,10 @@ export class ChatTarget {
       case "channel_other":
       case "channel_owned":
         return "channel";
+      default: {
+        const unreachable: never = this.type;
+        throw new Error(`unknown chat target type: ${unreachable}`);
+      }
     }
   }
 
@@ -222,6 +226,8 @@ export interface ContactSlot {
   interests: readonly string[];
   /** Telegram 用户签名（LLM 理解此人自我描述）。 */
   bio?: string;
+  /** 最近一小时是否刚给该联系人分享过内容。 */
+  sharedRecently?: boolean;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -357,8 +363,10 @@ export interface UserPromptSnapshot {
   /** 用户时区偏移（小时），如 UTC+8 → 8。 */
   timezoneOffset: number;
 
-  // ── 心情（语义标签，非数值）──
-  moodLabel: string;
+  /** ADR-268: Alice 自身情绪 episode 的自然语言投影。 */
+  emotionProjection?: string;
+  /** ADR-268: 当前情绪控制调制转成的自然表达提示。 */
+  emotionStyleHint?: string;
 
   // ── 目标 ──
   /** 当前对话的目标实体（私聊=对方，群聊=群组，频道=频道）。 */
@@ -392,6 +400,10 @@ export interface UserPromptSnapshot {
   // ── 线程 ──
   threads: readonly ThreadSlot[];
 
+  // ── 社交 case ──
+  /** Alice-centered social case brief lines for the current prompt surface. */
+  socialCaseLines: readonly string[];
+
   // ── 行动反馈 ──
   feedback: readonly FeedbackSlot[];
 
@@ -400,7 +412,7 @@ export interface UserPromptSnapshot {
 
   // ── 轮次感知 ──
   roundHint?: string;
-  /** ADR-232: TC episode 提示（watching 续轮时，告知 LLM 结果已在 observations 中）。 */
+  /** ADR-232: TC episode 提示（host 续轮时，告知 LLM 结果已在 observations 中）。 */
   episodeHint?: string;
 
   // ── 私聊对象关系描述（仅 private 场景）──
@@ -421,6 +433,8 @@ export interface UserPromptSnapshot {
   // ── 层③ 战略全景扩展 ──
   /** 全局感知信号（谁在等、谁在漂移、哪个群活跃）。层③。 */
   situationSignals: readonly string[];
+  /** 当前对象节律提示（语义投影，不包含 harmonic 参数）。层③。 */
+  timingSignals?: readonly string[];
   /** 触发的定时任务。层③。 */
   scheduledEvents: readonly string[];
   /** 风险标记。层③。 */

@@ -6,7 +6,7 @@
  * - Gemini (generativelanguage.googleapis.com) → MD_JSON（tool schema 格式限制）
  * - 其他（OpenAI / Anthropic / OpenRouter 兼容）→ TOOLS（原生 tool calling）
  *
- * 复用 config.providers 的 baseUrl/apiKey/model，不引入新配置。
+ * 复用 config.providers endpoint 列表的 baseUrl/apiKey/model，不引入新配置。
  *
  * @see docs/adr/213-tool-calling-act-thread.md
  * @see https://js.useinstructor.com/
@@ -40,12 +40,12 @@ let _entries: InstructorEntry[] = [];
 // -- Mode 自动选择 ----------------------------------------------------------
 
 /** Gemini 模型名特征——baseUrl 可能是代理地址，用 model 名判断更可靠。 */
-const GEMINI_MODEL_PATTERNS = ["gemini", "vertex-gemini"];
+const MD_JSON_MODEL_PATTERNS = ["gemini", "vertex-gemini", "deepseek", "reasoner"];
 
 /** 根据 model 名称选择 instructor mode。 */
 function selectMode(model: string): "TOOLS" | "MD_JSON" {
   const lower = model.toLowerCase();
-  if (GEMINI_MODEL_PATTERNS.some((p) => lower.includes(p))) return "MD_JSON";
+  if (MD_JSON_MODEL_PATTERNS.some((p) => lower.includes(p))) return "MD_JSON";
   return "TOOLS";
 }
 
@@ -53,7 +53,12 @@ function selectMode(model: string): "TOOLS" | "MD_JSON" {
 
 /** 从 Config.providers 初始化 instructor 客户端链。与 initProviders() 并行调用。 */
 export function initInstructorClients(config: Config): void {
-  _entries = config.providers.map((pc) => {
+  const route = config.llmRouting.firstPass
+    .map((name) => config.providers.find((provider) => provider.name === name))
+    .filter((provider): provider is Config["providers"][number] => Boolean(provider));
+  const entries = route.length > 0 ? route : config.providers;
+
+  _entries = entries.map((pc) => {
     const oai = new OpenAI({
       baseURL: pc.baseUrl,
       apiKey: pc.apiKey,

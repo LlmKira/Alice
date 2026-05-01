@@ -13,6 +13,9 @@ import { PromptBuilder } from "../../core/prompt-style.js";
 import { type AnomalyAlert, runAnomalyCheck } from "../../db/anomaly.js";
 import { getDb } from "../../db/connection.js";
 import { actionLog, tickLog } from "../../db/schema.js";
+import { readEmotionState } from "../../emotion/graph.js";
+import { renderEmotionProjection } from "../../emotion/projection.js";
+import { emotionStateArousalSignal, emotionStateMoodSignal } from "../../emotion/state.js";
 import { ensureChannelId, tierLabel } from "../../graph/constants.js";
 import type { DunbarTier } from "../../graph/entities.js";
 import type { WorldModel } from "../../graph/world-model.js";
@@ -89,20 +92,22 @@ function gatherMood(graph: WorldModel, nowMs: number): string[] {
     m.line("(no self data)");
     return m.build();
   }
-  const agent = graph.getAgent("self");
-  const effective = agent.mood_effective ?? agent.mood_valence ?? 0;
-  const arousal = agent.mood_arousal ?? 0;
-  const shift = agent.mood_shift;
-  const shiftMs = agent.mood_shift_ms ?? 0;
+  const emotionState = readEmotionState(graph, nowMs);
+  const emotionProjection = renderEmotionProjection(emotionState);
+  const effective = emotionStateMoodSignal(emotionState);
+  const arousal = emotionStateArousalSignal(emotionState);
 
   let line = `${valenceLabel(effective)}, ${arousalLabel(arousal)}`;
-  if (shiftMs > 0) {
-    const agoS = (nowMs - shiftMs) / 1000;
-    line += ` (${humanDurationAgo(agoS)}`;
-    if (shift && agoS < 1800) line += ` — "${shift}"`;
-    line += ")";
+  if (emotionState.dominant) {
+    line += ` (${humanDurationAgo(emotionState.dominant.ageMs / 1000)})`;
   }
   m.line(line);
+  if (emotionProjection) {
+    m.line(emotionProjection);
+    m.line("This mood has a recent cause and is fading over time.");
+  } else {
+    m.line("No active self emotion episode is carrying the current mood.");
+  }
   return m.build();
 }
 

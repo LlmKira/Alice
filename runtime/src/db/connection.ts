@@ -41,6 +41,10 @@ export function getDbPath(): string {
   return _dbPath ?? "alice.db";
 }
 
+export function isDbInitialized(): boolean {
+  return _db != null;
+}
+
 /**
  * 初始化数据库：打开连接 + 运行迁移。
  *
