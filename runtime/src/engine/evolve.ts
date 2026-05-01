@@ -788,6 +788,7 @@ function computeTickPlan(
     history: state.pressureHistory,
     nowMs,
     eta: config.eta,
+    k: config.k,
     // ADR-161 §3.4: 群组轨迹驱动 theta — 从 channelRateEma 推导 P3 群组 theta
     channelRateEma: state.channelRateEma,
     tickDt: state.currentDt,

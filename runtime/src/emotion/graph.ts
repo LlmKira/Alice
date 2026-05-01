@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { isDbInitialized } from "../db/connection.js";
 import { ALICE_SELF } from "../graph/constants.js";
 import type { WorldModel } from "../graph/world-model.js";
@@ -76,21 +77,11 @@ function isEmotionEpisode(value: unknown): value is EmotionEpisode {
 }
 
 function makeEpisodeId(input: EmotionEpisodeInput): string {
-  const summary = "summary" in input.cause ? input.cause.summary : input.kind;
-  let hash = 0;
-  for (const ch of `${input.kind}:${summary}:${input.nowMs}`) {
-    hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
-  }
-  return `emotion-${input.kind}-${input.nowMs.toString(36)}-${hash.toString(36)}`;
+  return `emotion-${input.kind}-${input.nowMs.toString(36)}-${randomUUID()}`;
 }
 
 function makeRepairId(input: EmotionRepairInput): string {
-  const summary = "summary" in input.cause ? input.cause.summary : input.repairKind;
-  let hash = 0;
-  for (const ch of `${input.repairKind}:${input.emotionKind ?? "any"}:${summary}:${input.nowMs}`) {
-    hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
-  }
-  return `emotion-repair-${input.repairKind}-${input.nowMs.toString(36)}-${hash.toString(36)}`;
+  return `emotion-repair-${input.repairKind}-${input.nowMs.toString(36)}-${randomUUID()}`;
 }
 
 function readTransientEmotionEpisodes(G: WorldModel): EmotionEpisode[] {

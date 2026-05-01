@@ -6,13 +6,16 @@
  *
  * 当信息丰富时 P6→0（好奇心得到满足），信息匮乏时 P6→η（驱动探索行为）。
  *
- * novelty(j) 通过 per-contact prediction error 具体化（论文 Remark "Per-Contact Surprise"）。
+ * 线上实现用 per-contact prediction error 和频道信息饥渴具体化 curiosity pressure。
+ * 注意：prediction error / hunger 是未满足的 epistemic pressure，不是已满足的 novelty。
+ * 把 surprise 放进 `η - mean(novelty)` 会反向钳制 P6，让越异常的联系人越不会触发好奇心。
  * contributions 保留 per-contact/per-channel 粒度用于 IAUS 路由。
  *
  * @see paper/ Definition 3.3 (Curiosity)
  * @see paper/ Remark "Per-Contact Surprise as Novelty Realization"
  * @see paper/ Remark "Curiosity Saturation" — max(0,·) guarantees P6 ∈ [0, η]
  * @see docs/adr/112-pressure-dynamics-rehabilitation/ §D1, §D2
+ * @see docs/adr/206-channel-information-flow/theory-impl-divergence-audit.md §P6
  */
 
 import { DUNBAR_TIER_WEIGHT } from "../graph/constants.js";
@@ -84,16 +87,16 @@ const TIER_EXPECTED_DAILY_RATE: Record<DunbarTier, number> = {
   500: 0.016, // ~1 条/2 月
 };
 
-// -- Novelty history buffer --------------------------------------------------
-// 论文 lookback window k：追踪最近 k 个 tick 的 novelty 值。
-// 模块级状态——重启后从空 buffer 开始（P6=η，几个 tick 后收敛）。
+// -- Curiosity history buffer ------------------------------------------------
+// 追踪最近 k 个 tick 的 aggregate curiosity pressure，用于轻度平滑。
+// 模块级状态——重启后从空 buffer 开始，几个 tick 后收敛。
 
-/** Novelty 历史环形缓冲。 */
-const noveltyHistory: number[] = [];
+/** Curiosity pressure 历史环形缓冲。 */
+const curiosityHistory: number[] = [];
 
-/** 重置 novelty 历史（用于测试）。 */
+/** 重置 curiosity 历史（用于测试）。 */
 export function resetNoveltyHistory(): void {
-  noveltyHistory.length = 0;
+  curiosityHistory.length = 0;
 }
 
 // -- Surprise 信号 -----------------------------------------------------------
@@ -153,15 +156,15 @@ function computeSurprise(attrs: ContactAttrs, nowMs: number, graphAgeDays: numbe
 // -- P6 主函数 ---------------------------------------------------------------
 
 /**
- * P6 好奇心压力（论文 Definition 3.3 对齐版）。
+ * P6 好奇心压力（线上 pressure-field 版）。
  *
- * 实现论文的减性公式 P6 = max(0, η - mean_novelty)，保证 P6 ∈ [0, η]。
- * per-contact/per-channel surprise 值作为 novelty 信号和 IAUS 路由 contributions。
+ * per-contact prediction error 与 per-channel hunger 作为未满足的 curiosity pressure。
+ * 总量用 tanh 映射到 [0, η]，保证 mature graph 不会因实体数量过多而饱和失控。
  *
  * @param G - 伴侣图
  * @param nowMs - 当前墙钟时间（毫秒）
  * @param eta - 环境好奇心基线（config.eta，默认 0.6）
- * @param k - novelty lookback window（config.k，默认 20）
+ * @param k - curiosity smoothing window（config.k，默认 20）
  */
 export function p6Curiosity(G: WorldModel, nowMs: number, eta = 0.6, k = 20): PressureResult {
   const contacts = G.getEntitiesByType("contact");
@@ -171,8 +174,7 @@ export function p6Curiosity(G: WorldModel, nowMs: number, eta = 0.6, k = 20): Pr
   // ── 计算 per-contact surprise（论文 Remark: novelty 的具体化）──────
 
   const contributions: Record<string, number> = {};
-  let surpriseSum = 0;
-  let sourceCount = 0;
+  let rawCuriositySum = 0;
 
   for (const cid of contacts) {
     const attrs = G.getContact(cid);
@@ -189,8 +191,7 @@ export function p6Curiosity(G: WorldModel, nowMs: number, eta = 0.6, k = 20): Pr
     const curiosity = wTier * surprise * gamma;
     if (curiosity > 0) {
       contributions[cid] = curiosity;
-      surpriseSum += surprise; // novelty 用 raw surprise（不含 wTier/gamma）
-      sourceCount++;
+      rawCuriositySum += curiosity;
     }
   }
 
@@ -214,37 +215,31 @@ export function p6Curiosity(G: WorldModel, nowMs: number, eta = 0.6, k = 20): Pr
     const chCuriosity = CHANNEL_CURIOSITY_WEIGHT * hunger * unreadSignal;
     if (chCuriosity > 0) {
       contributions[chId] = chCuriosity;
-      // 频道 hunger 也是 novelty 信号（论文 Remark "Novelty Sources"）
-      // hunger 高 = 没看 = novelty 低；hunger 低 = 刚看过 = novelty 高
-      // 取反：channelNovelty = 1 - hunger（刚消费过频道内容 → 高 novelty）
-      surpriseSum += 1 - hunger;
-      sourceCount++;
+      rawCuriositySum += chCuriosity;
     }
   }
 
-  // ── 论文公式：P6 = max(0, η - mean(novelty_history)) ──────────
-
-  // 本 tick 的 novelty = 所有 source 的平均 surprise
-  const noveltyThisTick = sourceCount > 0 ? surpriseSum / sourceCount : 0;
+  // ── Aggregate pressure: bounded, source-count safe ──────────────────────
+  // rawCuriositySum 随联系人/频道数量增长；用 tanh 映射到 [0, η)，避免 529 个
+  // contact 把 P6 打爆，同时保留单个强 surprise 触发好奇心的能力。
+  const curiosityThisTick = eta * Math.tanh(rawCuriositySum);
 
   // 更新历史缓冲
-  noveltyHistory.push(noveltyThisTick);
-  if (noveltyHistory.length > k) noveltyHistory.shift();
+  curiosityHistory.push(curiosityThisTick);
+  if (curiosityHistory.length > k) curiosityHistory.shift();
 
-  // 论文公式：减性，有界 [0, η]
-  const meanNovelty =
-    noveltyHistory.length > 0
-      ? noveltyHistory.reduce((a, b) => a + b, 0) / noveltyHistory.length
+  const smoothedCuriosity =
+    curiosityHistory.length > 0
+      ? curiosityHistory.reduce((a, b) => a + b, 0) / curiosityHistory.length
       : 0;
-  const total = Math.max(0, eta - meanNovelty);
 
-  // D2: Ambient Curiosity 兜底（冷启动时 noveltyHistory 为空，P6=η）
+  // D2: Ambient Curiosity 兜底（冷启动时 curiosityHistory 为空，P6=η）
   const contactFamiliarity = Math.min(1, contactCount / DUNBAR_150);
   const timeFamiliarity = Math.min(1, graphAgeDays / FAMILIARITY_DAYS);
   const familiarity = contactFamiliarity * timeFamiliarity;
   const ambientCuriosity = eta * (1 - familiarity);
 
-  const finalTotal = Math.max(total, ambientCuriosity);
+  const finalTotal = Math.max(smoothedCuriosity, ambientCuriosity);
 
   // 缩放 contributions 使其总和 = finalTotal（IAUS 路由用）
   const rawContribSum = Object.values(contributions).reduce((a, b) => a + b, 0);

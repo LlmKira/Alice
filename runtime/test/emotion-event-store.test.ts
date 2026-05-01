@@ -70,6 +70,29 @@ describe("ADR-268 emotion_events store", () => {
     expect(rows[0]?.cause).toEqual({ type: "feedback", summary: "first cause" });
   });
 
+  it("keeps separate default-id events even when they share the same millisecond and summary", () => {
+    const G = new WorldModel();
+    G.addAgent("self");
+
+    const first = recordEmotionEpisode(G, {
+      kind: "pleased",
+      intensity: 0.4,
+      nowMs: NOW,
+      cause: { type: "action_result", summary: "A message was sent successfully." },
+    });
+    const second = recordEmotionEpisode(G, {
+      kind: "pleased",
+      intensity: 0.4,
+      nowMs: NOW,
+      cause: { type: "action_result", summary: "A message was sent successfully." },
+    });
+
+    expect(first?.id).not.toBe(second?.id);
+    const rows = listRecentEmotionEvents({ nowMs: NOW });
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.kind)).toEqual(["pleased", "pleased"]);
+  });
+
   it("persists repair accelerators as append-only facts separate from emotion episodes", () => {
     const G = new WorldModel();
     G.addAgent("self");

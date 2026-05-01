@@ -532,21 +532,21 @@ describe("P3 群组存在子维度（ADR-104）", () => {
     const G = new WorldModel();
     G.addAgent("self");
     // 频道节点
-    G.addChannel("channel:-1009900000001", {
+    G.addChannel("channel:telegram:-1009900000001", {
       chat_type: "channel",
       tier_contact: 150,
     });
     // 幽灵联系人（与频道数字 ID 相同）
-    G.addContact("contact:-1009900000001", {
+    G.addContact("contact:telegram:-1009900000001", {
       tier: 50,
       last_active_ms: tickMs(50),
       display_name: "Rem�",
     });
-    G.addRelation("self", "acquaintance", "contact:-1009900000001");
+    G.addRelation("self", "acquaintance", "contact:telegram:-1009900000001");
 
     const { contributions } = p3RelationshipCooling(G, 200, tickMs(200));
     // 幽灵联系人不参与社交压力
-    expect(contributions["contact:-1009900000001"]).toBeUndefined();
+    expect(contributions["contact:telegram:-1009900000001"]).toBeUndefined();
   });
 
   it("真人联系人不受频道隔离影响", () => {
@@ -828,7 +828,7 @@ describe("P6 好奇心（ADR-112 Surprise-driven Curiosity）", () => {
     expect(total).toBeGreaterThanOrEqual(sum - 1e-10);
   });
 
-  it("D2: familiarity 增长 → ambient 递减", () => {
+  it("D2: mature graph with real surprise still keeps P6 alive", () => {
     const G = new WorldModel();
     const now = Date.now();
     G.addAgent("self", { created_ms: now - 7 * 86_400_000 }); // 7 天前
@@ -838,11 +838,29 @@ describe("P6 好奇心（ADR-112 Surprise-driven Curiosity）", () => {
     }
     const { total } = p6Curiosity(G, now, 0.6);
     // 150 contacts + 7 天 → familiarity ≈ 1.0 → ambient ≈ 0
-    // 论文公式：P6 = max(0, η - mean_novelty)
-    // 150 个联系人 surprise 非零 → novelty 可能 > η → P6 可能为 0
+    // 但联系人 prediction error 是未满足的 epistemic pressure，不应被当作已满足 novelty 反向清零。
     // P6 ∈ [0, η] 是论文保证的有界性
-    expect(total).toBeGreaterThanOrEqual(0);
+    expect(total).toBeGreaterThan(0);
     expect(total).toBeLessThanOrEqual(0.6);
+  });
+
+  it("does not invert surprise into zero pressure", () => {
+    const G = new WorldModel();
+    const now = Date.now();
+    G.addAgent("self", { created_ms: now - 30 * 86_400_000 });
+    for (let i = 0; i < 529; i++) {
+      G.addContact(`c_${i}`, {
+        tier: 500,
+        last_active_ms: now - 3600_000,
+        interaction_count: 100,
+      });
+    }
+
+    const { total, contributions } = p6Curiosity(G, now, 0.6);
+
+    expect(total).toBeGreaterThan(0);
+    expect(total).toBeLessThanOrEqual(0.6);
+    expect(Object.values(contributions).some((value) => value > 0)).toBe(true);
   });
 
   it("沉默偏差驱动 surprise（tier-derived 期望）", () => {
