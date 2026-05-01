@@ -232,7 +232,7 @@ export function routeRequest(
   }
 
   // --- graph ---
-  // /graph/contact:123/display_name → ["graph", "contact:123", "display_name"]
+  // /graph/contact:telegram:123/display_name → ["graph", "contact:telegram:123", "display_name"]
   if (resource === "graph" && segments.length === 3) {
     const entity = segments[1];
     const attr = segments[2];

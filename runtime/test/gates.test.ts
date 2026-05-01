@@ -22,7 +22,7 @@ import { WorldModel } from "../src/graph/world-model.js";
 
 /** 构建最小可用图，包含 self + 一个 channel。 */
 function minGraph(
-  channelId = "channel:100",
+  channelId = "channel:telegram:100",
   channelAttrs: Record<string, unknown> = {},
 ): WorldModel {
   const G = new WorldModel();
@@ -68,28 +68,28 @@ function addConversation(
 
 describe("gateIdleSelfStart", () => {
   it("idle 时间达到阈值 → act (使用传入的 selectedAction)", () => {
-    const v = gateIdleSelfStart(50, 50, "diligence", "channel:100", ["channel:100"]);
+    const v = gateIdleSelfStart(50, 50, "diligence", "channel:telegram:100", ["channel:telegram:100"]);
     expect(v.type).toBe("act");
     if (v.type === "act") {
       expect(v.candidate.action).toBe("diligence");
-      expect(v.candidate.target).toBe("channel:100");
-      expect(v.candidate.focalEntities).toEqual(["channel:100"]);
+      expect(v.candidate.target).toBe("channel:telegram:100");
+      expect(v.candidate.focalEntities).toEqual(["channel:telegram:100"]);
     }
   });
 
   it("idle 时间未达阈值 → pass", () => {
-    const v = gateIdleSelfStart(20, 50, "diligence", "channel:100", ["channel:100"]);
+    const v = gateIdleSelfStart(20, 50, "diligence", "channel:telegram:100", ["channel:telegram:100"]);
     expect(v.type).toBe("pass");
   });
 
   it("刚好等于阈值 → act（>= 语义）", () => {
     // idleSinceActionS = 50，thresholdS = 50
-    const v = gateIdleSelfStart(50, 50, "curiosity", "channel:100", ["channel:100"]);
+    const v = gateIdleSelfStart(50, 50, "curiosity", "channel:telegram:100", ["channel:telegram:100"]);
     expect(v.type).toBe("act");
   });
 
   it("target 为 null 时 focalEntities 为空数组", () => {
-    const v = gateIdleSelfStart(200, 50, "sociability", null, ["channel:100", "channel:200"]);
+    const v = gateIdleSelfStart(200, 50, "sociability", null, ["channel:telegram:100", "channel:telegram:200"]);
     expect(v.type).toBe("act");
     if (v.type === "act") {
       expect(v.candidate.target).toBeNull();
@@ -98,7 +98,7 @@ describe("gateIdleSelfStart", () => {
   });
 
   it("netValue、deltaP、socialCost 均为 0（idle 无价值判定）", () => {
-    const v = gateIdleSelfStart(200, 50, "caution", "channel:100", ["channel:100"]);
+    const v = gateIdleSelfStart(200, 50, "caution", "channel:telegram:100", ["channel:telegram:100"]);
     if (v.type === "act") {
       expect(v.candidate.netValue).toBe(0);
       expect(v.candidate.deltaP).toBe(0);
@@ -116,7 +116,7 @@ describe("gateIdleSelfStart", () => {
 describe("gateCrisisMode", () => {
   it("无危机（空危机频道列表）→ pass", () => {
     const G = minGraph();
-    const v = gateCrisisMode(G, "channel:100", [], false);
+    const v = gateCrisisMode(G, "channel:telegram:100", [], false);
     expect(v.type).toBe("pass");
   });
 
@@ -127,8 +127,8 @@ describe("gateCrisisMode", () => {
   });
 
   it("ADR-84: 目标非危机频道 → pass（不再连坐）", () => {
-    const G = minGraph("channel:100");
-    const v = gateCrisisMode(G, "channel:100", ["channel:crisis"], false);
+    const G = minGraph("channel:telegram:100");
+    const v = gateCrisisMode(G, "channel:telegram:100", ["channel:crisis"], false);
     expect(v.type).toBe("pass");
   });
 
@@ -149,7 +149,7 @@ describe("gateCrisisMode", () => {
   });
 
   it("危机频道不在图中 + 无 bypass → CRISIS_OVERRIDE", () => {
-    const G = minGraph("channel:100");
+    const G = minGraph("channel:telegram:100");
     // channel:crisis 不在图中但在危机列表中
     const v = gateCrisisMode(G, "channel:crisis", ["channel:crisis"], false);
     expect(v.type).toBe("silent");
@@ -159,7 +159,7 @@ describe("gateCrisisMode", () => {
   });
 
   it("危机频道不在图中 + shouldBypassGates → pass", () => {
-    const G = minGraph("channel:100");
+    const G = minGraph("channel:telegram:100");
     const v = gateCrisisMode(G, "channel:crisis", ["channel:crisis"], true);
     expect(v.type).toBe("pass");
   });
@@ -422,23 +422,23 @@ describe("countActionsByClass", () => {
 
   // ADR-189: bot channel 分类
   it("bot channel 被计入 bot 类别", () => {
-    const G = minGraph("channel:100", { chat_type: "private" });
+    const G = minGraph("channel:telegram:100", { chat_type: "private" });
     // 添加 bot contact
-    G.addContact("contact:100", { is_bot: true, tier: 150 });
+    G.addContact("contact:telegram:100", { is_bot: true, tier: 150 });
     // 添加 bot channel
-    G.addChannel("channel:bot1", {
+    G.addChannel("channel:telegram:9001", {
       unread: 0,
       tier_contact: 150,
       chat_type: "private",
       pending_directed: 0,
       last_directed_ms: 0,
     });
-    G.addContact("contact:bot1", { is_bot: true, tier: 150 });
-    G.addRelation("self", "monitors", "channel:bot1");
+    G.addContact("contact:telegram:9001", { is_bot: true, tier: 150 });
+    G.addRelation("self", "monitors", "channel:telegram:9001");
 
     const actions = [
-      { target: "channel:100" }, // is_bot=true → bot
-      { target: "channel:bot1" }, // is_bot=true → bot
+      { target: "channel:telegram:100" }, // is_bot=true → bot
+      { target: "channel:telegram:9001" }, // is_bot=true → bot
     ];
     const counts = countActionsByClass(actions, G);
     expect(counts.bot).toBe(2);
@@ -478,29 +478,29 @@ describe("gateConversationAware", () => {
 
   it("target 在图中但无活跃对话 → 默认值", () => {
     const G = minGraph();
-    const result = gateConversationAware(G, "channel:100");
+    const result = gateConversationAware(G, "channel:telegram:100");
     expect(result.lambdaMultiplier).toBe(1.0);
     expect(result.silenceBoost).toBe(false);
   });
 
   it("active + alice_turn → lambda 降低（更容易通过）", () => {
     const G = minGraph();
-    addConversation(G, "conversation:1", "channel:100", {
+    addConversation(G, "conversation:1", "channel:telegram:100", {
       state: "active",
       turn_state: "alice_turn",
     });
-    const result = gateConversationAware(G, "channel:100");
+    const result = gateConversationAware(G, "channel:telegram:100");
     expect(result.lambdaMultiplier).toBe(0.5);
     expect(result.silenceBoost).toBe(false);
   });
 
   it("active + other_turn → 默认值（不是 alice_turn）", () => {
     const G = minGraph();
-    addConversation(G, "conversation:1", "channel:100", {
+    addConversation(G, "conversation:1", "channel:telegram:100", {
       state: "active",
       turn_state: "other_turn",
     });
-    const result = gateConversationAware(G, "channel:100");
+    const result = gateConversationAware(G, "channel:telegram:100");
     expect(result.lambdaMultiplier).toBe(1.0);
     expect(result.silenceBoost).toBe(false);
   });
@@ -509,8 +509,8 @@ describe("gateConversationAware", () => {
     const G = minGraph();
     // ADR-135 C2: gateConversationAware 改用 findConversationForChannel，
     // closing 对话现在可被发现 → silenceBoost 分支可达。
-    addConversation(G, "conversation:closing", "channel:100", { state: "closing" });
-    const result = gateConversationAware(G, "channel:100");
+    addConversation(G, "conversation:closing", "channel:telegram:100", { state: "closing" });
+    const result = gateConversationAware(G, "channel:telegram:100");
     expect(result.lambdaMultiplier).toBe(1.0);
     expect(result.silenceBoost).toBe(true);
   });
@@ -518,19 +518,19 @@ describe("gateConversationAware", () => {
   it("cooldown → lambda 升高（阻止主动发起）", () => {
     const G = minGraph();
     // ADR-135 C2: cooldown 对话现在可被发现 → lambdaMultiplier: 2.0 分支可达。
-    addConversation(G, "conversation:cool", "channel:100", { state: "cooldown" });
-    const result = gateConversationAware(G, "channel:100");
+    addConversation(G, "conversation:cool", "channel:telegram:100", { state: "cooldown" });
+    const result = gateConversationAware(G, "channel:telegram:100");
     expect(result.lambdaMultiplier).toBe(2.0);
     expect(result.silenceBoost).toBe(false);
   });
 
   it("pending 对话 → findActiveConversation 找到，进入状态判定", () => {
     const G = minGraph();
-    addConversation(G, "conversation:pending", "channel:100", {
+    addConversation(G, "conversation:pending", "channel:telegram:100", {
       state: "pending",
       turn_state: "open",
     });
-    const result = gateConversationAware(G, "channel:100");
+    const result = gateConversationAware(G, "channel:telegram:100");
     // pending + open → 不匹配 active+alice_turn / closing / cooldown → 走 fallback
     expect(result.lambdaMultiplier).toBe(1.0);
     expect(result.silenceBoost).toBe(false);
@@ -538,11 +538,11 @@ describe("gateConversationAware", () => {
 
   it("opening + alice_turn → 不触发 lambda 降低（只有 active 才降低）", () => {
     const G = minGraph();
-    addConversation(G, "conversation:opening", "channel:100", {
+    addConversation(G, "conversation:opening", "channel:telegram:100", {
       state: "opening",
       turn_state: "alice_turn",
     });
-    const result = gateConversationAware(G, "channel:100");
+    const result = gateConversationAware(G, "channel:telegram:100");
     // opening ≠ active → 不匹配第一个分支 → 也不匹配 closing/cooldown → fallback
     expect(result.lambdaMultiplier).toBe(1.0);
     expect(result.silenceBoost).toBe(false);
@@ -551,16 +551,16 @@ describe("gateConversationAware", () => {
   it("多个对话时只返回第一个活跃对话的状态", () => {
     const G = minGraph();
     // 第一个：active + alice_turn
-    addConversation(G, "conversation:1", "channel:100", {
+    addConversation(G, "conversation:1", "channel:telegram:100", {
       state: "active",
       turn_state: "alice_turn",
     });
     // 第二个：也是 active 但 other_turn（不应影响结果）
-    addConversation(G, "conversation:2", "channel:100", {
+    addConversation(G, "conversation:2", "channel:telegram:100", {
       state: "active",
       turn_state: "other_turn",
     });
-    const result = gateConversationAware(G, "channel:100");
+    const result = gateConversationAware(G, "channel:telegram:100");
     // findActiveConversation 返回第一个匹配的
     expect(result.lambdaMultiplier).toBe(0.5);
   });
@@ -572,25 +572,25 @@ describe("gateConversationAware", () => {
 
 describe("resolveIsBot", () => {
   it("channel 对应的 contact 是 bot → true", () => {
-    const G = minGraph("channel:100");
-    G.addContact("contact:100", { is_bot: true, tier: 150 });
-    expect(resolveIsBot(G, "channel:100")).toBe(true);
+    const G = minGraph("channel:telegram:100");
+    G.addContact("contact:telegram:100", { is_bot: true, tier: 150 });
+    expect(resolveIsBot(G, "channel:telegram:100")).toBe(true);
   });
 
   it("channel 对应的 contact 不是 bot → false", () => {
-    const G = minGraph("channel:100");
-    G.addContact("contact:100", { is_bot: false, tier: 50 });
-    expect(resolveIsBot(G, "channel:100")).toBe(false);
+    const G = minGraph("channel:telegram:100");
+    G.addContact("contact:telegram:100", { is_bot: false, tier: 50 });
+    expect(resolveIsBot(G, "channel:telegram:100")).toBe(false);
   });
 
   it("channel 无对应 contact → undefined", () => {
-    const G = minGraph("channel:100");
-    // 不添加 contact:100
-    expect(resolveIsBot(G, "channel:100")).toBeUndefined();
+    const G = minGraph("channel:telegram:100");
+    // 不添加 contact:telegram:100
+    expect(resolveIsBot(G, "channel:telegram:100")).toBeUndefined();
   });
 
   it("channel 不在图中 → undefined", () => {
-    const G = minGraph("channel:100");
-    expect(resolveIsBot(G, "channel:999")).toBeUndefined();
+    const G = minGraph("channel:telegram:100");
+    expect(resolveIsBot(G, "channel:telegram:999")).toBeUndefined();
   });
 });

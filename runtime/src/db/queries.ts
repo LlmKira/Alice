@@ -54,7 +54,7 @@ export function getRecentMessagesByChat(
  * 从 message_log 按 senderId 查询，按 tick DESC 取最近 N 条。
  * 排除 Alice 自己发出的消息（isOutgoing = true）。
  *
- * @param senderId 联系人 ID（如 "contact:123"）
+ * @param senderId 联系人 ID（如 "contact:telegram:123"）
  * @param limit 最大返回条数，默认 15
  * @returns 按 tick 降序排列的消息列表
  *
@@ -209,7 +209,7 @@ export function getMessageCluster(
  * 应用层过滤 sharedChats + excludeChat（避免 SQL IN 动态构建）。
  * Over-fetch 3x limit 以补偿应用层过滤损耗。
  *
- * @param senderId    联系人 ID（如 "contact:123"）
+ * @param senderId    联系人 ID（如 "contact:telegram:123"）
  * @param sinceMs     时间窗口起点（毫秒时间戳）
  * @param excludeChat 排除的当前频道 ID
  * @param limit       最大返回条数

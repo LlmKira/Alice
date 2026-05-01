@@ -213,51 +213,51 @@ describe("relationships.mod — onTickEnd Tier 演化", () => {
 
   it("tick 非 TIER_EVAL_INTERVAL 整数倍时不评估", () => {
     const ctx = makeCtx({}, TIER_EVAL_INTERVAL + 1);
-    ctx.graph.addContact("contact:1", { tier: 150 });
+    ctx.graph.addContact("contact:telegram:1", { tier: 150 });
 
     // biome-ignore lint/style/noNonNullAssertion: test
     relationshipsMod.onTickEnd!(ctx as unknown as ModContext);
 
-    expect(ctx.state.tierTrackers["contact:1"]).toBeUndefined();
+    expect(ctx.state.tierTrackers["contact:telegram:1"]).toBeUndefined();
   });
 
   it("tick=0 时不评估", () => {
     const ctx = makeCtx({}, 0);
-    ctx.graph.addContact("contact:1", { tier: 150 });
+    ctx.graph.addContact("contact:telegram:1", { tier: 150 });
 
     // biome-ignore lint/style/noNonNullAssertion: test
     relationshipsMod.onTickEnd!(ctx as unknown as ModContext);
 
-    expect(ctx.state.tierTrackers["contact:1"]).toBeUndefined();
+    expect(ctx.state.tierTrackers["contact:telegram:1"]).toBeUndefined();
   });
 
   it("初始化 tracker", () => {
     const ctx = makeCtx({}, TIER_EVAL_INTERVAL);
-    ctx.graph.addContact("contact:1", { tier: 150 });
+    ctx.graph.addContact("contact:telegram:1", { tier: 150 });
 
     // biome-ignore lint/style/noNonNullAssertion: test
     relationshipsMod.onTickEnd!(ctx as unknown as ModContext);
 
-    expect(ctx.state.tierTrackers["contact:1"]).toBeDefined();
-    expect(ctx.state.tierTrackers["contact:1"].lastEvalTick).toBe(TIER_EVAL_INTERVAL);
+    expect(ctx.state.tierTrackers["contact:telegram:1"]).toBeDefined();
+    expect(ctx.state.tierTrackers["contact:telegram:1"].lastEvalTick).toBe(TIER_EVAL_INTERVAL);
   });
 
   it("连续 3 次高分 → 升级 150 → 50", () => {
     const ctx = makeCtx(
       {
         tierTrackers: {
-          "contact:1": { consecutiveHigh: 2, consecutiveLow: 0, lastEvalTick: 0 },
+          "contact:telegram:1": { consecutiveHigh: 2, consecutiveLow: 0, lastEvalTick: 0 },
         },
       },
       TIER_EVAL_INTERVAL,
     );
-    ctx.graph.addContact("contact:1", {
+    ctx.graph.addContact("contact:telegram:1", {
       tier: 150,
       interaction_count: 20,
     });
     // 添加 15 条 fact 图节点作为 facts（替代旧 memorizedFacts）
     for (let i = 0; i < 15; i++) {
-      const iid = `info_contact:1_test_${i}`;
+      const iid = `info_contact:telegram:1_test_${i}`;
       ctx.graph.addFact(iid, {
         content: `fact_${i}`,
         fact_type: "observation",
@@ -269,18 +269,18 @@ describe("relationships.mod — onTickEnd Tier 演化", () => {
         created_ms: 0,
         novelty: 1.0,
         reinforcement_count: 1,
-        source_contact: "contact:1",
+        source_contact: "contact:telegram:1",
       });
-      ctx.graph.addRelation("contact:1", "knows", iid);
+      ctx.graph.addRelation("contact:telegram:1", "knows", iid);
     }
     // P1-mods-1: Frequency 现在从 DB 窗口计数获取，需要插入记录
     // tier=150 的 EXPECTED_FREQUENCY=0.3/day，插入 5 条 → frequency=min(1,5/0.3)=1.0
-    insertActionRecords("channel:1", 5, TIER_EVAL_INTERVAL - 10);
+    insertActionRecords("channel:telegram:1", 5, TIER_EVAL_INTERVAL - 10);
     ctx.getModState = (name: string) => {
       if (name === "observer") {
         return {
           outcomeHistory: Array.from({ length: 10 }, () => ({
-            target: "contact:1",
+            target: "contact:telegram:1",
             quality: 0.9,
           })),
         };
@@ -291,9 +291,9 @@ describe("relationships.mod — onTickEnd Tier 演化", () => {
     // biome-ignore lint/style/noNonNullAssertion: test
     relationshipsMod.onTickEnd!(ctx as unknown as ModContext);
 
-    expect(ctx.graph.getContact("contact:1").tier).toBe(50);
-    expect(ctx.graph.getContact("contact:1").tier_direction).toBe("upgrade");
-    expect(ctx.state.tierTrackers["contact:1"].consecutiveHigh).toBe(0);
+    expect(ctx.graph.getContact("contact:telegram:1").tier).toBe(50);
+    expect(ctx.graph.getContact("contact:telegram:1").tier_direction).toBe("upgrade");
+    expect(ctx.state.tierTrackers["contact:telegram:1"].consecutiveHigh).toBe(0);
   });
 
   it("连续 5 次低分 → 降级 50 → 150（非对称：降级需 5 次）", () => {
@@ -301,17 +301,17 @@ describe("relationships.mod — onTickEnd Tier 演化", () => {
       {
         tierTrackers: {
           // 已经连续 4 次低分，再加 1 次 = 5 → 触发降级
-          "contact:1": { consecutiveHigh: 0, consecutiveLow: 4, lastEvalTick: 0 },
+          "contact:telegram:1": { consecutiveHigh: 0, consecutiveLow: 4, lastEvalTick: 0 },
         },
       },
       TIER_EVAL_INTERVAL,
     );
-    ctx.graph.addContact("contact:1", { tier: 50 });
+    ctx.graph.addContact("contact:telegram:1", { tier: 50 });
     ctx.getModState = (name: string) => {
       if (name === "observer") {
         return {
           outcomeHistory: Array.from({ length: 5 }, () => ({
-            target: "contact:1",
+            target: "contact:telegram:1",
             quality: -0.8,
           })),
         };
@@ -322,20 +322,20 @@ describe("relationships.mod — onTickEnd Tier 演化", () => {
     // biome-ignore lint/style/noNonNullAssertion: test
     relationshipsMod.onTickEnd!(ctx as unknown as ModContext);
 
-    expect(ctx.graph.getContact("contact:1").tier).toBe(150);
-    expect(ctx.graph.getContact("contact:1").tier_direction).toBe("downgrade");
+    expect(ctx.graph.getContact("contact:telegram:1").tier).toBe(150);
+    expect(ctx.graph.getContact("contact:telegram:1").tier_direction).toBe("downgrade");
   });
 
   it("连续 3 次低分不足以降级（需 5 次）", () => {
     const ctx = makeCtx(
       {
         tierTrackers: {
-          "contact:1": { consecutiveHigh: 0, consecutiveLow: 2, lastEvalTick: 0 },
+          "contact:telegram:1": { consecutiveHigh: 0, consecutiveLow: 2, lastEvalTick: 0 },
         },
       },
       TIER_EVAL_INTERVAL,
     );
-    ctx.graph.addContact("contact:1", { tier: 50 });
+    ctx.graph.addContact("contact:telegram:1", { tier: 50 });
     ctx.getModState = (name: string) => {
       if (name === "observer") {
         return { outcomeHistory: [] };
@@ -347,23 +347,23 @@ describe("relationships.mod — onTickEnd Tier 演化", () => {
     relationshipsMod.onTickEnd!(ctx as unknown as ModContext);
 
     // consecutiveLow 增加到 3，但未达到 5 次阈值，tier 保持不变
-    expect(ctx.graph.getContact("contact:1").tier).toBe(50);
-    expect(ctx.state.tierTrackers["contact:1"].consecutiveLow).toBe(3);
+    expect(ctx.graph.getContact("contact:telegram:1").tier).toBe(50);
+    expect(ctx.state.tierTrackers["contact:telegram:1"].consecutiveLow).toBe(3);
   });
 
   it("最亲密 tier (5) 不再升级", () => {
     const ctx = makeCtx(
       {
         tierTrackers: {
-          "contact:1": { consecutiveHigh: 2, consecutiveLow: 0, lastEvalTick: 0 },
+          "contact:telegram:1": { consecutiveHigh: 2, consecutiveLow: 0, lastEvalTick: 0 },
         },
       },
       TIER_EVAL_INTERVAL,
     );
-    ctx.graph.addContact("contact:1", { tier: 5, interaction_count: 50 });
+    ctx.graph.addContact("contact:telegram:1", { tier: 5, interaction_count: 50 });
     // 添加 20 条 fact 图节点作为 facts
     for (let i = 0; i < 20; i++) {
-      const iid = `info_contact:1_test_${i}`;
+      const iid = `info_contact:telegram:1_test_${i}`;
       ctx.graph.addFact(iid, {
         content: `f${i}`,
         fact_type: "observation",
@@ -375,15 +375,15 @@ describe("relationships.mod — onTickEnd Tier 演化", () => {
         created_ms: 0,
         novelty: 1.0,
         reinforcement_count: 1,
-        source_contact: "contact:1",
+        source_contact: "contact:telegram:1",
       });
-      ctx.graph.addRelation("contact:1", "knows", iid);
+      ctx.graph.addRelation("contact:telegram:1", "knows", iid);
     }
     ctx.getModState = (name: string) => {
       if (name === "observer") {
         return {
           outcomeHistory: Array.from({ length: 10 }, () => ({
-            target: "contact:1",
+            target: "contact:telegram:1",
             quality: 1.0,
           })),
         };
@@ -394,24 +394,24 @@ describe("relationships.mod — onTickEnd Tier 演化", () => {
     // biome-ignore lint/style/noNonNullAssertion: test
     relationshipsMod.onTickEnd!(ctx as unknown as ModContext);
 
-    expect(ctx.graph.getContact("contact:1").tier).toBe(5);
+    expect(ctx.graph.getContact("contact:telegram:1").tier).toBe(5);
   });
 
   it("最疏远 tier (500) 不再降级", () => {
     const ctx = makeCtx(
       {
         tierTrackers: {
-          "contact:1": { consecutiveHigh: 0, consecutiveLow: 4, lastEvalTick: 0 },
+          "contact:telegram:1": { consecutiveHigh: 0, consecutiveLow: 4, lastEvalTick: 0 },
         },
       },
       TIER_EVAL_INTERVAL,
     );
-    ctx.graph.addContact("contact:1", { tier: 500 });
+    ctx.graph.addContact("contact:telegram:1", { tier: 500 });
     ctx.getModState = (name: string) => {
       if (name === "observer") {
         return {
           outcomeHistory: Array.from({ length: 5 }, () => ({
-            target: "contact:1",
+            target: "contact:telegram:1",
             quality: -1.0,
           })),
         };
@@ -423,7 +423,7 @@ describe("relationships.mod — onTickEnd Tier 演化", () => {
     relationshipsMod.onTickEnd!(ctx as unknown as ModContext);
 
     // consecutiveLow = 5 → 降级触发，但 tier 500 已是最疏远，无法再降
-    expect(ctx.graph.getContact("contact:1").tier).toBe(500);
+    expect(ctx.graph.getContact("contact:telegram:1").tier).toBe(500);
   });
 });
 

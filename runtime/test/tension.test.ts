@@ -172,7 +172,7 @@ describe("TensionVector", () => {
   describe("routeContributions", () => {
     it("channel 贡献直接通过（不变）", () => {
       const G = new WorldModel();
-      G.addChannel("channel:1", {
+      G.addChannel("channel:telegram:1", {
         unread: 0,
         tier_contact: 150,
         chat_type: "private",
@@ -180,22 +180,22 @@ describe("TensionVector", () => {
         last_directed_ms: 0,
       });
 
-      const contribs = { P1: { "channel:1": 5.0 }, P5: { "channel:1": 2.0 } };
+      const contribs = { P1: { "channel:telegram:1": 5.0 }, P5: { "channel:telegram:1": 2.0 } };
       const routed = routeContributions(contribs, {}, G);
 
-      expect(routed.contributions.P1?.["channel:1"]).toBe(5.0);
-      expect(routed.contributions.P5?.["channel:1"]).toBe(2.0);
+      expect(routed.contributions.P1?.["channel:telegram:1"]).toBe(5.0);
+      expect(routed.contributions.P5?.["channel:telegram:1"]).toBe(2.0);
     });
 
     it("contact 路由到对应私聊频道", () => {
       const G = new WorldModel();
-      G.addContact("contact:42", {
+      G.addContact("contact:telegram:42", {
         tier: 50,
         last_active_ms: 0,
         auth_level: 0,
         interaction_count: 0,
       });
-      G.addChannel("channel:42", {
+      G.addChannel("channel:telegram:42", {
         unread: 0,
         tier_contact: 50,
         chat_type: "private",
@@ -203,25 +203,25 @@ describe("TensionVector", () => {
         last_directed_ms: 0,
       });
 
-      const contribs = { P3: { "contact:42": 1.5 } };
+      const contribs = { P3: { "contact:telegram:42": 1.5 } };
       const routed = routeContributions(contribs, {}, G);
 
-      // P3 贡献从 contact:42 路由到 channel:42
-      expect(routed.contributions.P3?.["contact:42"]).toBeUndefined();
-      expect(routed.contributions.P3?.["channel:42"]).toBe(1.5);
+      // P3 贡献从 contact:telegram:42 路由到 channel:telegram:42
+      expect(routed.contributions.P3?.["contact:telegram:42"]).toBeUndefined();
+      expect(routed.contributions.P3?.["channel:telegram:42"]).toBe(1.5);
     });
 
     it("无对应频道的 contact 贡献被丢弃", () => {
       const G = new WorldModel();
-      G.addContact("contact:99", {
+      G.addContact("contact:telegram:99", {
         tier: 150,
         last_active_ms: 0,
         auth_level: 0,
         interaction_count: 0,
       });
-      // 没有 channel:99
+      // 没有 channel:telegram:99
 
-      const contribs = { P3: { "contact:99": 1.0 } };
+      const contribs = { P3: { "contact:telegram:99": 1.0 } };
       const routed = routeContributions(contribs, {}, G);
 
       expect(Object.keys(routed.contributions.P3 ?? {})).toHaveLength(0);
@@ -229,13 +229,13 @@ describe("TensionVector", () => {
 
     it("多个 contact 路由到同一频道时累加", () => {
       const G = new WorldModel();
-      G.addContact("contact:10", {
+      G.addContact("contact:telegram:10", {
         tier: 50,
         last_active_ms: 0,
         auth_level: 0,
         interaction_count: 0,
       });
-      G.addChannel("channel:10", {
+      G.addChannel("channel:telegram:10", {
         unread: 0,
         tier_contact: 50,
         chat_type: "private",
@@ -244,22 +244,22 @@ describe("TensionVector", () => {
       });
 
       // P3 和 P6 都贡献到同一个 contact → 路由到同一个 channel
-      const contribs = { P3: { "contact:10": 1.0 }, P6: { "contact:10": 0.5 } };
+      const contribs = { P3: { "contact:telegram:10": 1.0 }, P6: { "contact:telegram:10": 0.5 } };
       const routed = routeContributions(contribs, {}, G);
 
-      expect(routed.contributions.P3?.["channel:10"]).toBe(1.0);
-      expect(routed.contributions.P6?.["channel:10"]).toBe(0.5);
+      expect(routed.contributions.P3?.["channel:telegram:10"]).toBe(1.0);
+      expect(routed.contributions.P6?.["channel:telegram:10"]).toBe(0.5);
     });
 
     it("thread 通过 involves 边路由到频道", () => {
       const G = new WorldModel();
-      G.addContact("contact:7", {
+      G.addContact("contact:telegram:7", {
         tier: 50,
         last_active_ms: 0,
         auth_level: 0,
         interaction_count: 0,
       });
-      G.addChannel("channel:7", {
+      G.addChannel("channel:telegram:7", {
         unread: 0,
         tier_contact: 50,
         chat_type: "private",
@@ -273,25 +273,25 @@ describe("TensionVector", () => {
         created_ms: 0,
         deadline: Infinity,
       });
-      G.addRelation("thread_1", "involves", "contact:7");
+      G.addRelation("thread_1", "involves", "contact:telegram:7");
 
       const contribs = { P4: { thread_1: 3.0 } };
       const routed = routeContributions(contribs, {}, G);
 
-      // thread_1 → involves → contact:7 → channel:7
+      // thread_1 → involves → contact:telegram:7 → channel:telegram:7
       expect(routed.contributions.P4?.thread_1).toBeUndefined();
-      expect(routed.contributions.P4?.["channel:7"]).toBe(3.0);
+      expect(routed.contributions.P4?.["channel:telegram:7"]).toBe(3.0);
     });
 
     it("fact 通过 source_contact 路由到频道", () => {
       const G = new WorldModel();
-      G.addContact("contact:5", {
+      G.addContact("contact:telegram:5", {
         tier: 50,
         last_active_ms: 0,
         auth_level: 0,
         interaction_count: 0,
       });
-      G.addChannel("channel:5", {
+      G.addChannel("channel:telegram:5", {
         unread: 0,
         tier_contact: 50,
         chat_type: "private",
@@ -306,25 +306,25 @@ describe("TensionVector", () => {
         tracked: false,
         created_ms: 0,
         novelty: 1.0,
-        source_contact: "contact:5",
+        source_contact: "contact:telegram:5",
       });
 
       const contribs = { P2: { fact_abc: 0.5 } };
       const routed = routeContributions(contribs, {}, G);
 
       expect(routed.contributions.P2?.fact_abc).toBeUndefined();
-      expect(routed.contributions.P2?.["channel:5"]).toBe(0.5);
+      expect(routed.contributions.P2?.["channel:telegram:5"]).toBe(0.5);
     });
 
     it("prospectContributions 也正确路由", () => {
       const G = new WorldModel();
-      G.addContact("contact:3", {
+      G.addContact("contact:telegram:3", {
         tier: 50,
         last_active_ms: 0,
         auth_level: 0,
         interaction_count: 0,
       });
-      G.addChannel("channel:3", {
+      G.addChannel("channel:telegram:3", {
         unread: 0,
         tier_contact: 50,
         chat_type: "private",
@@ -338,24 +338,24 @@ describe("TensionVector", () => {
         created_ms: 0,
         deadline: 100,
       });
-      G.addRelation("thread_2", "involves", "contact:3");
+      G.addRelation("thread_2", "involves", "contact:telegram:3");
 
       const prospect = { thread_2: 0.9 };
       const routed = routeContributions({}, prospect, G);
 
       expect(routed.prospectContributions.thread_2).toBeUndefined();
-      expect(routed.prospectContributions["channel:3"]).toBe(0.9);
+      expect(routed.prospectContributions["channel:telegram:3"]).toBe(0.9);
     });
 
     it("thread 有 source_channel → 路由到 source_channel（ADR-104）", () => {
       const G = new WorldModel();
-      G.addContact("contact:7", {
+      G.addContact("contact:telegram:7", {
         tier: 50,
         last_active_ms: 0,
         auth_level: 0,
         interaction_count: 0,
       });
-      G.addChannel("channel:7", {
+      G.addChannel("channel:telegram:7", {
         unread: 0,
         tier_contact: 50,
         chat_type: "private",
@@ -377,25 +377,25 @@ describe("TensionVector", () => {
         deadline: Infinity,
         source_channel: "channel:group_99",
       });
-      G.addRelation("thread_sc", "involves", "contact:7");
+      G.addRelation("thread_sc", "involves", "contact:telegram:7");
 
       const contribs = { P4: { thread_sc: 3.0 } };
       const routed = routeContributions(contribs, {}, G);
 
-      // 有 source_channel → 路由到 channel:group_99，不走 involves → channel:7
+      // 有 source_channel → 路由到 channel:group_99，不走 involves → channel:telegram:7
       expect(routed.contributions.P4?.["channel:group_99"]).toBe(3.0);
-      expect(routed.contributions.P4?.["channel:7"]).toBeUndefined();
+      expect(routed.contributions.P4?.["channel:telegram:7"]).toBeUndefined();
     });
 
     it("thread 无 source_channel → 回退 involves 边（ADR-104）", () => {
       const G = new WorldModel();
-      G.addContact("contact:8", {
+      G.addContact("contact:telegram:8", {
         tier: 50,
         last_active_ms: 0,
         auth_level: 0,
         interaction_count: 0,
       });
-      G.addChannel("channel:8", {
+      G.addChannel("channel:telegram:8", {
         unread: 0,
         tier_contact: 50,
         chat_type: "private",
@@ -410,13 +410,13 @@ describe("TensionVector", () => {
         deadline: Infinity,
         // 无 source_channel
       });
-      G.addRelation("thread_no_sc", "involves", "contact:8");
+      G.addRelation("thread_no_sc", "involves", "contact:telegram:8");
 
       const contribs = { P4: { thread_no_sc: 2.0 } };
       const routed = routeContributions(contribs, {}, G);
 
-      // 无 source_channel → 回退 involves → contact:8 → channel:8
-      expect(routed.contributions.P4?.["channel:8"]).toBe(2.0);
+      // 无 source_channel → 回退 involves → contact:telegram:8 → channel:telegram:8
+      expect(routed.contributions.P4?.["channel:telegram:8"]).toBe(2.0);
     });
 
     it("不在图中的实体贡献被丢弃", () => {
@@ -439,13 +439,13 @@ describe("TensionVector", () => {
 
     it("混合场景：channel + contact + thread 路由到同一 channel 时累加", () => {
       const G = new WorldModel();
-      G.addContact("contact:1", {
+      G.addContact("contact:telegram:1", {
         tier: 5,
         last_active_ms: 0,
         auth_level: 0,
         interaction_count: 0,
       });
-      G.addChannel("channel:1", {
+      G.addChannel("channel:telegram:1", {
         unread: 10,
         tier_contact: 5,
         chat_type: "private",
@@ -459,19 +459,19 @@ describe("TensionVector", () => {
         created_ms: 0,
         deadline: Infinity,
       });
-      G.addRelation("thread_1", "involves", "contact:1");
+      G.addRelation("thread_1", "involves", "contact:telegram:1");
 
-      // P1→channel:1(5), P3→contact:1(1) 路由到 channel:1, P4→thread_1(3) 路由到 channel:1
+      // P1→channel:telegram:1(5), P3→contact:telegram:1(1) 路由到 channel:telegram:1, P4→thread_1(3) 路由到 channel:telegram:1
       const contribs = {
-        P1: { "channel:1": 5.0 },
-        P3: { "contact:1": 1.0 },
+        P1: { "channel:telegram:1": 5.0 },
+        P3: { "contact:telegram:1": 1.0 },
         P4: { thread_1: 3.0 },
       };
       const routed = routeContributions(contribs, {}, G);
 
-      expect(routed.contributions.P1?.["channel:1"]).toBe(5.0); // P1 直通
-      expect(routed.contributions.P3?.["channel:1"]).toBe(1.0); // P3 路由
-      expect(routed.contributions.P4?.["channel:1"]).toBe(3.0); // P4 路由
+      expect(routed.contributions.P1?.["channel:telegram:1"]).toBe(5.0); // P1 直通
+      expect(routed.contributions.P3?.["channel:telegram:1"]).toBe(1.0); // P3 路由
+      expect(routed.contributions.P4?.["channel:telegram:1"]).toBe(3.0); // P4 路由
     });
   });
 });

@@ -2400,17 +2400,21 @@ describe("ADR-189 蟑螂审计: Class rate cap cross-class isolation (GAP-6, P1)
 
 describe("ADR-189: Bot scope rate cap", () => {
   const nowMs = BASE_NOW_MS;
+  const botChannel = "channel:telegram:9001";
+  const botContact = "contact:telegram:9001";
+  const humanChannel = "channel:telegram:9002";
+  const humanContact = "contact:telegram:9002";
 
   it("bot channel + rateCap.bot=0 → 被 pre-filter 跳过", () => {
-    const G = buildGraph([{ id: "channel:bot", chatType: "private" }]);
+    const G = buildGraph([{ id: botChannel, chatType: "private" }]);
     // 添加 bot contact
-    G.addContact("contact:bot", { is_bot: true, tier: 150 });
+    G.addContact(botContact, { is_bot: true, tier: 150 });
 
-    const tensionMap = new Map([["channel:bot", tension({ tau1: 1.0, tau3: 0.5 })]]);
+    const tensionMap = new Map([[botChannel, tension({ tau1: 1.0, tau3: 0.5 })]]);
 
     const config = buildIAUSConfig(G, tensionMap, {
       nowMs,
-      contributions: { P1: { "channel:bot": 20 } },
+      contributions: { P1: { [botChannel]: 20 } },
       deterministic: true,
       classRateCaps: { private: 10, group: 8, channel: 8, bot: 0 },
       classActionCounts: { private: 0, group: 0, channel: 0, bot: 0 },
@@ -2422,15 +2426,15 @@ describe("ADR-189: Bot scope rate cap", () => {
   });
 
   it("bot channel + bypass(directed) → 仍可通过评分", () => {
-    const G = buildGraph([{ id: "channel:bot", chatType: "private", pendingDirected: 2 }]);
-    G.addContact("contact:bot", { is_bot: true, tier: 150 });
-    setObligation(G, "channel:bot", 2, nowMs);
+    const G = buildGraph([{ id: botChannel, chatType: "private", pendingDirected: 2 }]);
+    G.addContact(botContact, { is_bot: true, tier: 150 });
+    setObligation(G, botChannel, 2, nowMs);
 
-    const tensionMap = new Map([["channel:bot", tension({ tau1: 1.0, tau5: 0.8 })]]);
+    const tensionMap = new Map([[botChannel, tension({ tau1: 1.0, tau5: 0.8 })]]);
 
     const config = buildIAUSConfig(G, tensionMap, {
       nowMs,
-      contributions: { P1: { "channel:bot": 20 } },
+      contributions: { P1: { [botChannel]: 20 } },
       candidateCtx: buildCandidateCtx(G, nowMs),
       deterministic: true,
       classRateCaps: { private: 10, group: 8, channel: 8, bot: 0 },
@@ -2441,27 +2445,27 @@ describe("ADR-189: Bot scope rate cap", () => {
     // bypass 候选穿透 rateCap 限制
     expect(result).not.toBeNull();
     if (result) {
-      expect(result.candidate.target).toBe("channel:bot");
+      expect(result.candidate.target).toBe(botChannel);
       expect(result.winnerBypassGates).toBe(true);
     }
   });
 
   it("bot channel 不影响同时存在的 private channel", () => {
     const G = buildGraph([
-      { id: "channel:bot", chatType: "private" },
-      { id: "channel:human", chatType: "private" },
+      { id: botChannel, chatType: "private" },
+      { id: humanChannel, chatType: "private" },
     ]);
-    G.addContact("contact:bot", { is_bot: true, tier: 150 });
-    G.addContact("contact:human", { is_bot: false, tier: 5 });
+    G.addContact(botContact, { is_bot: true, tier: 150 });
+    G.addContact(humanContact, { is_bot: false, tier: 5 });
 
     const tensionMap = new Map([
-      ["channel:bot", tension({ tau1: 2.0, tau3: 1.0 })],
-      ["channel:human", tension({ tau1: 1.0, tau3: 0.5 })],
+      [botChannel, tension({ tau1: 2.0, tau3: 1.0 })],
+      [humanChannel, tension({ tau1: 1.0, tau3: 0.5 })],
     ]);
 
     const config = buildIAUSConfig(G, tensionMap, {
       nowMs,
-      contributions: { P1: { "channel:bot": 30, "channel:human": 10 } },
+      contributions: { P1: { [botChannel]: 30, [humanChannel]: 10 } },
       deterministic: true,
       classRateCaps: { private: 10, group: 8, channel: 8, bot: 0 },
       classActionCounts: { private: 0, group: 0, channel: 0, bot: 0 },
@@ -2471,7 +2475,7 @@ describe("ADR-189: Bot scope rate cap", () => {
     // bot 被过滤，human 仍有候选
     expect(result).not.toBeNull();
     if (result) {
-      expect(result.candidate.target).toBe("channel:human");
+      expect(result.candidate.target).toBe(humanChannel);
     }
   });
 

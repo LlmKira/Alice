@@ -128,80 +128,6 @@ func TestFindTsxBinaryPrefersRuntimeLocal(t *testing.T) {
 	}
 }
 
-func TestNewRuntimeCommandFallsBackToPnpm(t *testing.T) {
-	t.Parallel()
-
-	if !hasCommand("pnpm") {
-		t.Skip("pnpm not installed")
-	}
-
-	runtimeDir := t.TempDir()
-	srcDir := filepath.Join(runtimeDir, "src")
-	if err := os.MkdirAll(srcDir, 0755); err != nil {
-		t.Fatalf("mkdir src: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(srcDir, "index.ts"), []byte("export {};\n"), 0644); err != nil {
-		t.Fatalf("write index.ts: %v", err)
-	}
-
-	cmd, warning, err := newRuntimeCommand(runtimeDir)
-	if err != nil {
-		t.Fatalf("newRuntimeCommand(): %v", err)
-	}
-	if filepath.Base(cmd.Path) != "pnpm" {
-		t.Fatalf("cmd.Path = %q, want basename pnpm", cmd.Path)
-	}
-	if warning == "" {
-		t.Fatalf("warning should not be empty")
-	}
-	wantArgs := []string{"pnpm", "--dir", runtimeDir, "exec", "tsx", "src/index.ts"}
-	if !reflect.DeepEqual(cmd.Args, wantArgs) {
-		t.Fatalf("cmd.Args mismatch\ngot:  %#v\nwant: %#v", cmd.Args, wantArgs)
-	}
-}
-
-func TestReadEnvTemplatePrefersRuntimeExample(t *testing.T) {
-	runtimeDir := t.TempDir()
-	templatePath := filepath.Join(runtimeDir, ".env.example")
-	srcDir := filepath.Join(runtimeDir, "src")
-	if err := os.MkdirAll(srcDir, 0755); err != nil {
-		t.Fatalf("mkdir src: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(srcDir, "index.ts"), []byte("export {};\n"), 0644); err != nil {
-		t.Fatalf("write index.ts: %v", err)
-	}
-	want := "LLM_API_KEY=test-from-template\n"
-	if err := os.WriteFile(templatePath, []byte(want), 0644); err != nil {
-		t.Fatalf("write template: %v", err)
-	}
-
-	t.Setenv("ALICE_RUNTIME_DIR", runtimeDir)
-
-	got, err := readEnvTemplate()
-	if err != nil {
-		t.Fatalf("readEnvTemplate(): %v", err)
-	}
-	if string(got) != want {
-		t.Fatalf("template mismatch\ngot:  %q\nwant: %q", string(got), want)
-	}
-}
-
-func TestAppendEnvVarsDoesNotOverrideExisting(t *testing.T) {
-	t.Parallel()
-
-	base := []string{"LLM_API_KEY=from-shell", "PATH=/usr/bin"}
-	extra := map[string]string{
-		"LLM_API_KEY":    "from-dotenv",
-		"TELEGRAM_PHONE": "+8613800138000",
-	}
-
-	got := appendEnvVars(base, extra)
-	want := []string{"LLM_API_KEY=from-shell", "PATH=/usr/bin", "TELEGRAM_PHONE=+8613800138000"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("appendEnvVars() mismatch\ngot:  %#v\nwant: %#v", got, want)
-	}
-}
-
 func TestParseNodeMajor(t *testing.T) {
 	t.Parallel()
 
@@ -252,5 +178,69 @@ func TestFindMissingSystemBinaries(t *testing.T) {
 	want := []string{"alice-pkg"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("findMissingSystemBinaries() mismatch\ngot:  %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestFindSkillDirPrefersRuntimeDistBin(t *testing.T) {
+	root := t.TempDir()
+	runtimeDir := filepath.Join(root, "runtime")
+	runtimeDistBin := filepath.Join(runtimeDir, "dist", "bin")
+	rootDistBin := filepath.Join(root, "dist", "bin")
+	if err := os.MkdirAll(runtimeDistBin, 0755); err != nil {
+		t.Fatalf("mkdir runtime dist bin: %v", err)
+	}
+	if err := os.MkdirAll(rootDistBin, 0755); err != nil {
+		t.Fatalf("mkdir root dist bin: %v", err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(oldWd); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	}()
+
+	got := findSkillDir(runtimeDir)
+	if got != runtimeDistBin {
+		t.Fatalf("findSkillDir() = %q, want %q", got, runtimeDistBin)
+	}
+}
+
+func TestFindEnvFilePrefersRuntimeEnv(t *testing.T) {
+	root := t.TempDir()
+	runtimeDir := filepath.Join(root, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatalf("mkdir runtime: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("LLM_API_KEY=root\n"), 0644); err != nil {
+		t.Fatalf("write root env: %v", err)
+	}
+	runtimeEnv := filepath.Join(runtimeDir, ".env")
+	if err := os.WriteFile(runtimeEnv, []byte("LLM_API_KEY=runtime\n"), 0644); err != nil {
+		t.Fatalf("write runtime env: %v", err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(oldWd); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	}()
+
+	got := findEnvFile(runtimeDir)
+	if got != runtimeEnv {
+		t.Fatalf("findEnvFile() = %q, want %q", got, runtimeEnv)
 	}
 }

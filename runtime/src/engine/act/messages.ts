@@ -922,7 +922,7 @@ function dbRecordToMessageRecord(r: DbMessageRecord): MessageRecord {
  * 及其 ±radius 邻近消息，形成"逸散 cluster"。
  *
  * @param seeds 滑动窗口原始消息
- * @param chatId 频道 ID（messageLog 的 chatId 格式，如 "channel:123"）
+ * @param chatId 频道 ID（messageLog 的 chatId 格式，如 "channel:telegram:123"）
  * @returns 需要插入的逸散消息（已按时间排序，带 isDiffused=true）
  */
 export function diffuseReplyChain(seeds: MessageRecord[], chatId: string): MessageRecord[] {

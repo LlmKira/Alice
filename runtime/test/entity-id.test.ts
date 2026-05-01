@@ -16,7 +16,7 @@ describe("extractNumericId", () => {
   it("纯数字字符串", () => expect(extractNumericId("789")).toBe(789));
   it("负数 ID", () => expect(extractNumericId("channel:telegram:-1001234")).toBe(-1001234));
   it("非 Telegram 平台 → null", () => expect(extractNumericId("channel:qq:123")).toBeNull());
-  it("旧 channel:123 → null", () => expect(extractNumericId("channel:123")).toBeNull());
+  it("旧 channel:123 不再兼容", () => expect(extractNumericId("channel:123")).toBeNull());
   it("空字符串 → null", () => expect(extractNumericId("")).toBeNull());
   it("无前缀非数字 → null", () => expect(extractNumericId("abc")).toBeNull());
 });
@@ -31,7 +31,7 @@ describe("ensureChannelId", () => {
     expect(ensureChannelId("contact:qq:abc")).toBe("channel:qq:abc"));
   it("纯数字 → channel:telegram:", () =>
     expect(ensureChannelId("789")).toBe("channel:telegram:789"));
-  it("旧 channel:123 → null", () => expect(ensureChannelId("channel:123")).toBeNull());
+  it("旧 channel:123 不再兼容", () => expect(ensureChannelId("channel:123")).toBeNull());
   it("非法 → null", () => expect(ensureChannelId("abc")).toBeNull());
   it("空串 → null", () => expect(ensureChannelId("")).toBeNull());
 });
@@ -43,7 +43,7 @@ describe("ensureContactId", () => {
     expect(ensureContactId("channel:telegram:456")).toBe("contact:telegram:456"));
   it("纯数字 → contact:telegram:", () =>
     expect(ensureContactId("789")).toBe("contact:telegram:789"));
-  it("旧 contact:123 → null", () => expect(ensureContactId("contact:123")).toBeNull());
+  it("旧 contact:123 不再兼容", () => expect(ensureContactId("contact:123")).toBeNull());
   it("非法 → null", () => expect(ensureContactId("abc")).toBeNull());
 });
 
@@ -101,6 +101,6 @@ describe("chatIdToContactId", () => {
     expect(chatIdToContactId("channel:telegram:123")).toBe("contact:telegram:123"));
   it("contact:telegram: 透传", () =>
     expect(chatIdToContactId("contact:telegram:456")).toBe("contact:telegram:456"));
-  it("旧 channel:123 → null", () => expect(chatIdToContactId("channel:123")).toBeNull());
+  it("旧 channel:123 不再兼容", () => expect(chatIdToContactId("channel:123")).toBeNull());
   it("无前缀 → null", () => expect(chatIdToContactId("789")).toBeNull());
 });

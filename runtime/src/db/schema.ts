@@ -1118,7 +1118,7 @@ export const consciousnessEvents = sqliteTable(
  * TTL 3 天，cache miss 时异步获取，下次 tick 生效。
  */
 export const bioCache = sqliteTable("bio_cache", {
-  /** 实体 ID（contact:123 或 channel:-100xxx）。 */
+  /** 实体 ID（如 contact:telegram:123 或 channel:telegram:-100xxx）。 */
   entityId: text("entity_id").primaryKey(),
   /** bio/about 文本（Telegram 用户签名或群组简介）。 */
   bio: text("bio"),

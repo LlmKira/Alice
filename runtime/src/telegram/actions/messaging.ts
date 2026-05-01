@@ -7,7 +7,7 @@
 import { tl } from "@mtcute/node";
 import { z } from "zod";
 import { sanitizeOutgoingText } from "../../core/sandbox-schemas.js";
-import { ensureChannelId, ensureContactId } from "../../graph/constants.js";
+import { ensureChannelId, ensureContactId, extractNumericId } from "../../graph/constants.js";
 import { recordForwardShare } from "../../graph/dynamic-props.js";
 import { defineAction } from "../action-builder.js";
 import type { TelegramActionDef } from "../action-types.js";
@@ -349,7 +349,8 @@ export const messagingActions: TelegramActionDef[] = [
       }
 
       // Typing 延迟（impl 内自处理，不走 executor 的打字延迟）
-      const rawId = ctx.parseChatId(dmChannelId);
+      const rawId = extractNumericId(dmChannelId);
+      if (rawId == null) return { success: false, error: "cannot resolve" };
       try {
         await setTyping(ctx.client, rawId);
         const delayMs = Math.min(Math.max(text.length * 80, 800), 8000);

@@ -27,6 +27,7 @@ import { createDeliberationState } from "../src/engine/deliberation.js";
 import { type EvolveState, evolveTick } from "../src/engine/evolve.js";
 import { WorldModel } from "../src/graph/world-model.js";
 import { AdaptiveKappa } from "../src/pressure/aggregate.js";
+import { createCuriosityHistory } from "../src/pressure/p6-curiosity.js";
 import { EventBuffer } from "../src/telegram/events.js";
 import type { PressureDims } from "../src/utils/math.js";
 import { TickClock } from "../src/utils/time.js";
@@ -80,8 +81,7 @@ function buildIdleState(
     buffer: new EventBuffer(),
     queue: new ActionQueue(),
     config,
-    // 预填充 noveltyHistory 避免 P6 fallback 到 eta 分支
-    noveltyHistory: [0.5, 0.5, 0.5],
+    curiosityHistory: createCuriosityHistory(),
     recentEventCounts: [],
     recentActions: [],
     dispatcher: stubDispatcher(),
@@ -141,11 +141,11 @@ function buildProactiveIausState(): EvolveState {
   state.config.eta = 0;
   state.config.iausDeterministic = true;
 
-  state.G.addContact("contact:252", {
+  state.G.addContact("contact:telegram:252", {
     tier: 5,
     last_active_ms: now - 7 * 86_400_000,
   });
-  state.G.addChannel("channel:252", {
+  state.G.addChannel("channel:telegram:252", {
     unread: 0,
     tier_contact: 5,
     chat_type: "private",
@@ -154,7 +154,7 @@ function buildProactiveIausState(): EvolveState {
     last_activity_ms: now - 7 * 86_400_000,
     consecutive_outgoing: 0,
   });
-  state.G.addRelation("self", "monitors", "channel:252");
+  state.G.addRelation("self", "monitors", "channel:telegram:252");
   return state;
 }
 
@@ -308,7 +308,7 @@ describe("★A1+A3 空闲自启动", () => {
         buffer: new EventBuffer(),
         queue: new ActionQueue(),
         config,
-        noveltyHistory: [0.5, 0.5, 0.5],
+        curiosityHistory: createCuriosityHistory(),
         recentEventCounts: [],
         recentActions: [],
         dispatcher,
@@ -389,7 +389,7 @@ describe("★A1+A3 空闲自启动", () => {
         buffer: new EventBuffer(),
         queue: new ActionQueue(),
         config,
-        noveltyHistory: [0.5, 0.5, 0.5],
+        curiosityHistory: createCuriosityHistory(),
         recentEventCounts: [],
         recentActions: [],
         dispatcher,
@@ -473,7 +473,7 @@ describe("★A1+A3 空闲自启动", () => {
         buffer: new EventBuffer(),
         queue: new ActionQueue(),
         config,
-        noveltyHistory: [0.5, 0.5, 0.5],
+        curiosityHistory: createCuriosityHistory(),
         recentEventCounts: [],
         recentActions: [],
         dispatcher,
@@ -532,10 +532,10 @@ describe("★A1+A3 空闲自启动", () => {
     G.tick = 200;
     G.addAgent("self");
     // 长期未联系的朋友：7 天前 → P3 饱和 → τ₃ 高
-    // ADR-101: contact 的 P3 贡献路由到对应私聊频道 channel:42
+    // ADR-101: contact 的 P3 贡献路由到对应私聊频道 channel:telegram:42
     // 审计修复: last_active_ms 必须 > 0，P3 和 P6 均跳过从未交互的联系人
-    G.addContact("contact:42", { tier: 50, last_active_ms: now - 7 * 86_400_000 });
-    G.addChannel("channel:42", {
+    G.addContact("contact:telegram:42", { tier: 50, last_active_ms: now - 7 * 86_400_000 });
+    G.addChannel("channel:telegram:42", {
       unread: 0,
       tier_contact: 50,
       chat_type: "private",
@@ -550,7 +550,7 @@ describe("★A1+A3 空闲自启动", () => {
       buffer: new EventBuffer(),
       queue: new ActionQueue(),
       config,
-      noveltyHistory: [0.5, 0.5, 0.5],
+      curiosityHistory: createCuriosityHistory(),
       recentEventCounts: [],
       recentActions: [],
       dispatcher: stubDispatcher(),
@@ -588,10 +588,10 @@ describe("★A1+A3 空闲自启动", () => {
 
     expect(state.queue.length).toBe(1);
     const item = await state.queue.dequeue();
-    // P3 贡献到 contact:42 → 路由到 channel:42 → 焦点集指向 channel:42
+    // P3 贡献到 contact:telegram:42 → 路由到 channel:telegram:42 → 焦点集指向 channel:telegram:42
     // target 非 null → 修复后 idleAction = 声部竞争赢家（非 "reflection" fallback）
     expect(item).toMatchObject({
-      target: "channel:42",
+      target: "channel:telegram:42",
     });
   });
 });
@@ -606,7 +606,7 @@ describe("ADR-252: IAUS queue backpressure", () => {
 
     expect(triggered).toBe(true);
     expect(state.queue.length).toBe(1);
-    expect(state.queue.isTargetActive("channel:252")).toBe(true);
+    expect(state.queue.isTargetActive("channel:telegram:252")).toBe(true);
   });
 
   it("入队 tick 记录落选 IAUS 候选，给 social-cost 反事实提供真实分母", () => {
@@ -652,7 +652,7 @@ describe("ADR-252: IAUS queue backpressure", () => {
     expect(beforeMetrics.saturation).toBeGreaterThanOrEqual(0.8);
     expect(triggered).toBe(false);
     expect(state.queue.getMetrics()).toMatchObject(beforeMetrics);
-    expect(state.queue.isTargetActive("channel:252")).toBe(false);
+    expect(state.queue.isTargetActive("channel:telegram:252")).toBe(false);
     expect(state.recentActions).toHaveLength(0);
 
     const traces = listDecisionTraces({ tick: 1, phase: "evolve" });
@@ -694,20 +694,20 @@ describe("post-wakeup recovery target spread control", () => {
     const traces = listDecisionTraces({ tick: 1, phase: "evolve" });
     const silenceTrace = traces.find((trace) => trace.finalDecision === "silence");
     expect(silenceTrace?.payload.reason).toBe("post_wakeup_recovery");
-    expect(silenceTrace?.target).toBe("channel:252");
+    expect(silenceTrace?.target).toBe("channel:telegram:252");
   });
 
   it("恢复窗口内允许继续已接触目标", () => {
     const state = buildProactiveIausState();
     state.mode = "patrol";
     state.wakeupRecoveryUntilMs = Date.now() + 600_000;
-    state.wakeupEngagedTargets = new Set(["channel:252", "channel:open-b"]);
+    state.wakeupEngagedTargets = new Set(["channel:telegram:252", "channel:open-b"]);
 
     const triggered = evolveTick(state);
 
     expect(triggered).toBe(true);
     expect(state.queue.length).toBe(1);
-    expect(state.queue.isTargetActive("channel:252")).toBe(true);
+    expect(state.queue.isTargetActive("channel:telegram:252")).toBe(true);
   });
 
   it("恢复窗口内不抑制 directed bypass 赢家", () => {
@@ -733,7 +733,7 @@ describe("post-wakeup recovery target spread control", () => {
 
     expect(triggered).toBe(true);
     expect(state.queue.length).toBe(1);
-    expect(state.queue.isTargetActive("channel:252")).toBe(true);
+    expect(state.queue.isTargetActive("channel:telegram:252")).toBe(true);
   });
 });
 
@@ -770,7 +770,7 @@ describe("ADR-136: proactive cooldown 连续化后的管线行为", () => {
     // 活跃对话：turn_state=alice_turn（对方刚隐式回复了）
     G.addConversation("conversation:test", {
       channel: "channel:test",
-      participants: ["contact:42"],
+      participants: ["contact:telegram:42"],
       state: "active",
       turn_state: "alice_turn",
       start_ms: 1,
@@ -794,7 +794,7 @@ describe("ADR-136: proactive cooldown 连续化后的管线行为", () => {
       buffer: new EventBuffer(),
       queue: new ActionQueue(),
       config,
-      noveltyHistory: [0.5, 0.5, 0.5],
+      curiosityHistory: createCuriosityHistory(),
       recentEventCounts: [],
       recentActions: [],
       dispatcher,
@@ -881,7 +881,7 @@ describe("ADR-136: proactive cooldown 连续化后的管线行为", () => {
       buffer: new EventBuffer(),
       queue: new ActionQueue(),
       config,
-      noveltyHistory: [0.5, 0.5, 0.5],
+      curiosityHistory: createCuriosityHistory(),
       recentEventCounts: [],
       recentActions: [],
       dispatcher,

@@ -46,14 +46,14 @@ const instructions = relationshipsMod.instructions!;
 describe("relationships.mod — note_active_hour", () => {
   it("EMA 更新活跃时段", () => {
     const ctx = makeCtx();
-    ctx.graph.addContact("contact:1");
+    ctx.graph.addContact("contact:telegram:1");
 
     instructions.note_active_hour.impl(ctx as unknown as ModContext, {
-      contactId: "contact:1",
+      contactId: "contact:telegram:1",
       hour: 14,
     });
 
-    const profile = ctx.state.contactProfiles["contact:1"];
+    const profile = ctx.state.contactProfiles["contact:telegram:1"];
     expect(profile.activeHours[14]).toBeCloseTo(0.1, 4);
     // 其他小时应接近 0
     expect(profile.activeHours[0]).toBeCloseTo(0, 4);
@@ -61,22 +61,22 @@ describe("relationships.mod — note_active_hour", () => {
 
   it("自动创建空白画像", () => {
     const ctx = makeCtx();
-    ctx.graph.addContact("contact:1");
-    expect(ctx.state.contactProfiles["contact:1"]).toBeUndefined();
+    ctx.graph.addContact("contact:telegram:1");
+    expect(ctx.state.contactProfiles["contact:telegram:1"]).toBeUndefined();
 
     instructions.note_active_hour.impl(ctx as unknown as ModContext, {
-      contactId: "contact:1",
+      contactId: "contact:telegram:1",
       hour: 10,
     });
 
-    expect(ctx.state.contactProfiles["contact:1"]).toBeDefined();
-    expect(ctx.state.contactProfiles["contact:1"].interests).toEqual([]);
-    expect(ctx.state.contactProfiles["contact:1"].activeHours).toHaveLength(24);
+    expect(ctx.state.contactProfiles["contact:telegram:1"]).toBeDefined();
+    expect(ctx.state.contactProfiles["contact:telegram:1"].interests).toEqual([]);
+    expect(ctx.state.contactProfiles["contact:telegram:1"].activeHours).toHaveLength(24);
   });
 
   it("把 @id 归一化到 contact:id，避免写入不可读 profile key", () => {
     const ctx = makeCtx();
-    ctx.graph.addContact("contact:7691227179");
+    ctx.graph.addContact("contact:telegram:7691227179");
 
     const result = instructions.note_active_hour.impl(ctx as unknown as ModContext, {
       contactId: "@7691227179",
@@ -84,14 +84,14 @@ describe("relationships.mod — note_active_hour", () => {
     }) as { success: boolean; contactId: string };
 
     expect(result.success).toBe(true);
-    expect(result.contactId).toBe("contact:7691227179");
-    expect(ctx.state.contactProfiles["contact:7691227179"]).toBeDefined();
+    expect(result.contactId).toBe("contact:telegram:7691227179");
+    expect(ctx.state.contactProfiles["contact:telegram:7691227179"]).toBeDefined();
     expect(ctx.state.contactProfiles["@7691227179"]).toBeUndefined();
   });
 
   it("接受 display_name 并写入规范 contact key", () => {
     const ctx = makeCtx();
-    ctx.graph.addContact("contact:42", { display_name: "Rin" });
+    ctx.graph.addContact("contact:telegram:42", { display_name: "Rin" });
 
     const result = instructions.note_active_hour.impl(ctx as unknown as ModContext, {
       contactId: "Rin",
@@ -99,8 +99,8 @@ describe("relationships.mod — note_active_hour", () => {
     }) as { success: boolean; contactId: string };
 
     expect(result.success).toBe(true);
-    expect(result.contactId).toBe("contact:42");
-    expect(ctx.state.contactProfiles["contact:42"].activeHours[22]).toBeCloseTo(0.1, 4);
+    expect(result.contactId).toBe("contact:telegram:42");
+    expect(ctx.state.contactProfiles["contact:telegram:42"].activeHours[22]).toBeCloseTo(0.1, 4);
     expect(ctx.state.contactProfiles.Rin).toBeUndefined();
   });
 });
@@ -110,10 +110,10 @@ describe("relationships.mod — note_active_hour", () => {
 describe("relationships.mod — tag_interest (ADR-208)", () => {
   it("单次观察写入 BeliefStore（未结晶）", () => {
     const ctx = makeCtx();
-    ctx.graph.addContact("contact:1");
+    ctx.graph.addContact("contact:telegram:1");
 
     const result = instructions.tag_interest.impl(ctx as unknown as ModContext, {
-      who: "contact:1",
+      who: "contact:telegram:1",
       interest: "Programming",
     }) as { success: boolean; crystallized: boolean; label: string };
 
@@ -121,31 +121,31 @@ describe("relationships.mod — tag_interest (ADR-208)", () => {
     expect(result.label).toBe("programming"); // 归一化 lowercase
     // 单次观察不够结晶（需要 ≥ 2 次）
     expect(result.crystallized).toBe(false);
-    expect(ctx.state.interestObsCounts["contact:1::interest:programming"]).toBe(1);
+    expect(ctx.state.interestObsCounts["contact:telegram:1::interest:programming"]).toBe(1);
   });
 
   it("多次观察后结晶（contact）", () => {
     const ctx = makeCtx();
-    ctx.graph.addContact("contact:1");
+    ctx.graph.addContact("contact:telegram:1");
 
     // EMA σ² 从 1.0 开始，每次 update: σ²' = 0.49·σ² + 0.009
     // 需要 ~5 次观察才能收敛到 < 0.06（结晶阈值）
     for (let i = 0; i < 4; i++) {
       const r = instructions.tag_interest.impl(ctx as unknown as ModContext, {
-        who: "contact:1",
+        who: "contact:telegram:1",
         interest: "ai",
       }) as { crystallized: boolean };
       expect(r.crystallized).toBe(false);
     }
     // 第 5 次 → σ² ≈ 0.045 < 0.06，结晶
     const result = instructions.tag_interest.impl(ctx as unknown as ModContext, {
-      who: "contact:1",
+      who: "contact:telegram:1",
       interest: "ai",
     }) as { crystallized: boolean; observations: number };
 
     expect(result.crystallized).toBe(true);
     expect(result.observations).toBe(5);
-    const ci = ctx.state.contactProfiles["contact:1"]?.crystallizedInterests;
+    const ci = ctx.state.contactProfiles["contact:telegram:1"]?.crystallizedInterests;
     expect(ci).toBeDefined();
     expect(ci!.ai).toBeDefined();
     expect(ci!.ai.confidence).toBeGreaterThan(0);
@@ -153,17 +153,17 @@ describe("relationships.mod — tag_interest (ADR-208)", () => {
 
   it("接受群组 channel entityId", () => {
     const ctx = makeCtx();
-    ctx.graph.addChannel("channel:100", { chat_type: "supergroup" });
+    ctx.graph.addChannel("channel:telegram:100", { chat_type: "supergroup" });
 
     // 需要 5 次观察才能结晶（EMA σ² 收敛）
     for (let i = 0; i < 5; i++) {
       instructions.tag_interest.impl(ctx as unknown as ModContext, {
-        who: "channel:100",
+        who: "channel:telegram:100",
         interest: "编程",
       });
     }
 
-    const gp = ctx.state.groupProfiles["channel:100"] as {
+    const gp = ctx.state.groupProfiles["channel:telegram:100"] as {
       crystallizedInterests?: Record<string, unknown>;
     };
     expect(gp?.crystallizedInterests?.["编程"]).toBeDefined();
@@ -171,10 +171,10 @@ describe("relationships.mod — tag_interest (ADR-208)", () => {
 
   it("标签归一化（空格 → 下划线）", () => {
     const ctx = makeCtx();
-    ctx.graph.addContact("contact:1");
+    ctx.graph.addContact("contact:telegram:1");
 
     const result = instructions.tag_interest.impl(ctx as unknown as ModContext, {
-      who: "contact:1",
+      who: "contact:telegram:1",
       interest: "Machine Learning",
     }) as { label: string };
 
@@ -183,7 +183,7 @@ describe("relationships.mod — tag_interest (ADR-208)", () => {
 
   it("display_name 被解析为 nodeId", () => {
     const ctx = makeCtx();
-    ctx.graph.addContact("contact:1", { display_name: "Rin" });
+    ctx.graph.addContact("contact:telegram:1", { display_name: "Rin" });
 
     const result = instructions.tag_interest.impl(ctx as unknown as ModContext, {
       who: "Rin",
@@ -191,32 +191,32 @@ describe("relationships.mod — tag_interest (ADR-208)", () => {
     }) as { success: boolean; entityId: string };
 
     expect(result.success).toBe(true);
-    expect(result.entityId).toBe("contact:1");
+    expect(result.entityId).toBe("contact:telegram:1");
   });
 
   it("强化已结晶兴趣刷新 lastReinforcedMs", () => {
     const ctx = makeCtx({}, 100, 1000000);
-    ctx.graph.addContact("contact:1");
+    ctx.graph.addContact("contact:telegram:1");
 
     // 先结晶（需要 5 次观察）
     for (let i = 0; i < 5; i++) {
       instructions.tag_interest.impl(ctx as unknown as ModContext, {
-        who: "contact:1",
+        who: "contact:telegram:1",
         interest: "ai",
       });
     }
-    expect(ctx.state.contactProfiles["contact:1"]?.crystallizedInterests?.ai).toBeDefined();
+    expect(ctx.state.contactProfiles["contact:telegram:1"]?.crystallizedInterests?.ai).toBeDefined();
 
     // 推进时间后强化
     const ctx2 = { ...ctx, nowMs: 2000000, tick: 200 };
     const result = instructions.tag_interest.impl(ctx2 as unknown as ModContext, {
-      who: "contact:1",
+      who: "contact:telegram:1",
       interest: "ai",
     }) as { reinforced: boolean };
 
     expect(result.reinforced).toBe(true);
     expect(
-      ctx.state.contactProfiles["contact:1"]?.crystallizedInterests?.ai?.lastReinforcedMs,
+      ctx.state.contactProfiles["contact:telegram:1"]?.crystallizedInterests?.ai?.lastReinforcedMs,
     ).toBe(2000000);
   });
 
@@ -246,7 +246,7 @@ describe("relationships.mod — contactProfile with profile", () => {
   it("返回结构化画像", () => {
     const ctx = makeCtx({
       contactProfiles: {
-        "contact:1": {
+        "contact:telegram:1": {
           activeHours: new Array(24).fill(0),
           interests: ["cooking", "travel"],
           lastUpdatedTick: 50,
@@ -258,11 +258,11 @@ describe("relationships.mod — contactProfile with profile", () => {
         },
       },
     });
-    ctx.graph.addContact("contact:1", { tier: 50, display_name: "Bob" });
+    ctx.graph.addContact("contact:telegram:1", { tier: 50, display_name: "Bob" });
 
     // biome-ignore lint/style/noNonNullAssertion: test
     const query = relationshipsMod.queries!.contact_profile;
-    const result = query.impl(ctx as unknown as ModContext, { contactId: "contact:1" }) as {
+    const result = query.impl(ctx as unknown as ModContext, { contactId: "contact:telegram:1" }) as {
       profile: ContactProfile;
       tier: number;
       trustLabel: string;
@@ -277,11 +277,11 @@ describe("relationships.mod — contactProfile with profile", () => {
 
   it("无画像时 profile = null", () => {
     const ctx = makeCtx();
-    ctx.graph.addContact("contact:1");
+    ctx.graph.addContact("contact:telegram:1");
 
     // biome-ignore lint/style/noNonNullAssertion: test
     const query = relationshipsMod.queries!.contact_profile;
-    const result = query.impl(ctx as unknown as ModContext, { contactId: "contact:1" }) as {
+    const result = query.impl(ctx as unknown as ModContext, { contactId: "contact:telegram:1" }) as {
       profile: ContactProfile | null;
     };
 
@@ -307,16 +307,16 @@ describe("relationships.mod — contactProfile with profile", () => {
         },
       },
     });
-    ctx.graph.addContact("contact:7691227179");
+    ctx.graph.addContact("contact:telegram:7691227179");
 
     // biome-ignore lint/style/noNonNullAssertion: test
     const query = relationshipsMod.queries!.contact_profile;
     const result = query.impl(ctx as unknown as ModContext, {
-      contactId: "contact:7691227179",
+      contactId: "contact:telegram:7691227179",
     }) as { profile: ContactProfile | null };
 
     expect(result.profile?.activeHours[18]).toBeCloseTo(0.1, 4);
-    expect(ctx.state.contactProfiles["contact:7691227179"]).toBeDefined();
+    expect(ctx.state.contactProfiles["contact:telegram:7691227179"]).toBeDefined();
     expect(ctx.state.contactProfiles["@7691227179"]).toBeUndefined();
   });
 });
@@ -326,9 +326,9 @@ describe("relationships.mod — contactProfile with profile", () => {
 describe("relationships.mod — contribute narrative profile", () => {
   it("P1-A: 叙事散文格式 — 包含 You're talking to", () => {
     const ctx = makeCtx({
-      targetNodeId: "contact:1",
+      targetNodeId: "contact:telegram:1",
       contactProfiles: {
-        "contact:1": {
+        "contact:telegram:1": {
           activeHours: (() => {
             const h = new Array(24).fill(0);
             h[22] = 0.5;
@@ -344,7 +344,7 @@ describe("relationships.mod — contribute narrative profile", () => {
         },
       },
     });
-    ctx.graph.addContact("contact:1", {
+    ctx.graph.addContact("contact:telegram:1", {
       tier: 50,
       display_name: "Charlie",
       interaction_count: 42,
@@ -370,9 +370,9 @@ describe("relationships.mod — contribute narrative profile", () => {
 
   it("P1-B: 记忆引用 — 不包含 R= 数值", () => {
     const ctx = makeCtx({
-      targetNodeId: "contact:1",
+      targetNodeId: "contact:telegram:1",
     });
-    ctx.graph.addContact("contact:1", {
+    ctx.graph.addContact("contact:telegram:1", {
       tier: 50,
       display_name: "Dave",
     });
@@ -388,9 +388,9 @@ describe("relationships.mod — contribute narrative profile", () => {
       created_ms: 10,
       novelty: 1.0,
       reinforcement_count: 1,
-      source_contact: "contact:1",
+      source_contact: "contact:telegram:1",
     });
-    ctx.graph.addRelation("contact:1", "knows", "info_ts");
+    ctx.graph.addRelation("contact:telegram:1", "knows", "info_ts");
     ctx.graph.addFact("info_dm", {
       content: "prefers dark mode",
       fact_type: "preference",
@@ -402,9 +402,9 @@ describe("relationships.mod — contribute narrative profile", () => {
       created_ms: 20,
       novelty: 1.0,
       reinforcement_count: 1,
-      source_contact: "contact:1",
+      source_contact: "contact:telegram:1",
     });
-    ctx.graph.addRelation("contact:1", "knows", "info_dm");
+    ctx.graph.addRelation("contact:telegram:1", "knows", "info_dm");
 
     // biome-ignore lint/style/noNonNullAssertion: test — contribute 已知存在
     const items = relationshipsMod.contribute!(ctx as unknown as ModContext);
@@ -428,9 +428,9 @@ describe("relationships.mod — contribute narrative profile", () => {
 
   it("P1-B: 无 facts 时的自然提示", () => {
     const ctx = makeCtx({
-      targetNodeId: "contact:1",
+      targetNodeId: "contact:telegram:1",
     });
-    ctx.graph.addContact("contact:1", {
+    ctx.graph.addContact("contact:telegram:1", {
       tier: 150,
       display_name: "Eve",
     });
@@ -451,12 +451,12 @@ describe("relationships.mod — contribute narrative profile", () => {
     const nowMs = 2_000_000_000;
     const ctx = makeCtx(
       {
-        targetNodeId: "contact:1",
+        targetNodeId: "contact:telegram:1",
       },
       100,
       nowMs,
     );
-    ctx.graph.addContact("contact:1", {
+    ctx.graph.addContact("contact:telegram:1", {
       tier: 50,
       display_name: "Frank",
     });
@@ -472,10 +472,10 @@ describe("relationships.mod — contribute narrative profile", () => {
       created_ms: 0,
       novelty: 1.0,
       reinforcement_count: 1,
-      source_contact: "contact:1",
+      source_contact: "contact:telegram:1",
     });
     ctx.graph.setDynamic("info_cook", "last_access_ms", 0);
-    ctx.graph.addRelation("contact:1", "knows", "info_cook");
+    ctx.graph.addRelation("contact:telegram:1", "knows", "info_cook");
 
     // biome-ignore lint/style/noNonNullAssertion: test — contribute 已知存在
     const items = relationshipsMod.contribute!(ctx as unknown as ModContext);
@@ -493,8 +493,8 @@ describe("relationships.mod — contribute narrative profile", () => {
 
 describe("relationships.mod — tier-based tone guidance", () => {
   it("tier 5 → 亲密语气", () => {
-    const ctx = makeCtx({ targetNodeId: "contact:1" });
-    ctx.graph.addContact("contact:1", { tier: 5, display_name: "Amy" });
+    const ctx = makeCtx({ targetNodeId: "contact:telegram:1" });
+    ctx.graph.addContact("contact:telegram:1", { tier: 5, display_name: "Amy" });
 
     const items = relationshipsMod.contribute?.(ctx as unknown as ModContext) ?? [];
     const profileItem = items.find(
@@ -505,8 +505,8 @@ describe("relationships.mod — tier-based tone guidance", () => {
   });
 
   it("tier 500 → 礼貌得体", () => {
-    const ctx = makeCtx({ targetNodeId: "contact:1" });
-    ctx.graph.addContact("contact:1", { tier: 500, display_name: "Bob" });
+    const ctx = makeCtx({ targetNodeId: "contact:telegram:1" });
+    ctx.graph.addContact("contact:telegram:1", { tier: 500, display_name: "Bob" });
 
     const items = relationshipsMod.contribute?.(ctx as unknown as ModContext) ?? [];
     const profileItem = items.find(
@@ -517,8 +517,8 @@ describe("relationships.mod — tier-based tone guidance", () => {
   });
 
   it("tier 50 → 轻松自然", () => {
-    const ctx = makeCtx({ targetNodeId: "contact:1" });
-    ctx.graph.addContact("contact:1", { tier: 50, display_name: "Charlie" });
+    const ctx = makeCtx({ targetNodeId: "contact:telegram:1" });
+    ctx.graph.addContact("contact:telegram:1", { tier: 50, display_name: "Charlie" });
 
     const items = relationshipsMod.contribute?.(ctx as unknown as ModContext) ?? [];
     const profileItem = items.find(
@@ -530,7 +530,7 @@ describe("relationships.mod — tier-based tone guidance", () => {
 
   it("无 target 时不注入语气指导", () => {
     const ctx = makeCtx({ targetNodeId: null });
-    ctx.graph.addContact("contact:1", { tier: 5, display_name: "Amy" });
+    ctx.graph.addContact("contact:telegram:1", { tier: 5, display_name: "Amy" });
 
     const items = relationshipsMod.contribute?.(ctx as unknown as ModContext) ?? [];
     const content = JSON.stringify(items);
@@ -538,8 +538,8 @@ describe("relationships.mod — tier-based tone guidance", () => {
   });
 
   it("bot 联系人不注入语气指导", () => {
-    const ctx = makeCtx({ targetNodeId: "contact:bot1" });
-    ctx.graph.addContact("contact:bot1", { tier: 500, display_name: "BotHelper", is_bot: true });
+    const ctx = makeCtx({ targetNodeId: "contact:telegram:9001" });
+    ctx.graph.addContact("contact:telegram:9001", { tier: 500, display_name: "BotHelper", is_bot: true });
 
     const items = relationshipsMod.contribute?.(ctx as unknown as ModContext) ?? [];
     const content = JSON.stringify(items);
@@ -602,7 +602,7 @@ describe("relationships.mod — 活跃模式变化检测 (scheduleShift)", () =>
       traits: {},
     };
 
-    const ctx = makeTierCtx("contact:1", profile, tick);
+    const ctx = makeTierCtx("contact:telegram:1", profile, tick);
     relationshipsMod.onTickEnd?.(ctx as unknown as ModContext);
 
     // 14→22: 两者都 > 12，不属于 night owl / early bird 的跨半天变化
@@ -623,7 +623,7 @@ describe("relationships.mod — 活跃模式变化检测 (scheduleShift)", () =>
       traits: {},
     };
 
-    const ctx = makeTierCtx("contact:1", profile, tick);
+    const ctx = makeTierCtx("contact:telegram:1", profile, tick);
     relationshipsMod.onTickEnd?.(ctx as unknown as ModContext);
 
     expect(profile.scheduleShift).toBeNull();
@@ -643,7 +643,7 @@ describe("relationships.mod — 活跃模式变化检测 (scheduleShift)", () =>
       traits: {},
     };
 
-    const ctx = makeTierCtx("contact:1", profile, tick);
+    const ctx = makeTierCtx("contact:telegram:1", profile, tick);
     relationshipsMod.onTickEnd?.(ctx as unknown as ModContext);
 
     // circularShift = min(20, 4) = 4 >= 3 → 触发
@@ -665,7 +665,7 @@ describe("relationships.mod — 活跃模式变化检测 (scheduleShift)", () =>
       traits: {},
     };
 
-    const ctx = makeTierCtx("contact:1", profile, tick);
+    const ctx = makeTierCtx("contact:telegram:1", profile, tick);
     relationshipsMod.onTickEnd?.(ctx as unknown as ModContext);
 
     expect(profile.scheduleShift).toBeNull();
@@ -685,7 +685,7 @@ describe("relationships.mod — 活跃模式变化检测 (scheduleShift)", () =>
       traits: {},
     };
 
-    const ctx = makeTierCtx("contact:1", profile, tick);
+    const ctx = makeTierCtx("contact:telegram:1", profile, tick);
     relationshipsMod.onTickEnd?.(ctx as unknown as ModContext);
 
     expect(profile.scheduleShift).toBeNull();
@@ -694,9 +694,9 @@ describe("relationships.mod — 活跃模式变化检测 (scheduleShift)", () =>
 
   it("scheduleShift 注入到 contribute() 的联系人画像中", () => {
     const ctx = makeCtx({
-      targetNodeId: "contact:1",
+      targetNodeId: "contact:telegram:1",
       contactProfiles: {
-        "contact:1": {
+        "contact:telegram:1": {
           activeHours: hoursWithPeak(22),
           interests: [],
           lastUpdatedTick: 50,
@@ -708,7 +708,7 @@ describe("relationships.mod — 活跃模式变化检测 (scheduleShift)", () =>
         },
       },
     });
-    ctx.graph.addContact("contact:1", { tier: 50, display_name: "Eve" });
+    ctx.graph.addContact("contact:telegram:1", { tier: 50, display_name: "Eve" });
 
     const items = relationshipsMod.contribute?.(ctx as unknown as ModContext) ?? [];
     const profileItem = items.find(
@@ -734,7 +734,7 @@ describe("relationships.mod — 活跃模式变化检测 (scheduleShift)", () =>
       traits: {},
     };
 
-    const ctx = makeTierCtx("contact:1", profile, tick);
+    const ctx = makeTierCtx("contact:telegram:1", profile, tick);
     relationshipsMod.onTickEnd?.(ctx as unknown as ModContext);
 
     // 6 <= 12 && 22 > 12 → "shifted earlier (possible early bird pattern)"
@@ -749,13 +749,13 @@ describe("relationships.mod — trait crystallization", () => {
     const nowMs = tick * 60_000;
     const graph = new WorldModel();
     graph.tick = tick;
-    graph.addContact("contact:1", { tier: 150 });
+    graph.addContact("contact:telegram:1", { tier: 150 });
 
     const impressionCounts: Record<string, number> = {};
     for (let i = 0; i < 5; i++) {
-      graph.beliefs.update("contact:1", "trait:warmth", 0.9, "semantic", nowMs + i);
-      impressionCounts["contact:1::trait:warmth"] =
-        (impressionCounts["contact:1::trait:warmth"] ?? 0) + 1;
+      graph.beliefs.update("contact:telegram:1", "trait:warmth", 0.9, "semantic", nowMs + i);
+      impressionCounts["contact:telegram:1::trait:warmth"] =
+        (impressionCounts["contact:telegram:1::trait:warmth"] ?? 0) + 1;
     }
 
     const ctx = {
@@ -773,8 +773,8 @@ describe("relationships.mod — trait crystallization", () => {
 
     relationshipsMod.onTickEnd?.(ctx as unknown as ModContext);
 
-    expect(ctx.state.contactProfiles["contact:1"]).toBeDefined();
-    expect(ctx.state.contactProfiles["contact:1"].traits.warmth).toBeDefined();
-    expect(ctx.state.contactProfiles["contact:1"].traits.warmth.value).toBeGreaterThan(0);
+    expect(ctx.state.contactProfiles["contact:telegram:1"]).toBeDefined();
+    expect(ctx.state.contactProfiles["contact:telegram:1"].traits.warmth).toBeDefined();
+    expect(ctx.state.contactProfiles["contact:telegram:1"].traits.warmth.value).toBeGreaterThan(0);
   });
 });

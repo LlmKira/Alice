@@ -182,8 +182,12 @@ describe("feel via dispatcher", () => {
     // ADR-50: 语义标签映射 — positive → 0.4, mild → 0.5
     expect(result.valence).toBe(0.4);
     expect(result.arousal).toBe(0.5);
-    // 验证图属性已更新（self 用 EMA 平滑：0 * 0.7 + 0.4 * 0.3 = 0.12）
-    expect(graph.getAgent("self").mood_arousal).toBe(0.5);
+    // ADR-268: self 情绪权威是 episode ledger，不再直接写 legacy mood_arousal 标量。
+    const episodes = JSON.parse(String(graph.getDynamic("self", "emotion_episodes"))) as Array<{
+      valence: number;
+      arousal: number;
+    }>;
+    expect(episodes.at(-1)).toMatchObject({ valence: 0.4, arousal: 0.5 });
   });
 });
 

@@ -15,7 +15,7 @@ describe("perceiveTick — group bot flood cooldown", () => {
     buffer.push({ type: "new_message", channelId: "channel:group", senderIsBot: true, tick: 1 });
     buffer.push({ type: "new_message", channelId: "channel:group", senderIsBot: true, tick: 1 });
 
-    perceiveTick(G, buffer, [], 1);
+    perceiveTick(G, buffer, 1);
 
     expect(G.getChannel("channel:group").consecutive_act_silences).toBe(2);
     expect(G.getChannel("channel:group").last_act_silence_ms).toBeTypeOf("number");
@@ -31,7 +31,7 @@ describe("perceiveTick — group bot flood cooldown", () => {
     const buffer = new EventBuffer();
     buffer.push({ type: "new_message", channelId: "channel:group", senderIsBot: false, tick: 1 });
 
-    perceiveTick(G, buffer, [], 1);
+    perceiveTick(G, buffer, 1);
 
     expect(G.getChannel("channel:group").consecutive_act_silences).toBe(1);
   });

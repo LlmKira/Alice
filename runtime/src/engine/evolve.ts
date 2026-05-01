@@ -63,6 +63,7 @@ import {
   queryIntensity,
 } from "../pressure/hawkes.js";
 import { computeNaturalness } from "../pressure/naturalness.js";
+import type { CuriosityHistory } from "../pressure/p6-curiosity.js";
 import {
   ACT_SILENCE_SAFETY_THRESHOLD,
   computeHabituationFactor,
@@ -182,7 +183,8 @@ export interface EvolveState {
   buffer: EventBuffer;
   queue: ActionQueue;
   config: Config;
-  noveltyHistory: number[];
+  /** P6 curiosity pressure 平滑历史；语义是 pressure，不是 novelty satisfaction。 */
+  curiosityHistory: CuriosityHistory;
   recentEventCounts: number[];
   /**
    * 最近真实行动记录。
@@ -789,6 +791,7 @@ function computeTickPlan(
     nowMs,
     eta: config.eta,
     k: config.k,
+    curiosityHistory: state.curiosityHistory,
     // ADR-161 §3.4: 群组轨迹驱动 theta — 从 channelRateEma 推导 P3 群组 theta
     channelRateEma: state.channelRateEma,
     tickDt: state.currentDt,
@@ -1800,8 +1803,6 @@ function applyPlan(state: EvolveState, plan: TickPlan, tick: number, nowMs: numb
 function updateSlidingWindows(state: EvolveState, eventCount: number): void {
   state.recentEventCounts.push(eventCount);
   if (state.recentEventCounts.length > state.config.k) state.recentEventCounts.shift();
-  if (state.noveltyHistory.length > state.config.k * 10)
-    state.noveltyHistory.splice(0, state.noveltyHistory.length - state.config.k * 10);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2079,12 +2080,7 @@ export function evolveTick(state: EvolveState): boolean {
     appraiseLonelySilence(state.G, nowMs);
     updateEmotionStateOnGraph(state.G, nowMs);
     state.G.beliefs.decayAll(nowMs);
-    const { eventCount, channelCounts } = perceiveTick(
-      state.G,
-      state.buffer,
-      state.noveltyHistory,
-      tick,
-    );
+    const { eventCount, channelCounts } = perceiveTick(state.G, state.buffer, tick);
     // ADR-191: 保存 channelCounts 供 computeTickPlan 计算 spike 信号
     state.lastChannelCounts = channelCounts;
     updateSlidingWindows(state, eventCount);

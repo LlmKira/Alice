@@ -31,6 +31,7 @@ import { classifySilence, computeVoINull } from "../src/engine/silence.js";
 import type { ConversationState, TurnState } from "../src/graph/entities.js";
 import { WorldModel } from "../src/graph/world-model.js";
 import { AdaptiveKappa, computeAllPressures } from "../src/pressure/aggregate.js";
+import { createCuriosityHistory } from "../src/pressure/p6-curiosity.js";
 import { EventBuffer } from "../src/telegram/events.js";
 import { TickClock } from "../src/utils/time.js";
 import { PersonalityVector } from "../src/voices/personality.js";
@@ -138,7 +139,7 @@ function buildScenarioState(overrides?: {
     buffer: new EventBuffer(),
     queue: new ActionQueue(),
     config,
-    noveltyHistory: [0.5, 0.5, 0.5],
+    curiosityHistory: createCuriosityHistory(),
     recentEventCounts: [],
     recentActions: overrides?.recentActions ?? [],
     dispatcher: stubDispatcher(),

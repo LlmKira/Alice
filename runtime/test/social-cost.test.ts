@@ -297,6 +297,9 @@ describe("L3-1: 对话结束信号 — 无活跃对话", () => {
 });
 
 describe("L3-2: grief / 敏感状态检测", () => {
+  const bobChannel = "channel:telegram:1001";
+  const bobContact = "contact:telegram:1001";
+
   /** 构建使用 channel: 前缀的图，以触发 chatIdToContactId 转换。 */
   function graphWithContact(
     channelAttrs: Record<string, unknown> = {},
@@ -305,7 +308,7 @@ describe("L3-2: grief / 敏感状态检测", () => {
     const G = new WorldModel();
     G.tick = 100;
     G.addAgent("self");
-    G.addChannel("channel:bob", {
+    G.addChannel(bobChannel, {
       unread: 0,
       tier_contact: 50,
       chat_type: "private",
@@ -313,8 +316,8 @@ describe("L3-2: grief / 敏感状态检测", () => {
       last_directed_ms: 0,
       ...channelAttrs,
     });
-    G.addContact("contact:bob", { tier: 50, ...contactAttrs });
-    G.addRelation("self", "monitors", "channel:bob");
+    G.addContact(bobContact, { tier: 50, ...contactAttrs });
+    G.addRelation("self", "monitors", bobChannel);
     return G;
   }
 
@@ -322,7 +325,7 @@ describe("L3-2: grief / 敏感状态检测", () => {
     const G1 = graphWithContact();
     const costNormal = computeSocialCost(
       G1,
-      "channel:bob",
+      bobChannel,
       "send_message",
       100,
       tickMs(100),
@@ -334,7 +337,7 @@ describe("L3-2: grief / 敏感状态检测", () => {
     const G2 = graphWithContact({}, { mood_valence: -0.8 });
     const costGrief = computeSocialCost(
       G2,
-      "channel:bob",
+      bobChannel,
       "send_message",
       100,
       tickMs(100),
@@ -349,7 +352,7 @@ describe("L3-2: grief / 敏感状态检测", () => {
     const G1 = graphWithContact();
     const costNormal = computeSocialCost(
       G1,
-      "channel:bob",
+      bobChannel,
       "send_message",
       100,
       tickMs(100),
@@ -361,7 +364,7 @@ describe("L3-2: grief / 敏感状态检测", () => {
     const G2 = graphWithContact({}, { mood_valence: -0.5 });
     const costUpset = computeSocialCost(
       G2,
-      "channel:bob",
+      bobChannel,
       "send_message",
       100,
       tickMs(100),
@@ -376,7 +379,7 @@ describe("L3-2: grief / 敏感状态检测", () => {
     const G1 = graphWithContact();
     const costNormal = computeSocialCost(
       G1,
-      "channel:bob",
+      bobChannel,
       "send_message",
       100,
       tickMs(100),
@@ -388,7 +391,7 @@ describe("L3-2: grief / 敏感状态检测", () => {
     const G2 = graphWithContact({}, { mood_valence: 0.6 });
     const costHappy = computeSocialCost(
       G2,
-      "channel:bob",
+      bobChannel,
       "send_message",
       100,
       tickMs(100),

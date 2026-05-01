@@ -26,6 +26,7 @@ import { type EvolveState, evolveTick, startEvolveLoop } from "../src/engine/evo
 import { findActiveConversation } from "../src/graph/queries.js";
 import { WorldModel } from "../src/graph/world-model.js";
 import { AdaptiveKappa } from "../src/pressure/aggregate.js";
+import { createCuriosityHistory } from "../src/pressure/p6-curiosity.js";
 import { EventBuffer } from "../src/telegram/events.js";
 import { TickClock } from "../src/utils/time.js";
 import { PersonalityVector } from "../src/voices/personality.js";
@@ -86,7 +87,7 @@ function buildState(
     buffer: new EventBuffer(),
     queue: new ActionQueue(),
     config,
-    noveltyHistory: [0.5, 0.5, 0.5],
+    curiosityHistory: createCuriosityHistory(),
     recentEventCounts: [],
     recentActions: [],
     dispatcher: stubDispatcher(),

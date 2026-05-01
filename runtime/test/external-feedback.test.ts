@@ -37,10 +37,10 @@ describe("computeExternalFeedback", () => {
     const G = new WorldModel();
     const actionMs = BASE_MS;
     const nowMs = BASE_MS + 300_000; // 300s later
-    G.addContact("contact:123", { tier: 50, last_active_ms: BASE_MS + 200_000 });
-    G.addChannel("channel:123");
+    G.addContact("contact:telegram:123", { tier: 50, last_active_ms: BASE_MS + 200_000 });
+    G.addChannel("channel:telegram:123");
 
-    const result = computeExternalFeedback(G, "contact:123", actionMs, nowMs);
+    const result = computeExternalFeedback(G, "contact:telegram:123", actionMs, nowMs);
     expect(result.signals).toContain("replied");
     expect(result.score).toBeGreaterThan(0);
     expect(result.confidence).toBeGreaterThan(0);
@@ -50,10 +50,10 @@ describe("computeExternalFeedback", () => {
     const G = new WorldModel();
     const actionMs = BASE_MS;
     const nowMs = BASE_MS + 700_000; // 700s > 600s threshold
-    G.addContact("contact:123", { tier: 50, last_active_ms: BASE_MS - 100_000 });
-    G.addChannel("channel:123");
+    G.addContact("contact:telegram:123", { tier: 50, last_active_ms: BASE_MS - 100_000 });
+    G.addChannel("channel:telegram:123");
 
-    const result = computeExternalFeedback(G, "contact:123", actionMs, nowMs);
+    const result = computeExternalFeedback(G, "contact:telegram:123", actionMs, nowMs);
     expect(result.signals).toContain("no_reply");
     expect(result.score).toBeLessThan(0);
   });
@@ -62,10 +62,10 @@ describe("computeExternalFeedback", () => {
     const G = new WorldModel();
     const actionMs = BASE_MS;
     const nowMs = BASE_MS + 300_000; // 300s < 600s
-    G.addContact("contact:123", { tier: 50, last_active_ms: BASE_MS - 100_000 });
-    G.addChannel("channel:123");
+    G.addContact("contact:telegram:123", { tier: 50, last_active_ms: BASE_MS - 100_000 });
+    G.addChannel("channel:telegram:123");
 
-    const result = computeExternalFeedback(G, "contact:123", actionMs, nowMs);
+    const result = computeExternalFeedback(G, "contact:telegram:123", actionMs, nowMs);
     // 没有 reply 和 no_reply 信号（还在等）
     expect(result.signals).not.toContain("replied");
     expect(result.signals).not.toContain("no_reply");
@@ -75,14 +75,14 @@ describe("computeExternalFeedback", () => {
     const G = new WorldModel();
     const actionMs = BASE_MS;
     const nowMs = BASE_MS + 300_000;
-    G.addContact("contact:123", {
+    G.addContact("contact:telegram:123", {
       tier: 50,
       last_active_ms: BASE_MS + 200_000,
       last_reaction_ms: BASE_MS + 150_000,
     });
-    G.addChannel("channel:123");
+    G.addChannel("channel:telegram:123");
 
-    const result = computeExternalFeedback(G, "contact:123", actionMs, nowMs);
+    const result = computeExternalFeedback(G, "contact:telegram:123", actionMs, nowMs);
     expect(result.signals).toContain("replied");
     expect(result.signals).toContain("reaction");
     expect(result.score).toBeGreaterThan(0);
@@ -92,11 +92,11 @@ describe("computeExternalFeedback", () => {
     const G = new WorldModel();
     const actionMs = BASE_MS;
     const nowMs = BASE_MS + 300_000;
-    G.addContact("contact:123", { tier: 50, last_active_ms: BASE_MS + 200_000 });
-    G.addChannel("channel:123");
+    G.addContact("contact:telegram:123", { tier: 50, last_active_ms: BASE_MS + 200_000 });
+    G.addChannel("channel:telegram:123");
     G.addConversation("conversation:1", {
-      channel: "channel:123",
-      participants: ["contact:123"],
+      channel: "channel:telegram:123",
+      participants: ["contact:telegram:123"],
       state: "active",
       start_ms: BASE_MS - 300_000,
       last_activity_ms: BASE_MS + 200_000,
@@ -106,7 +106,7 @@ describe("computeExternalFeedback", () => {
       alice_message_count: 2,
     });
 
-    const result = computeExternalFeedback(G, "contact:123", actionMs, nowMs);
+    const result = computeExternalFeedback(G, "contact:telegram:123", actionMs, nowMs);
     expect(result.signals).toContain("conversation_active");
   });
 
@@ -114,11 +114,11 @@ describe("computeExternalFeedback", () => {
     const G = new WorldModel();
     const actionMs = BASE_MS;
     const nowMs = BASE_MS + 700_000; // > 600s for no_reply
-    G.addContact("contact:123", { tier: 50, last_active_ms: BASE_MS - 600_000 });
-    G.addChannel("channel:123");
+    G.addContact("contact:telegram:123", { tier: 50, last_active_ms: BASE_MS - 600_000 });
+    G.addChannel("channel:telegram:123");
     G.addConversation("conversation:1", {
-      channel: "channel:123",
-      participants: ["contact:123"],
+      channel: "channel:telegram:123",
+      participants: ["contact:telegram:123"],
       state: "closing",
       start_ms: BASE_MS - 1200_000,
       last_activity_ms: BASE_MS - 600_000,
@@ -128,7 +128,7 @@ describe("computeExternalFeedback", () => {
       alice_message_count: 2,
     });
 
-    const result = computeExternalFeedback(G, "contact:123", actionMs, nowMs);
+    const result = computeExternalFeedback(G, "contact:telegram:123", actionMs, nowMs);
     expect(result.signals).toContain("conversation_ending");
   });
 
@@ -136,10 +136,10 @@ describe("computeExternalFeedback", () => {
     const G = new WorldModel();
     const actionMs = BASE_MS;
     const nowMs = BASE_MS + 300_000;
-    G.addContact("contact:123", { tier: 50, last_active_ms: BASE_MS + 200_000 });
-    G.addChannel("channel:123", { pending_directed: 2 });
+    G.addContact("contact:telegram:123", { tier: 50, last_active_ms: BASE_MS + 200_000 });
+    G.addChannel("channel:telegram:123", { pending_directed: 2 });
 
-    const result = computeExternalFeedback(G, "contact:123", actionMs, nowMs);
+    const result = computeExternalFeedback(G, "contact:telegram:123", actionMs, nowMs);
     expect(result.signals).toContain("directed_message");
   });
 
@@ -147,15 +147,15 @@ describe("computeExternalFeedback", () => {
     const G = new WorldModel();
     const actionMs = BASE_MS;
     const nowMs = BASE_MS + 300_000;
-    G.addContact("contact:123", {
+    G.addContact("contact:telegram:123", {
       tier: 50,
       last_active_ms: BASE_MS + 200_000,
       last_reaction_ms: BASE_MS + 150_000,
     });
-    G.addChannel("channel:123", { pending_directed: 1 });
+    G.addChannel("channel:telegram:123", { pending_directed: 1 });
     G.addConversation("conversation:1", {
-      channel: "channel:123",
-      participants: ["contact:123"],
+      channel: "channel:telegram:123",
+      participants: ["contact:telegram:123"],
       state: "active",
       start_ms: BASE_MS - 300_000,
       last_activity_ms: BASE_MS + 200_000,
@@ -165,7 +165,7 @@ describe("computeExternalFeedback", () => {
       alice_message_count: 2,
     });
 
-    const result = computeExternalFeedback(G, "contact:123", actionMs, nowMs);
+    const result = computeExternalFeedback(G, "contact:telegram:123", actionMs, nowMs);
     expect(result.confidence).toBe(1.0);
     expect(result.signals).toHaveLength(4);
     expect(result.score).toBeGreaterThan(0.5);
@@ -174,7 +174,7 @@ describe("computeExternalFeedback", () => {
   it("无任何信号 → score=0, confidence=0", () => {
     const G = new WorldModel();
     // target 不存在
-    const result = computeExternalFeedback(G, "contact:999", BASE_MS, BASE_MS + 300_000);
+    const result = computeExternalFeedback(G, "contact:telegram:999", BASE_MS, BASE_MS + 300_000);
     expect(result.score).toBe(0);
     expect(result.confidence).toBe(0);
     expect(result.signals).toHaveLength(0);
@@ -184,10 +184,10 @@ describe("computeExternalFeedback", () => {
     const G = new WorldModel();
     const actionMs = BASE_MS;
     const nowMs = BASE_MS + 300_000;
-    G.addContact("contact:456", { tier: 50, last_active_ms: BASE_MS + 200_000 });
-    G.addChannel("channel:456");
+    G.addContact("contact:telegram:456", { tier: 50, last_active_ms: BASE_MS + 200_000 });
+    G.addChannel("channel:telegram:456");
 
-    const result = computeExternalFeedback(G, "channel:456", actionMs, nowMs);
+    const result = computeExternalFeedback(G, "channel:telegram:456", actionMs, nowMs);
     expect(result.signals).toContain("replied");
   });
 });
@@ -199,12 +199,12 @@ describe("rate_outcome — V-1 外部反馈融合", () => {
     const ctx = makeCtx({ outcomeHistory: [] as unknown[] });
     ctx.nowMs = BASE_MS + 300_000; // 300s after action
     const G = ctx.graph;
-    G.addContact("contact:123", { tier: 50, last_active_ms: BASE_MS + 200_000 });
-    G.addChannel("channel:123");
+    G.addContact("contact:telegram:123", { tier: 50, last_active_ms: BASE_MS + 200_000 });
+    G.addChannel("channel:telegram:123");
     // 创建活跃对话增加 confidence
     G.addConversation("conversation:1", {
-      channel: "channel:123",
-      participants: ["contact:123"],
+      channel: "channel:telegram:123",
+      participants: ["contact:telegram:123"],
       state: "active",
       start_ms: BASE_MS - 600_000,
       last_activity_ms: BASE_MS + 200_000,
@@ -216,7 +216,7 @@ describe("rate_outcome — V-1 外部反馈融合", () => {
 
     const impl = instructions.rate_outcome.impl;
     const result = impl(ctx as unknown as ModContext, {
-      target: "contact:123",
+      target: "contact:telegram:123",
       action_ms: BASE_MS,
       quality: "excellent",
       reason: "good response",
@@ -270,11 +270,11 @@ describe("rate_outcome — V-1 外部反馈融合", () => {
     ctx.nowMs = nowMs;
     const G = ctx.graph;
     // 对方没回复（last_active_ms 在 actionMs 之前），对话 closing
-    G.addContact("contact:789", { tier: 50, last_active_ms: BASE_MS - 1200_000 });
-    G.addChannel("channel:789");
+    G.addContact("contact:telegram:789", { tier: 50, last_active_ms: BASE_MS - 1200_000 });
+    G.addChannel("channel:telegram:789");
     G.addConversation("conversation:1", {
-      channel: "channel:789",
-      participants: ["contact:789"],
+      channel: "channel:telegram:789",
+      participants: ["contact:telegram:789"],
       state: "closing",
       start_ms: BASE_MS - 3000_000,
       last_activity_ms: BASE_MS - 1200_000,
@@ -286,7 +286,7 @@ describe("rate_outcome — V-1 外部反馈融合", () => {
 
     const impl = instructions.rate_outcome.impl;
     const result = impl(ctx as unknown as ModContext, {
-      target: "contact:789",
+      target: "contact:telegram:789",
       action_ms: actionMs,
       quality: "excellent", // LLM 自评最高
     }) as {

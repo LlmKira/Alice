@@ -35,7 +35,7 @@ function buildTestGraph(): WorldModel {
   G.addAgent("self");
 
   // 群聊 — Alice 当前在此
-  G.addChannel("channel:-1009900000002", {
+  G.addChannel("channel:telegram:-1009900000002", {
     unread: 0,
     tier_contact: 50,
     chat_type: "supergroup",
@@ -45,7 +45,7 @@ function buildTestGraph(): WorldModel {
   });
 
   // 另一个群（不应在群聊 prompt 中可见）
-  G.addChannel("channel:-1009900000003", {
+  G.addChannel("channel:telegram:-1009900000003", {
     unread: 5,
     tier_contact: 50,
     chat_type: "supergroup",
@@ -55,12 +55,12 @@ function buildTestGraph(): WorldModel {
   });
 
   // 私聊联系人（也是万人群成员）
-  G.addContact("contact:1000000001", {
+  G.addContact("contact:telegram:1000000001", {
     tier: 5,
     display_name: "Kurisu",
     last_active_ms: 60000,
   });
-  G.addChannel("channel:1000000001", {
+  G.addChannel("channel:telegram:1000000001", {
     unread: 2,
     tier_contact: 5,
     chat_type: "private",
@@ -69,15 +69,15 @@ function buildTestGraph(): WorldModel {
     last_directed_ms: 0,
   });
   // Kurisu是万人群成员
-  G.addRelation("channel:-1009900000002", "joined", "contact:1000000001");
+  G.addRelation("channel:telegram:-1009900000002", "joined", "contact:telegram:1000000001");
 
   // 非群成员联系人（只在技术讨论群）
-  G.addContact("contact:9999999", {
+  G.addContact("contact:telegram:9999999", {
     tier: 150,
     display_name: "路人甲",
     last_active_ms: 30000,
   });
-  G.addRelation("channel:-1009900000003", "joined", "contact:9999999");
+  G.addRelation("channel:telegram:-1009900000003", "joined", "contact:telegram:9999999");
 
   // 线程：关联到当前群
   G.addThread("thread_42", {
@@ -88,7 +88,7 @@ function buildTestGraph(): WorldModel {
     created_ms: 80000,
     source: "conversation",
   });
-  G.addRelation("thread_42", "involves", "channel:-1009900000002");
+  G.addRelation("thread_42", "involves", "channel:telegram:-1009900000002");
 
   // 线程：关联到私聊（不应在群聊中可见）
   G.addThread("thread_43", {
@@ -99,7 +99,7 @@ function buildTestGraph(): WorldModel {
     created_ms: 80000,
     source: "conversation",
   });
-  G.addRelation("thread_43", "involves", "contact:1000000001");
+  G.addRelation("thread_43", "involves", "contact:telegram:1000000001");
 
   // 系统线程
   G.addThread("thread_99", {
@@ -117,7 +117,7 @@ function buildTestGraph(): WorldModel {
 /** 群聊 audience。 */
 function groupAudience(): AudienceContext {
   return {
-    targetChat: "channel:-1009900000002",
+    targetChat: "channel:telegram:-1009900000002",
     chatType: "supergroup",
     targetContact: null,
     targetTier: null,
@@ -127,9 +127,9 @@ function groupAudience(): AudienceContext {
 /** 私聊 audience。 */
 function privateAudience(): AudienceContext {
   return {
-    targetChat: "channel:1000000001",
+    targetChat: "channel:telegram:1000000001",
     chatType: "private",
-    targetContact: "contact:1000000001",
+    targetContact: "contact:telegram:1000000001",
     targetTier: 5,
   };
 }
@@ -167,52 +167,52 @@ function makeFooter(...texts: string[]) {
 describe("safeDisplayName", () => {
   it("返回 display_name 如果存在", () => {
     const G = buildTestGraph();
-    expect(safeDisplayName(G, "contact:1000000001")).toBe("Kurisu");
+    expect(safeDisplayName(G, "contact:telegram:1000000001")).toBe("Kurisu");
   });
 
   it("节点不存在时返回 '(someone)'", () => {
     const G = buildTestGraph();
-    expect(safeDisplayName(G, "contact:99999")).toBe("(someone)");
+    expect(safeDisplayName(G, "contact:telegram:99999")).toBe("(someone)");
   });
 
   it("contact 无 display_name 时返回 '(someone)'", () => {
     const G = new WorldModel();
-    G.addContact("contact:111", { tier: 50 });
-    expect(safeDisplayName(G, "contact:111")).toBe("(someone)");
+    G.addContact("contact:telegram:111", { tier: 50 });
+    expect(safeDisplayName(G, "contact:telegram:111")).toBe("(someone)");
   });
 
   it("group channel 无 display_name 时返回 '(a group)'", () => {
     const G = new WorldModel();
-    G.addChannel("channel:-100999", {
+    G.addChannel("channel:telegram:-100999", {
       unread: 0,
       tier_contact: 50,
       chat_type: "supergroup",
       pending_directed: 0,
       last_directed_ms: 0,
     });
-    expect(safeDisplayName(G, "channel:-100999")).toBe("(a group)");
+    expect(safeDisplayName(G, "channel:telegram:-100999")).toBe("(a group)");
   });
 
   it("private channel 无 display_name 时返回 '(a private chat)'", () => {
     const G = new WorldModel();
-    G.addChannel("channel:222", {
+    G.addChannel("channel:telegram:222", {
       unread: 0,
       tier_contact: 50,
       chat_type: "private",
       pending_directed: 0,
       last_directed_ms: 0,
     });
-    expect(safeDisplayName(G, "channel:222")).toBe("(a private chat)");
+    expect(safeDisplayName(G, "channel:telegram:222")).toBe("(a private chat)");
   });
 
   it("永不返回 raw graph ID 格式", () => {
     const G = buildTestGraph();
     // 测试图中所有实体
     for (const nodeId of [
-      "channel:-1009900000002",
-      "channel:-1009900000003",
-      "contact:1000000001",
-      "channel:1000000001",
+      "channel:telegram:-1009900000002",
+      "channel:telegram:-1009900000003",
+      "contact:telegram:1000000001",
+      "channel:telegram:1000000001",
       "thread_42",
       "thread_43",
     ]) {
@@ -230,16 +230,16 @@ describe("safeDisplayName", () => {
 describe("buildAudienceContext", () => {
   it("群聊 → chatType=supergroup, targetContact=null", () => {
     const G = buildTestGraph();
-    const ctx = buildAudienceContext(G, "channel:-1009900000002", "supergroup");
+    const ctx = buildAudienceContext(G, "channel:telegram:-1009900000002", "supergroup");
     expect(ctx.chatType).toBe("supergroup");
     expect(ctx.targetContact).toBeNull();
   });
 
   it("私聊 → chatType=private, targetContact 解析", () => {
     const G = buildTestGraph();
-    const ctx = buildAudienceContext(G, "channel:1000000001", "private");
+    const ctx = buildAudienceContext(G, "channel:telegram:1000000001", "private");
     expect(ctx.chatType).toBe("private");
-    expect(ctx.targetContact).toBe("contact:1000000001");
+    expect(ctx.targetContact).toBe("contact:telegram:1000000001");
     expect(ctx.targetTier).toBe(5);
   });
 
@@ -345,7 +345,7 @@ describe("applyVisibilityFilter — 群聊", () => {
   it("group-dynamics-* keys 放行（天然 scoped）", () => {
     const G = buildTestGraph();
     const audience = groupAudience();
-    const items = [makeSection("group-dynamics-channel:-1009900000002", "活跃发言者: 张三, 李四")];
+    const items = [makeSection("group-dynamics-channel:telegram:-1009900000002", "活跃发言者: 张三, 李四")];
     const filtered = applyVisibilityFilter(items, audience, G);
     expect(filtered).toHaveLength(1);
   });
@@ -552,44 +552,44 @@ describe("开盒防护 — 集成场景", () => {
 describe("resolveDisplayName", () => {
   it("已是 contact:xxx 格式且存在 → 直接返回", () => {
     const G = buildTestGraph();
-    expect(resolveDisplayName(G, "contact:1000000001")).toBe("contact:1000000001");
+    expect(resolveDisplayName(G, "contact:telegram:1000000001")).toBe("contact:telegram:1000000001");
   });
 
   it("已是 channel:xxx 格式且存在 → 直接返回", () => {
     const G = buildTestGraph();
-    expect(resolveDisplayName(G, "channel:-1009900000002")).toBe("channel:-1009900000002");
+    expect(resolveDisplayName(G, "channel:telegram:-1009900000002")).toBe("channel:telegram:-1009900000002");
   });
 
   it("nodeId 格式但不存在 → null", () => {
     const G = buildTestGraph();
-    expect(resolveDisplayName(G, "contact:999999")).toBeNull();
+    expect(resolveDisplayName(G, "contact:telegram:999999")).toBeNull();
   });
 
   it("display_name 匹配 contact → 返回 nodeId", () => {
     const G = buildTestGraph();
-    expect(resolveDisplayName(G, "Kurisu")).toBe("contact:1000000001");
+    expect(resolveDisplayName(G, "Kurisu")).toBe("contact:telegram:1000000001");
   });
 
   it("display_name 大小写不敏感匹配", () => {
     const G = new WorldModel();
-    G.addContact("contact:1", { display_name: "David", tier: 50 });
-    expect(resolveDisplayName(G, "david")).toBe("contact:1");
-    expect(resolveDisplayName(G, "DAVID")).toBe("contact:1");
+    G.addContact("contact:telegram:1", { display_name: "David", tier: 50 });
+    expect(resolveDisplayName(G, "david")).toBe("contact:telegram:1");
+    expect(resolveDisplayName(G, "DAVID")).toBe("contact:telegram:1");
   });
 
   it("display_name 匹配 channel → 返回 nodeId", () => {
     const G = buildTestGraph();
-    expect(resolveDisplayName(G, "万人群")).toBe("channel:-1009900000002");
+    expect(resolveDisplayName(G, "万人群")).toBe("channel:telegram:-1009900000002");
   });
 
   it("channel title 匹配 → 返回 nodeId", () => {
     const G = new WorldModel();
-    G.addChannel("channel:-100123", {
+    G.addChannel("channel:telegram:-100123", {
       chat_type: "supergroup",
       tier_contact: 50,
     });
-    G.setDynamic("channel:-100123", "title", "Dev Team");
-    expect(resolveDisplayName(G, "dev team")).toBe("channel:-100123");
+    G.setDynamic("channel:telegram:-100123", "title", "Dev Team");
+    expect(resolveDisplayName(G, "dev team")).toBe("channel:telegram:-100123");
   });
 
   it("'self' → 返回 'self'", () => {

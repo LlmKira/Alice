@@ -105,7 +105,7 @@ function buildRealisticGraph(nowMs: number): WorldModel {
   }
 
   // 超级群（活跃，有 directed）——使用负数模拟 Telegram supergroup chat_id
-  G.addChannel("channel:-1001000001", {
+  G.addChannel("channel:telegram:-1001000001", {
     unread: 50,
     tier_contact: 150,
     chat_type: "supergroup",
@@ -113,23 +113,23 @@ function buildRealisticGraph(nowMs: number): WorldModel {
     last_directed_ms: nowMs - 60 * 1000,
     last_directed_text: "Hey Alice",
   });
-  G.addRelation("self", "monitors", "channel:-1001000001");
+  G.addRelation("self", "monitors", "channel:telegram:-1001000001");
 
   // 2 个普通群
-  G.addChannel("channel:-1001000002", {
+  G.addChannel("channel:telegram:-1001000002", {
     unread: 10,
     tier_contact: 50,
     chat_type: "group",
     pending_directed: 0,
   });
-  G.addChannel("channel:-1001000003", {
+  G.addChannel("channel:telegram:-1001000003", {
     unread: 5,
     tier_contact: 150,
     chat_type: "group",
     pending_directed: 0,
   });
-  G.addRelation("self", "monitors", "channel:-1001000002");
-  G.addRelation("self", "monitors", "channel:-1001000003");
+  G.addRelation("self", "monitors", "channel:telegram:-1001000002");
+  G.addRelation("self", "monitors", "channel:telegram:-1001000003");
 
   return G;
 }
@@ -141,7 +141,7 @@ function buildMixedPressureGraph(nowMs: number): WorldModel {
   G.addAgent("self");
 
   // P1 源：超级群有大量未读 + directed
-  G.addChannel("channel:-1002000001", {
+  G.addChannel("channel:telegram:-1002000001", {
     unread: 40,
     tier_contact: 150,
     chat_type: "supergroup",
@@ -149,7 +149,7 @@ function buildMixedPressureGraph(nowMs: number): WorldModel {
     last_directed_ms: nowMs - 120_000,
     last_directed_text: "What do you think?",
   });
-  G.addRelation("self", "monitors", "channel:-1002000001");
+  G.addRelation("self", "monitors", "channel:telegram:-1002000001");
 
   // P3 源：3 个冷却中的联系人 + 对应私聊 channel（数字 ID）
   for (let i = 0; i < 3; i++) {
@@ -181,44 +181,44 @@ function buildBalancedGraph(nowMs: number): WorldModel {
   G.addAgent("self");
 
   // "channel:group": 活跃群（P1 + P5 贡献）
-  G.addChannel("channel:-1003000001", {
+  G.addChannel("channel:telegram:-1003000001", {
     unread: 25,
     tier_contact: 50,
     chat_type: "group",
     pending_directed: 1,
     last_directed_ms: nowMs - 300_000,
   });
-  G.addRelation("self", "monitors", "channel:-1003000001");
+  G.addRelation("self", "monitors", "channel:telegram:-1003000001");
 
   // 3001: tier-5 联系人私聊（P3 贡献）
-  G.addContact("contact:3001", {
+  G.addContact("contact:telegram:3001", {
     tier: 5,
     last_active_ms: nowMs - 45 * 60 * 1000,
   });
-  G.addChannel("channel:3001", {
+  G.addChannel("channel:telegram:3001", {
     unread: 1,
     tier_contact: 5,
     chat_type: "private",
     pending_directed: 0,
   });
-  G.addRelation("self", "friend", "contact:3001");
-  G.addRelation("self", "monitors", "channel:3001");
-  G.addRelation("contact:3001", "joined", "channel:3001");
+  G.addRelation("self", "friend", "contact:telegram:3001");
+  G.addRelation("self", "monitors", "channel:telegram:3001");
+  G.addRelation("contact:telegram:3001", "joined", "channel:telegram:3001");
 
   // 3002: tier-15 联系人私聊（P3 贡献）
-  G.addContact("contact:3002", {
+  G.addContact("contact:telegram:3002", {
     tier: 15,
     last_active_ms: nowMs - 2 * 3600 * 1000,
   });
-  G.addChannel("channel:3002", {
+  G.addChannel("channel:telegram:3002", {
     unread: 0,
     tier_contact: 15,
     chat_type: "private",
     pending_directed: 0,
   });
-  G.addRelation("self", "acquaintance", "contact:3002");
-  G.addRelation("self", "monitors", "channel:3002");
-  G.addRelation("contact:3002", "joined", "channel:3002");
+  G.addRelation("self", "acquaintance", "contact:telegram:3002");
+  G.addRelation("self", "monitors", "channel:telegram:3002");
+  G.addRelation("contact:telegram:3002", "joined", "channel:telegram:3002");
 
   return G;
 }
@@ -337,8 +337,8 @@ describe("场景 2: 声部竞争公平性", () => {
     // 纯 P3：只有冷却联系人，无群消息（数字 ID）
     for (let i = 0; i < 5; i++) {
       const id = 4000 + i;
-      const cid = `contact:${id}`;
-      const chid = `channel:${id}`;
+      const cid = `contact:telegram:${id}`;
+      const chid = `channel:telegram:${id}`;
       G.addContact(cid, {
         tier: 5,
         last_active_ms: nowMs - 2 * 3600 * 1000,
@@ -604,11 +604,11 @@ describe("场景 4: P3 Top-K 截断", () => {
     const r8 = p3RelationshipCooling(G, 100, nowMs);
 
     // 加第 9 个
-    G.addContact("contact:9", { tier: 5, last_active_ms: lastActiveMs });
-    G.addChannel("channel:9", { unread: 0, tier_contact: 5, chat_type: "private" });
-    G.addRelation("self", "friend", "contact:9");
-    G.addRelation("self", "monitors", "channel:9");
-    G.addRelation("contact:9", "joined", "channel:9");
+    G.addContact("contact:telegram:9", { tier: 5, last_active_ms: lastActiveMs });
+    G.addChannel("channel:telegram:9", { unread: 0, tier_contact: 5, chat_type: "private" });
+    G.addRelation("self", "friend", "contact:telegram:9");
+    G.addRelation("self", "monitors", "channel:telegram:9");
+    G.addRelation("contact:telegram:9", "joined", "channel:telegram:9");
 
     const r9 = p3RelationshipCooling(G, 100, nowMs);
 
@@ -668,14 +668,14 @@ describe("场景 5: epoch 守卫", () => {
     G.tick = 100;
     G.addAgent("self");
 
-    G.addContact("contact:1ms", { tier: 5, last_active_ms: 1 });
-    G.addChannel("channel:1ms", { unread: 0, tier_contact: 5, chat_type: "private" });
-    G.addRelation("self", "friend", "contact:1ms");
-    G.addRelation("self", "monitors", "channel:1ms");
-    G.addRelation("contact:1ms", "joined", "channel:1ms");
+    G.addContact("contact:telegram:1ms", { tier: 5, last_active_ms: 1 });
+    G.addChannel("channel:telegram:1ms", { unread: 0, tier_contact: 5, chat_type: "private" });
+    G.addRelation("self", "friend", "contact:telegram:1ms");
+    G.addRelation("self", "monitors", "channel:telegram:1ms");
+    G.addRelation("contact:telegram:1ms", "joined", "channel:telegram:1ms");
 
     const { contributions } = p3RelationshipCooling(G, 100, nowMs);
-    expect(contributions["contact:1ms"]).toBeGreaterThan(0);
+    expect(contributions["contact:telegram:1ms"]).toBeGreaterThan(0);
   });
 
   it("混合 epoch + 正常联系人不影响 computeAllPressures 稳定性", () => {

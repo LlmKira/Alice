@@ -89,14 +89,21 @@ const TIER_EXPECTED_DAILY_RATE: Record<DunbarTier, number> = {
 
 // -- Curiosity history buffer ------------------------------------------------
 // 追踪最近 k 个 tick 的 aggregate curiosity pressure，用于轻度平滑。
-// 模块级状态——重启后从空 buffer 开始，几个 tick 后收敛。
+// 生产路径由 EvolveState 持有该 buffer，避免模块级共享状态污染多实例/测试。
 
-/** Curiosity pressure 历史环形缓冲。 */
-const curiosityHistory: number[] = [];
+export type CuriosityHistory = number[];
 
-/** 重置 curiosity 历史（用于测试）。 */
+/** 创建空 curiosity 历史实例。 */
+export function createCuriosityHistory(): CuriosityHistory {
+  return [];
+}
+
+/**
+ * 旧测试辅助保留为 no-op：P6 不再使用模块级 history。
+ * 新测试请传入显式 history。
+ */
 export function resetNoveltyHistory(): void {
-  curiosityHistory.length = 0;
+  // no-op
 }
 
 // -- Surprise 信号 -----------------------------------------------------------
@@ -167,6 +174,16 @@ function computeSurprise(attrs: ContactAttrs, nowMs: number, graphAgeDays: numbe
  * @param k - curiosity smoothing window（config.k，默认 20）
  */
 export function p6Curiosity(G: WorldModel, nowMs: number, eta = 0.6, k = 20): PressureResult {
+  return p6CuriosityWithHistory(G, nowMs, eta, k);
+}
+
+export function p6CuriosityWithHistory(
+  G: WorldModel,
+  nowMs: number,
+  eta = 0.6,
+  k = 20,
+  history?: CuriosityHistory,
+): PressureResult {
   const contacts = G.getEntitiesByType("contact");
   const contactCount = contacts.length;
   const graphAgeDays = G.getGraphAgeMs(nowMs) / 86_400_000;
@@ -224,14 +241,13 @@ export function p6Curiosity(G: WorldModel, nowMs: number, eta = 0.6, k = 20): Pr
   // contact 把 P6 打爆，同时保留单个强 surprise 触发好奇心的能力。
   const curiosityThisTick = eta * Math.tanh(rawCuriositySum);
 
-  // 更新历史缓冲
-  curiosityHistory.push(curiosityThisTick);
-  if (curiosityHistory.length > k) curiosityHistory.shift();
+  const activeHistory = history ?? [curiosityThisTick];
+  if (history) {
+    history.push(curiosityThisTick);
+    if (history.length > k) history.shift();
+  }
 
-  const smoothedCuriosity =
-    curiosityHistory.length > 0
-      ? curiosityHistory.reduce((a, b) => a + b, 0) / curiosityHistory.length
-      : 0;
+  const smoothedCuriosity = activeHistory.reduce((a, b) => a + b, 0) / activeHistory.length;
 
   // D2: Ambient Curiosity 兜底（冷启动时 curiosityHistory 为空，P6=η）
   const contactFamiliarity = Math.min(1, contactCount / DUNBAR_150);

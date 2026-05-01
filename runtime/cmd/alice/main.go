@@ -1,70 +1,37 @@
-// alice — Alice 运行时管理 CLI
+// alice — Alice 部署体检工具
 //
 // 用法:
 //
-//	alice init     # 初始化当前目录
-//	alice run      # 前台运行
-//	alice start    # 后台运行
-//	alice stop     # 停止
-//	alice status   # 查看状态
 //	alice doctor   # 环境诊断
 package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
-	"time"
 )
 
 var version = "1.0.0"
 
-const pidFile = ".alice.pid"
 const envFile = ".env"
 const requiredNodeMajor = 22
-
-const defaultEnvTemplate = `# Alice 配置文件
-
-# Telegram（从 https://my.telegram.org/apps 获取）
-TELEGRAM_API_ID=
-TELEGRAM_API_HASH=
-TELEGRAM_PHONE=
-
-# LLM（OpenAI-compatible）
-LLM_BASE_URL=https://api.openai.com/v1
-LLM_API_KEY=
-LLM_MODEL=gpt-4o
-`
 
 var requiredSystemBinaries = []string{"irc", "self", "alice-pkg"}
 
 func main() {
 	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(1)
+		doctor()
+		return
 	}
 
 	cmd := os.Args[1]
 	switch cmd {
-	case "init":
-		initDir()
-	case "run":
-		run(false)
-	case "start":
-		run(true)
-	case "stop":
-		stop()
-	case "status":
-		status()
 	case "doctor":
 		doctor()
 	case "version":
@@ -79,209 +46,23 @@ func main() {
 }
 
 func printUsage() {
-	_, _ = os.Stdout.WriteString(`Alice — 电子伴侣运行时管理
+	_, _ = os.Stdout.WriteString(`Alice — 部署体检工具
 
 用法:
-  alice <command>
+  alice
+  alice doctor
 
 命令:
-  init      初始化当前目录
-  run       前台运行（日志输出到 stdout）
-  start     后台运行（日志写入 logs/YYYY-MM-DD.log）
-  stop      停止
-  status    查看状态和日志位置
-  doctor    环境诊断
+  doctor    环境诊断（默认命令）
   version   显示版本
   help      显示帮助
 
-日志:
-  前台: alice run                    # 输出到 stdout
-  后台: alice start                  # 写入 logs/
-  查看: tail -f logs/$(date +%F).log
-
-多实例:
-  cp -r ~/alice ~/bot2 && cd ~/bot2 && alice run
+部署:
+  cd /usr/local/lib/alice
+  cp runtime/.env.example runtime/.env
+  alice doctor
+  pm2 start ecosystem.config.cjs
 `)
-}
-
-func initDir() {
-	// 创建 .env 模板
-	if _, err := os.Stat(envFile); os.IsNotExist(err) {
-		content, err := readEnvTemplate()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ 读取 .env 模板失败: %v\n", err)
-			os.Exit(1)
-		}
-		if err := os.WriteFile(envFile, content, 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "❌ 创建 .env 失败: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("✅ 已创建 .env 模板，请编辑配置")
-	} else {
-		fmt.Println("⚠️  .env 已存在")
-	}
-
-	// 创建数据目录
-	for _, dir := range []string{"logs", "skills/store"} {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "❌ 创建目录失败: %v\n", err)
-			os.Exit(1)
-		}
-	}
-	fmt.Println("✅ 已创建数据目录")
-}
-
-func run(daemon bool) {
-	// 检查 .env
-	if _, err := os.Stat(envFile); os.IsNotExist(err) {
-		fmt.Fprintln(os.Stderr, "❌ 缺少 .env 配置文件，运行 alice init")
-		os.Exit(1)
-	}
-	envVars, err := loadEnvFile(envFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ 读取 .env 失败: %v\n", err)
-		os.Exit(1)
-	}
-
-	// 检查是否已在运行
-	if isRunning() {
-		fmt.Fprintln(os.Stderr, "⚠️  Alice 已在运行，使用 alice stop 先停止")
-		os.Exit(1)
-	}
-
-	// 查找 runtime 目录
-	runtimeDir := findRuntimeDir()
-	if runtimeDir == "" {
-		fmt.Fprintln(os.Stderr, "❌ 找不到 runtime 目录")
-		fmt.Fprintln(os.Stderr, "   请在包含 src/index.ts 的目录运行，或设置 ALICE_RUNTIME_DIR")
-		os.Exit(1)
-	}
-	systemBinDir := findSystemBinDir(runtimeDir)
-	if missing := findMissingSystemBinaries(systemBinDir); len(missing) > 0 {
-		fmt.Fprintf(os.Stderr, "❌ 缺少 Alice system-bin：%s\n", strings.Join(missing, ", "))
-		fmt.Fprintf(os.Stderr, "   预期目录: %s\n", absPath(systemBinDir))
-		fmt.Fprintln(os.Stderr, "   请先执行 `pnpm run build:bin`，或重新运行安装脚本")
-		os.Exit(1)
-	}
-
-	// 创建日志目录
-	os.MkdirAll("logs", 0755)
-
-	// 检测运行时（优先项目内 tsx，其次 pnpm exec，避免通过 npx 临时下载）
-	cmd, warning, err := newRuntimeCommand(runtimeDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
-		os.Exit(1)
-	}
-	if warning != "" {
-		fmt.Fprintln(os.Stderr, warning)
-	}
-
-	// 设置环境
-	cmd.Env = appendEnvVars(os.Environ(), envVars)
-	cmd.Env = setEnvValue(cmd.Env, "ALICE_WORKDIR", absPath("."))
-
-	if daemon {
-		// 后台运行 — 日志写入文件
-		logFile := filepath.Join("logs", time.Now().Format("2006-01-02")+".log")
-		logF, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ 创建日志文件失败: %v\n", err)
-			os.Exit(1)
-		}
-
-		cmd.Stdin = nil
-		cmd.Stdout = logF
-		cmd.Stderr = logF
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Setsid: true,
-		}
-
-		if err := cmd.Start(); err != nil {
-			logF.Close()
-			fmt.Fprintf(os.Stderr, "❌ 启动失败: %v\n", err)
-			os.Exit(1)
-		}
-
-		// 写 pid 文件
-		pid := cmd.Process.Pid
-		writePidFile(pid, logFile)
-		fmt.Printf("✅ Alice 已启动 (pid: %d)\n", pid)
-		fmt.Printf("   日志: %s\n", logFile)
-		fmt.Println("   停止: alice stop")
-		_, _ = os.Stdout.WriteString("   查看日志: tail -f logs/$(date +%Y-%m-%d).log\n")
-	} else {
-		// 前台运行 — 日志输出到 stdout/stderr
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		go func() {
-			<-sigChan
-			cmd.Process.Signal(syscall.SIGTERM)
-		}()
-
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "❌ 运行失败: %v\n", err)
-			os.Exit(1)
-		}
-	}
-}
-
-func stop() {
-	pid, err := readPidFile()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "⚠️  Alice 未运行")
-		return
-	}
-
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "⚠️  进程不存在")
-		os.Remove(pidFile)
-		return
-	}
-
-	if err := process.Signal(syscall.SIGTERM); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ 停止失败: %v\n", err)
-		os.Exit(1)
-	}
-
-	// 等待进程结束
-	for i := 0; i < 10; i++ {
-		if !isProcessRunning(pid) {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	os.Remove(pidFile)
-	fmt.Println("✅ Alice 已停止")
-}
-
-func status() {
-	data, err := readPidData()
-	if err != nil {
-		fmt.Println("状态: 未运行")
-		return
-	}
-
-	pid := int(data["pid"].(float64))
-	if isProcessRunning(pid) {
-		fmt.Printf("状态: 运行中 (pid: %d)\n", pid)
-		if workdir, ok := data["workdir"].(string); ok {
-			fmt.Printf("工作目录: %s\n", workdir)
-		}
-		if logFile, ok := data["logFile"].(string); ok {
-			fmt.Printf("日志文件: %s\n", logFile)
-			fmt.Printf("查看日志: tail -f %s\n", logFile)
-		}
-	} else {
-		fmt.Println("状态: 已停止（残留 pid 文件）")
-		os.Remove(pidFile)
-	}
 }
 
 func doctor() {
@@ -290,6 +71,7 @@ func doctor() {
 
 	ok := true
 	runtimeDir := findRuntimeDir()
+	envPath := findEnvFile(runtimeDir)
 
 	// Go 版本
 	fmt.Print("  Go 版本: ")
@@ -382,6 +164,16 @@ func doctor() {
 		ok = false
 	}
 
+	// PM2
+	fmt.Print("  PM2: ")
+	if hasCommand("pm2") {
+		out, _ := exec.Command("pm2", "--version").Output()
+		fmt.Printf("✅ %s\n", strings.TrimSpace(string(out)))
+	} else {
+		fmt.Println("❌ 未安装")
+		ok = false
+	}
+
 	// better-sqlite3 / mtcute
 	fmt.Print("  Native modules: ")
 	if runtimeDir == "" || !hasCommand("node") {
@@ -395,7 +187,7 @@ func doctor() {
 
 	// Skills
 	fmt.Print("  Skills: ")
-	if skillDir := findSkillDir(); skillDir != "" {
+	if skillDir := findSkillDir(runtimeDir); skillDir != "" {
 		files, _ := os.ReadDir(skillDir)
 		fmt.Printf("✅ %d 个\n", len(files))
 	} else {
@@ -404,9 +196,9 @@ func doctor() {
 
 	// 配置文件
 	fmt.Print("  配置: ")
-	if _, err := os.Stat(envFile); err == nil {
-		fmt.Println("✅ .env 存在")
-		envVars, err := loadEnvFile(envFile)
+	if envPath != "" {
+		fmt.Printf("✅ %s\n", absPath(envPath))
+		envVars, err := loadEnvFile(envPath)
 		fmt.Print("  配置项: ")
 		if err != nil {
 			fmt.Printf("❌ %v\n", err)
@@ -437,7 +229,7 @@ func doctor() {
 			}
 		}
 	} else {
-		fmt.Println("⚠️  .env 不存在，运行 alice init")
+		fmt.Println("⚠️  未找到 .env，请复制 runtime/.env.example 到 runtime/.env")
 		fmt.Println("  配置项: ⚠️  跳过")
 	}
 
@@ -522,8 +314,20 @@ func findMissingSystemBinaries(systemBinDir string) []string {
 	return missing
 }
 
-func findSkillDir() string {
-	candidates := []string{"dist/bin", "skills/store", "/usr/local/lib/alice/skills"}
+func findSkillDir(runtimeDir string) string {
+	candidates := make([]string, 0, 6)
+	if runtimeDir != "" {
+		candidates = append(candidates,
+			filepath.Join(runtimeDir, "dist", "bin"),
+			filepath.Join(runtimeDir, "skills", "store"),
+		)
+	}
+	candidates = append(candidates,
+		"dist/bin",
+		"skills/store",
+		"/usr/local/lib/alice/runtime/dist/bin",
+		"/usr/local/lib/alice/skills",
+	)
 	for _, dir := range candidates {
 		if _, err := os.Stat(dir); err == nil {
 			return dir
@@ -532,21 +336,17 @@ func findSkillDir() string {
 	return ""
 }
 
-func readEnvTemplate() ([]byte, error) {
-	candidates := []string{".env.example"}
-	if runtimeDir := findRuntimeDir(); runtimeDir != "" {
-		candidates = append([]string{filepath.Join(runtimeDir, ".env.example")}, candidates...)
+func findEnvFile(runtimeDir string) string {
+	candidates := []string{envFile}
+	if runtimeDir != "" {
+		candidates = append([]string{filepath.Join(runtimeDir, envFile)}, candidates...)
 	}
 	for _, candidate := range candidates {
-		data, err := os.ReadFile(candidate)
-		if err != nil {
-			continue
-		}
-		if strings.TrimSpace(string(data)) != "" {
-			return data, nil
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
 		}
 	}
-	return []byte(defaultEnvTemplate), nil
+	return ""
 }
 
 func loadEnvFile(path string) (map[string]string, error) {
@@ -581,34 +381,6 @@ func loadEnvFile(path string) (map[string]string, error) {
 		return nil, err
 	}
 	return env, nil
-}
-
-func appendEnvVars(base []string, extra map[string]string) []string {
-	merged := append([]string(nil), base...)
-	existing := make(map[string]struct{}, len(base))
-	for _, item := range base {
-		if idx := strings.IndexRune(item, '='); idx > 0 {
-			existing[item[:idx]] = struct{}{}
-		}
-	}
-	for key, value := range extra {
-		if _, ok := existing[key]; ok {
-			continue
-		}
-		merged = append(merged, key+"="+value)
-	}
-	return merged
-}
-
-func setEnvValue(env []string, key, value string) []string {
-	prefix := key + "="
-	for i, item := range env {
-		if strings.HasPrefix(item, prefix) {
-			env[i] = prefix + value
-			return env
-		}
-	}
-	return append(env, prefix+value)
 }
 
 type envValidation struct {
@@ -650,17 +422,6 @@ func validateEnvFile(env map[string]string) envValidation {
 	sort.Strings(result.LegacySeen)
 	sort.Strings(result.LegacyOnly)
 	return result
-}
-
-func newRuntimeCommand(runtimeDir string) (*exec.Cmd, string, error) {
-	script := filepath.Join(runtimeDir, "src/index.ts")
-	if tsx := findTsxBinary(runtimeDir); tsx != "" {
-		return exec.Command(tsx, script), "", nil
-	}
-	if hasCommand("pnpm") {
-		return exec.Command("pnpm", "--dir", runtimeDir, "exec", "tsx", "src/index.ts"), "⚠️  未找到本地 tsx，回退到 pnpm exec tsx", nil
-	}
-	return nil, "", fmt.Errorf("需要 Node.js + pnpm/tsx")
 }
 
 func findTsxBinary(runtimeDir string) string {
@@ -713,52 +474,4 @@ func checkNodeRuntime(runtimeDir string) error {
 		msg = msg[:idx]
 	}
 	return fmt.Errorf("%s", msg)
-}
-
-func writePidFile(pid int, logFile string) {
-	data := map[string]any{
-		"pid":       pid,
-		"startedAt": time.Now().Format(time.RFC3339),
-		"workdir":   absPath("."),
-		"logFile":   logFile,
-	}
-	bytes, _ := json.Marshal(data)
-	os.WriteFile(pidFile, bytes, 0644)
-}
-
-func readPidData() (map[string]any, error) {
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		return nil, err
-	}
-	var m map[string]any
-	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, err
-	}
-	return m, nil
-}
-
-func readPidFile() (int, error) {
-	m, err := readPidData()
-	if err != nil {
-		return 0, err
-	}
-	pid := int(m["pid"].(float64))
-	return pid, nil
-}
-
-func isRunning() bool {
-	pid, err := readPidFile()
-	if err != nil {
-		return false
-	}
-	return isProcessRunning(pid)
-}
-
-func isProcessRunning(pid int) bool {
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return process.Signal(syscall.Signal(0)) == nil
 }

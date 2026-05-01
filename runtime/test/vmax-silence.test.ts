@@ -31,6 +31,7 @@ import {
   computeAllPressures,
   createPressureHistory,
 } from "../src/pressure/aggregate.js";
+import { createCuriosityHistory } from "../src/pressure/p6-curiosity.js";
 import { DEFAULT_SATURATION_COST_CONFIG } from "../src/pressure/social-cost.js";
 
 import { computeNSVBeta, computeVoI } from "../src/pressure/social-value.js";
@@ -116,7 +117,7 @@ function buildVmaxState(
     buffer: new EventBuffer(),
     queue: new ActionQueue(),
     config,
-    noveltyHistory: [0.5, 0.5, 0.5],
+    curiosityHistory: createCuriosityHistory(),
     recentEventCounts: [],
     recentActions: [],
     dispatcher: stubDispatcher(),

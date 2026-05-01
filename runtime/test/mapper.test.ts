@@ -458,20 +458,20 @@ describe("ADR-206: channel phantom contact isolation", () => {
   });
 
   it("频道以自身身份发消息 → 不创建 contact 节点", () => {
-    // 频道 sender_id === chat_id（channel:-1009900000001 以自身身份发帖）
+    // 频道 sender_id === chat_id（channel:telegram:100 以自身身份发帖）
     applyPerturbation(G, {
       type: "new_message",
-      channelId: "channel:-1009900000001",
-      contactId: "contact:-1001",
+      channelId: "channel:telegram:100",
+      contactId: "contact:telegram:100",
       chatType: "channel",
       displayName: "测试用户🦊",
       tick: 1,
     });
 
     // channel 节点应存在
-    expect(G.has("channel:-1009900000001")).toBe(true);
+    expect(G.has("channel:telegram:100")).toBe(true);
     // phantom contact 不应被创建
-    expect(G.has("contact:-1001")).toBe(false);
+    expect(G.has("contact:telegram:100")).toBe(false);
   });
 
   it("频道中真人管理员发消息 → 正常创建 contact 节点", () => {
@@ -512,16 +512,16 @@ describe("ADR-206: channel phantom contact isolation", () => {
 describe("cleanupPhantomContacts", () => {
   it("删除频道幽灵联系人", () => {
     const G = makeGraph();
-    G.addChannel("channel:-1009900000001", { chat_type: "channel" });
-    G.addContact("contact:-1001", { tier: 50, display_name: "测试用户🦊" });
-    G.addRelation("self", "acquaintance", "contact:-1001");
+    G.addChannel("channel:telegram:100", { chat_type: "channel" });
+    G.addContact("contact:telegram:100", { tier: 50, display_name: "测试用户🦊" });
+    G.addRelation("self", "acquaintance", "contact:telegram:100");
 
     const cleaned = cleanupPhantomContacts(G);
 
     expect(cleaned).toBe(1);
-    expect(G.has("contact:-1001")).toBe(false);
+    expect(G.has("contact:telegram:100")).toBe(false);
     // channel 节点应保留
-    expect(G.has("channel:-1009900000001")).toBe(true);
+    expect(G.has("channel:telegram:100")).toBe(true);
   });
 
   it("不删除私聊联系人", () => {

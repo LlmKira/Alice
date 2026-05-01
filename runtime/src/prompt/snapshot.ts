@@ -35,7 +35,6 @@ import {
 import type { ActionQueueItem } from "../engine/action-queue.js";
 import {
   ALICE_SELF,
-  CONTACT_PREFIX,
   ensureChannelId,
   ensureContactId,
   extractNumericId,
@@ -252,9 +251,8 @@ function buildContactPanorama(
     // 放宽到 500——兴趣标签积累集中在远圈联系人
     if (tier > 500) continue;
 
-    const numericPart = cid.slice(CONTACT_PREFIX.length);
-    const numId = Number(numericPart);
-    if (Number.isNaN(numId)) continue;
+    const numId = extractNumericId(cid);
+    if (numId == null) continue;
     const displayName = attrs.display_name;
     if (!displayName || String(displayName).trim() === "") continue;
 

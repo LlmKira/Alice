@@ -6,8 +6,13 @@ import {
 
 describe("ADR-261 rhythm source hygiene", () => {
   it("normalizes positive Telegram sender IDs to contact IDs", () => {
-    expect(normalizeContactSenderId("6571477950")).toBe("contact:6571477950");
-    expect(normalizeContactSenderId("contact:6571477950")).toBe("contact:6571477950");
+    expect(normalizeContactSenderId("6571477950")).toBe("contact:telegram:6571477950");
+    expect(normalizeContactSenderId("contact:6571477950")).toBe(
+      "contact:telegram:6571477950",
+    );
+    expect(normalizeContactSenderId("contact:telegram:6571477950")).toBe(
+      "contact:telegram:6571477950",
+    );
   });
 
   it("does not treat group/channel sender IDs as contacts", () => {
@@ -39,8 +44,8 @@ describe("ADR-261 rhythm source hygiene", () => {
 
     expect(byEntity.has("channel:-1001")).toBe(true);
     expect(byEntity.has("contact:-1001")).toBe(false);
-    expect(byEntity.has("contact:777")).toBe(true);
-    expect(byEntity.has("contact:888")).toBe(false);
+    expect(byEntity.has("contact:telegram:777")).toBe(true);
+    expect(byEntity.has("contact:telegram:888")).toBe(false);
     expect(stats.channelEvents).toBe(3);
     expect(stats.contactEvents).toBe(1);
     expect(stats.skippedChannelLikeSenders).toBe(1);

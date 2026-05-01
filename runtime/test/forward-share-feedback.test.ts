@@ -15,19 +15,22 @@ const NOW = Date.UTC(2026, 3, 26, 3, 40, 0);
 function makeGraph(): WorldModel {
   const G = new WorldModel();
   G.addAgent(ALICE_SELF);
-  G.addChannel("channel:-1001104204833", {
+  G.addChannel("channel:telegram:-1001104204833", {
     chat_type: "channel",
     display_name: "Solidot",
   });
-  G.addContact("contact:733349448", {
+  G.addContact("contact:telegram:733349448", {
     tier: 15,
     display_name: "是日落果儿",
   });
-  G.addChannel("channel:733349448", {
+  G.addChannel("channel:telegram:733349448", {
     chat_type: "private",
     display_name: "是日落果儿",
     last_activity_ms: NOW - 10 * 60_000,
   });
+  G.addRelation(ALICE_SELF, "monitors", "channel:telegram:-1001104204833");
+  G.addRelation(ALICE_SELF, "monitors", "channel:telegram:733349448");
+  G.addRelation("contact:telegram:733349448", "joined", "channel:telegram:733349448");
   return G;
 }
 
@@ -39,16 +42,16 @@ describe("forward share feedback loop", () => {
     const G = makeGraph();
 
     recordForwardShare(G, {
-      fromGraphId: "channel:-1001104204833",
+      fromGraphId: "channel:telegram:-1001104204833",
       msgId: 29693,
-      toGraphId: "channel:733349448",
+      toGraphId: "channel:telegram:733349448",
       targetName: "是日落果儿",
       nowMs: NOW,
     });
 
-    expect(readLastSharedMs(G, "channel:-1001104204833")).toBe(NOW);
-    expect(readLastSharedMs(G, "channel:733349448")).toBe(NOW);
-    expect(readForwardRegistry(G, "channel:-1001104204833")).toEqual({
+    expect(readLastSharedMs(G, "channel:telegram:-1001104204833")).toBe(NOW);
+    expect(readLastSharedMs(G, "channel:telegram:733349448")).toBe(NOW);
+    expect(readForwardRegistry(G, "channel:telegram:-1001104204833")).toEqual({
       "29693": ["是日落果儿"],
     });
   });
@@ -56,9 +59,9 @@ describe("forward share feedback loop", () => {
   it("renders shared recently in the real channel snapshot path", () => {
     const G = makeGraph();
     recordForwardShare(G, {
-      fromGraphId: "channel:-1001104204833",
+      fromGraphId: "channel:telegram:-1001104204833",
       msgId: 29693,
-      toGraphId: "channel:733349448",
+      toGraphId: "channel:telegram:733349448",
       targetName: "是日落果儿",
       nowMs: NOW - 20 * 60_000,
     });
@@ -69,7 +72,7 @@ describe("forward share feedback loop", () => {
       observations: [],
       item: {
         action: "channel_watch",
-        target: "channel:-1001104204833",
+        target: "channel:telegram:-1001104204833",
         facetId: "core",
       } as never,
       round: 0,

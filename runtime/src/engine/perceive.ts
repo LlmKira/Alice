@@ -27,7 +27,6 @@ const log = createLogger("perceive");
 export function perceiveTick(
   G: WorldModel,
   buffer: EventBuffer,
-  noveltyHistory: number[],
   tick?: number,
 ): { eventCount: number; novelty: number; channelCounts: Map<string, number> } {
   const { events, droppedCount, droppedDirectedCount } = buffer.drain();
@@ -58,7 +57,6 @@ export function perceiveTick(
     );
   }
   const novelty = applyPerturbations(G, events);
-  noveltyHistory.push(novelty);
 
   // D5: per-contact recv 窗口计数更新（contact_recv_window）
   updateContactRecvWindow(G, events);

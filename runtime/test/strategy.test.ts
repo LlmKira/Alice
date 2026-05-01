@@ -98,12 +98,12 @@ describe("strategy.mod — listen", () => {
 
     listen.DECLARE_ACTION(
       ctx as unknown as ModContext,
-      { target: "channel:123", intent: "greet" },
+      { target: "channel:telegram:123", intent: "greet" },
       undefined,
     );
 
     expect(state.recentActions).toHaveLength(1);
-    expect(state.recentActions[0].target).toBe("channel:123");
+    expect(state.recentActions[0].target).toBe("channel:telegram:123");
     expect(state.recentActions[0].tick).toBe(50);
   });
 
@@ -124,14 +124,14 @@ describe("strategy.mod — listen", () => {
 
     listen.SEND_MESSAGE(
       ctx as unknown as ModContext,
-      { chatId: "channel:456", text: "hello", senderName: "Alice", isOutgoing: true },
+      { chatId: "channel:telegram:456", text: "hello", senderName: "Alice", isOutgoing: true },
       undefined,
     );
 
     // SEND_MESSAGE 不再写 contactLastInteraction（已移除冗余字段），
     // 但仍更新 groupStates。
-    expect(state.groupStates["channel:456"]).toBeDefined();
-    expect(state.groupStates["channel:456"].totalMessages).toBe(1);
+    expect(state.groupStates["channel:telegram:456"]).toBeDefined();
+    expect(state.groupStates["channel:telegram:456"].totalMessages).toBe(1);
   });
 });
 
@@ -597,7 +597,7 @@ describe("strategy.mod — behavior_pattern", () => {
   it("行动不足 10 条 → 不触发模式检测", () => {
     const state = freshState();
     for (let i = 0; i < 5; i++) {
-      state.recentActions.push({ target: "channel:1", tick: i, intent: "greet" });
+      state.recentActions.push({ target: "channel:telegram:1", tick: i, intent: "greet" });
     }
 
     const ctx = makeCtx(state, 100);
@@ -614,7 +614,7 @@ describe("strategy.mod — overnight_briefing", () => {
   it("Alice 静默 60+ ticks + 有累积消息 → 生成简报提示", () => {
     const state = freshState();
     // 最后一次行动在 tick 30
-    state.recentActions.push({ target: "channel:1", tick: 30, intent: "reply" });
+    state.recentActions.push({ target: "channel:telegram:1", tick: 30, intent: "reply" });
 
     const ctx = makeCtx(state, 100); // 静默 70 ticks > 60
     ctx.graph.addChannel("channel:morning", {
@@ -634,7 +634,7 @@ describe("strategy.mod — overnight_briefing", () => {
 
   it("Alice 刚活跃（静默 < 60 ticks） → 不生成简报", () => {
     const state = freshState();
-    state.recentActions.push({ target: "channel:1", tick: 80, intent: "reply" });
+    state.recentActions.push({ target: "channel:telegram:1", tick: 80, intent: "reply" });
 
     const ctx = makeCtx(state, 100); // 静默 20 ticks < 60
     ctx.graph.addChannel("channel:active", { unread: 10 });
@@ -647,7 +647,7 @@ describe("strategy.mod — overnight_briefing", () => {
 
   it("静默但无累积消息 → 不生成简报", () => {
     const state = freshState();
-    state.recentActions.push({ target: "channel:1", tick: 30, intent: "reply" });
+    state.recentActions.push({ target: "channel:telegram:1", tick: 30, intent: "reply" });
 
     const ctx = makeCtx(state, 100); // 静默 70 ticks
     // 没有频道 → 没有 unread
@@ -1258,17 +1258,17 @@ describe("strategy.mod — G8 contextual_commitment", () => {
     const ctx = makeCtx(state, 100);
     // 设置 relationships mod 的 targetNodeId
     ctx.getModState = ((name: string) => {
-      if (name === "relationships") return { targetNodeId: "channel:123" };
+      if (name === "relationships") return { targetNodeId: "channel:telegram:123" };
       return undefined;
     }) as typeof ctx.getModState;
 
-    // 创建 thread 实体，involves contact:123
+    // 创建 thread 实体，involves contact:telegram:123
     ctx.graph.addThread("thread_1", {
       status: "open",
       title: "Help with project",
     });
-    ctx.graph.addContact("contact:123", { tier: 50 });
-    ctx.graph.addRelation("thread_1", "involves", "contact:123");
+    ctx.graph.addContact("contact:telegram:123", { tier: 50 });
+    ctx.graph.addRelation("thread_1", "involves", "contact:telegram:123");
 
     const items = contribute(ctx as unknown as ModContext<StrategyState>);
     const hints = items.find((i) => i.key === "strategy-hints");
@@ -1288,7 +1288,7 @@ describe("strategy.mod — G8 contextual_commitment", () => {
 
     const ctx = makeCtx(state, 100);
     ctx.getModState = ((name: string) => {
-      if (name === "relationships") return { targetNodeId: "channel:123" };
+      if (name === "relationships") return { targetNodeId: "channel:telegram:123" };
       return undefined;
     }) as typeof ctx.getModState;
 
@@ -1297,8 +1297,8 @@ describe("strategy.mod — G8 contextual_commitment", () => {
       status: "open",
       title: "Unrelated thread",
     });
-    ctx.graph.addContact("contact:456", { tier: 50 });
-    ctx.graph.addRelation("thread_1", "involves", "contact:456");
+    ctx.graph.addContact("contact:telegram:456", { tier: 50 });
+    ctx.graph.addRelation("thread_1", "involves", "contact:telegram:456");
 
     const items = contribute(ctx as unknown as ModContext<StrategyState>);
     const content = JSON.stringify(items);
@@ -1315,7 +1315,7 @@ describe("strategy.mod — G8 contextual_commitment", () => {
 
     const ctx = makeCtx(state, 100);
     ctx.getModState = ((name: string) => {
-      if (name === "relationships") return { targetNodeId: "channel:123" };
+      if (name === "relationships") return { targetNodeId: "channel:telegram:123" };
       return undefined;
     }) as typeof ctx.getModState;
 
@@ -1323,8 +1323,8 @@ describe("strategy.mod — G8 contextual_commitment", () => {
       status: "resolved",
       title: "Done thread",
     });
-    ctx.graph.addContact("contact:123", { tier: 50 });
-    ctx.graph.addRelation("thread_1", "involves", "contact:123");
+    ctx.graph.addContact("contact:telegram:123", { tier: 50 });
+    ctx.graph.addRelation("thread_1", "involves", "contact:telegram:123");
 
     const items = contribute(ctx as unknown as ModContext<StrategyState>);
     const content = JSON.stringify(items);

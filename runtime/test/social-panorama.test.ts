@@ -27,8 +27,8 @@ describe("buildSocialPanorama", () => {
 
   it("只有 bot → 过滤掉", () => {
     const G = makeGraph();
-    G.addContact("contact:100", { is_bot: true, tier: 5 });
-    G.addRelation("self", "acquaintance", "contact:100");
+    G.addContact("contact:telegram:100", { is_bot: true, tier: 5 });
+    G.addRelation("self", "acquaintance", "contact:telegram:100");
     expect(buildSocialPanorama(G, {}, {}, NOW)).toEqual([]);
   });
 
@@ -36,15 +36,15 @@ describe("buildSocialPanorama", () => {
     const G = makeGraph();
     // DunbarTier 最大值是 500，无法构造 tier > 500 的联系人。
     // 改为验证 tier=500（上限）仍被包含。
-    G.addContact("contact:200", { tier: 500 });
-    G.addRelation("self", "acquaintance", "contact:200");
+    G.addContact("contact:telegram:200", { tier: 500 });
+    G.addRelation("self", "acquaintance", "contact:telegram:200");
     expect(buildSocialPanorama(G, {}, {}, NOW).length).toBeGreaterThan(0);
   });
 
   it("tier ≤ 50 的联系人出现在全景中", () => {
     const G = makeGraph();
-    G.addContact("contact:42", { tier: 15, display_name: "Rin" });
-    G.addRelation("self", "acquaintance", "contact:42");
+    G.addContact("contact:telegram:42", { tier: 15, display_name: "Rin" });
+    G.addRelation("self", "acquaintance", "contact:telegram:42");
 
     const lines = buildSocialPanorama(G, {}, {}, NOW);
     expect(lines.length).toBeGreaterThan(0);
@@ -53,11 +53,11 @@ describe("buildSocialPanorama", () => {
 
   it("兴趣标签从 contactProfiles 注入", () => {
     const G = makeGraph();
-    G.addContact("contact:42", { tier: 15, display_name: "Rin" });
-    G.addRelation("self", "acquaintance", "contact:42");
+    G.addContact("contact:telegram:42", { tier: 15, display_name: "Rin" });
+    G.addRelation("self", "acquaintance", "contact:telegram:42");
 
     const profiles: Record<string, ContactProfile> = {
-      "contact:42": {
+      "contact:telegram:42": {
         interests: ["AI", "编程", "摄影"],
         activeHours: new Array(24).fill(0),
         lastUpdatedTick: 0,
@@ -78,11 +78,11 @@ describe("buildSocialPanorama", () => {
 
   it("最近分享过 → 显示 shared recently", () => {
     const G = makeGraph();
-    G.addContact("contact:42", { tier: 15, display_name: "Rin" });
-    G.addRelation("self", "acquaintance", "contact:42");
+    G.addContact("contact:telegram:42", { tier: 15, display_name: "Rin" });
+    G.addRelation("self", "acquaintance", "contact:telegram:42");
     // 模拟私聊 channel 的 last_shared_ms
-    G.addChannel("channel:42");
-    G.setDynamic("channel:42", "last_shared_ms", NOW - 30 * 60_000); // 30 分钟前
+    G.addChannel("channel:telegram:42");
+    G.setDynamic("channel:telegram:42", "last_shared_ms", NOW - 30 * 60_000); // 30 分钟前
 
     const lines = buildSocialPanorama(G, {}, {}, NOW);
     expect(lines[0]).toContain("shared recently");
@@ -90,10 +90,10 @@ describe("buildSocialPanorama", () => {
 
   it("分享超过 1 小时 → 不显示 shared recently", () => {
     const G = makeGraph();
-    G.addContact("contact:42", { tier: 15, display_name: "Rin" });
-    G.addRelation("self", "acquaintance", "contact:42");
-    G.addChannel("channel:42");
-    G.setDynamic("channel:42", "last_shared_ms", NOW - 2 * 3_600_000); // 2 小时前
+    G.addContact("contact:telegram:42", { tier: 15, display_name: "Rin" });
+    G.addRelation("self", "acquaintance", "contact:telegram:42");
+    G.addChannel("channel:telegram:42");
+    G.setDynamic("channel:telegram:42", "last_shared_ms", NOW - 2 * 3_600_000); // 2 小时前
 
     const lines = buildSocialPanorama(G, {}, {}, NOW);
     expect(lines[0]).not.toContain("shared recently");
@@ -101,22 +101,22 @@ describe("buildSocialPanorama", () => {
 
   it("ADR-208 W1: 目标私聊节点 last_shared_ms → 显示 shared recently", () => {
     const G = makeGraph();
-    G.addContact("contact:99", { tier: 15, display_name: "Mia" });
-    G.addRelation("self", "acquaintance", "contact:99");
+    G.addContact("contact:telegram:99", { tier: 15, display_name: "Mia" });
+    G.addRelation("self", "acquaintance", "contact:telegram:99");
     // 直接在目标私聊节点写 last_shared_ms（模拟转发后双写）
-    G.addChannel("channel:99");
-    G.setDynamic("channel:99", "last_shared_ms", NOW - 10 * 60_000); // 10 分钟前
+    G.addChannel("channel:telegram:99");
+    G.setDynamic("channel:telegram:99", "last_shared_ms", NOW - 10 * 60_000); // 10 分钟前
     const lines = buildSocialPanorama(G, {}, {}, NOW);
     expect(lines[0]).toContain("shared recently");
   });
 
   it("ADR-208 W2: 有特质的联系人括号内显示 top-1 特质", () => {
     const G = makeGraph();
-    G.addContact("contact:42", { tier: 15, display_name: "Rin" });
-    G.addRelation("self", "acquaintance", "contact:42");
+    G.addContact("contact:telegram:42", { tier: 15, display_name: "Rin" });
+    G.addRelation("self", "acquaintance", "contact:telegram:42");
 
     const profiles: Record<string, ContactProfile> = {
-      "contact:42": {
+      "contact:telegram:42": {
         interests: [],
         activeHours: new Array(24).fill(0),
         lastUpdatedTick: 0,
@@ -139,8 +139,8 @@ describe("buildSocialPanorama", () => {
 
   it("ADR-208 W2: 无特质 → 括号内只有 tier 标签", () => {
     const G = makeGraph();
-    G.addContact("contact:42", { tier: 15, display_name: "Rin" });
-    G.addRelation("self", "acquaintance", "contact:42");
+    G.addContact("contact:telegram:42", { tier: 15, display_name: "Rin" });
+    G.addRelation("self", "acquaintance", "contact:telegram:42");
 
     const lines = buildSocialPanorama(G, {}, {}, NOW);
     expect(lines[0]).toMatch(/Rin \([^,)]+\)/); // 括号内无逗号
@@ -148,13 +148,13 @@ describe("buildSocialPanorama", () => {
 
   it("有兴趣标签优先，同标签状态下按 tier 升序", () => {
     const G = makeGraph();
-    G.addContact("contact:1", { tier: 5, display_name: "亲密但无标签" });
-    G.addContact("contact:2", { tier: 500, display_name: "远但有标签" });
-    G.addRelation("self", "acquaintance", "contact:1");
-    G.addRelation("self", "acquaintance", "contact:2");
+    G.addContact("contact:telegram:1", { tier: 5, display_name: "亲密但无标签" });
+    G.addContact("contact:telegram:2", { tier: 500, display_name: "远但有标签" });
+    G.addRelation("self", "acquaintance", "contact:telegram:1");
+    G.addRelation("self", "acquaintance", "contact:telegram:2");
 
     const profiles: Record<string, ContactProfile> = {
-      "contact:2": {
+      "contact:telegram:2": {
         interests: ["AI"],
         activeHours: new Array(24).fill(0),
         lastUpdatedTick: 0,

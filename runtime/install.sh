@@ -2,7 +2,9 @@
 # alice-install — Alice 一键安装
 #
 # 用法:
-#   curl -fsSL https://raw.githubusercontent.com/LlmKira/Alice/main/runtime/install.sh | sh
+#   curl -fsSLO https://raw.githubusercontent.com/LlmKira/Alice/main/runtime/install.sh
+#   less install.sh
+#   sh install.sh
 #
 # 需要: Node.js 22+, pnpm, Go 1.22+ 或 Docker（Go/Docker 二选一用于编译 skill CLI）
 #
@@ -12,9 +14,8 @@
 #   /usr/local/lib/alice/runtime/ # 运行时代码
 #
 # 工作目录（用户创建）:
-#   ~/alice/.env      # 配置
-#   ~/alice/logs/     # 日志
-#   ~/alice/alice.db  # 数据库
+#   /usr/local/lib/alice/runtime/.env      # 配置
+#   /usr/local/lib/alice/runtime/alice.db  # 数据库
 
 set -e
 
@@ -74,6 +75,12 @@ if ! command -v pnpm >/dev/null 2>&1; then
     fi
 fi
 info "pnpm $(pnpm --version) \u2713"
+
+if ! command -v pm2 >/dev/null 2>&1; then
+    info "安装 pm2..."
+    npm install -g pm2 || fail "pm2 安装失败，请手动安装: npm install -g pm2"
+fi
+info "pm2 $(pm2 --version) ✓"
 
 # ── 检查编译依赖 ───────────────────────────────────────────────────
 
@@ -201,7 +208,7 @@ info "安装运行时代码..."
 sudo mkdir -p "$PREFIX/lib/alice/runtime"
 
 # 复制必要的运行时文件
-for item in src package.json tsconfig.json drizzle.config.ts drizzle skills dist; do
+for item in .env.example config.toml SOUL.md src package.json tsconfig.json drizzle.config.ts drizzle skills dist; do
     if [ -e "$item" ]; then
         step "复制 $item"
         sudo cp -r "$item" "$PREFIX/lib/alice/runtime/"
@@ -212,6 +219,7 @@ done
 sudo cp "$WORKDIR/alice/package.json" "$PREFIX/lib/alice/"
 sudo cp "$WORKDIR/alice/pnpm-lock.yaml" "$PREFIX/lib/alice/"
 sudo cp "$WORKDIR/alice/pnpm-workspace.yaml" "$PREFIX/lib/alice/"
+sudo cp "$WORKDIR/alice/ecosystem.config.cjs" "$PREFIX/lib/alice/"
 
 # 安装依赖
 info "安装运行时依赖..."
@@ -253,12 +261,12 @@ fi
 info "✅ 安装完成!"
 echo ""
 echo "下一步:"
-echo "  1. 创建工作目录: mkdir -p ~/alice && cd ~/alice"
-echo "  2. 初始化配置: alice init"
-echo "  3. 编辑配置: vim .env"
-echo "  4. 环境诊断: alice doctor"
-echo "  5. 启动服务: alice run"
+echo "  1. cd $PREFIX/lib/alice"
+echo "  2. sudo cp runtime/.env.example runtime/.env"
+echo "  3. sudo vim runtime/.env"
+echo "  4. alice doctor"
+echo "  5. pm2 start ecosystem.config.cjs && pm2 save"
 echo ""
 echo "多实例:"
-echo "  mkdir ~/bot2 && cd ~/bot2 && alice init && alice run"
+echo "  复制仓库到另一个目录，修改 runtime/.env 后用 pm2 start ecosystem.config.cjs --name alice-bot2"
 echo ""

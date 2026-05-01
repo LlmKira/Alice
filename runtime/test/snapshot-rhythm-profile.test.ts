@@ -15,7 +15,7 @@ describe("snapshot rhythm profile projection", () => {
 
   it("把高置信当前联系人节律投成 prompt 人话，不泄漏 harmonic 参数", () => {
     insertProfile({
-      entityId: "contact:42",
+      entityId: "contact:telegram:42",
       entityType: "contact",
       activeNowScore: 0.92,
       quietNowScore: 0.08,
@@ -35,7 +35,7 @@ describe("snapshot rhythm profile projection", () => {
 
   it("低置信或 stale projection 不进入 prompt", () => {
     insertProfile({
-      entityId: "contact:42",
+      entityId: "contact:telegram:42",
       entityType: "contact",
       activeNowScore: 0.92,
       quietNowScore: 0.08,
@@ -43,7 +43,7 @@ describe("snapshot rhythm profile projection", () => {
       confidence: "low",
     });
     insertProfile({
-      entityId: "channel:42",
+      entityId: "channel:telegram:42",
       entityType: "channel",
       activeNowScore: 0.92,
       quietNowScore: 0.08,
@@ -60,7 +60,7 @@ describe("snapshot rhythm profile projection", () => {
 
   it("当前私聊最多投两条 timing line", () => {
     insertProfile({
-      entityId: "contact:42",
+      entityId: "contact:telegram:42",
       entityType: "contact",
       activeNowScore: 0.92,
       quietNowScore: 0.08,
@@ -68,7 +68,7 @@ describe("snapshot rhythm profile projection", () => {
       confidence: "high",
     });
     insertProfile({
-      entityId: "channel:42",
+      entityId: "channel:telegram:42",
       entityType: "channel",
       activeNowScore: 0.05,
       quietNowScore: 0.95,
@@ -84,7 +84,7 @@ describe("snapshot rhythm profile projection", () => {
   it("当前私聊不重复投影语义相同的 contact/channel timing line", () => {
     const sharedWindow = JSON.stringify([{ startHour: 21, endHour: 23 }]);
     insertProfile({
-      entityId: "contact:42",
+      entityId: "contact:telegram:42",
       entityType: "contact",
       activeNowScore: 0.92,
       quietNowScore: 0.08,
@@ -92,7 +92,7 @@ describe("snapshot rhythm profile projection", () => {
       confidence: "high",
     });
     insertProfile({
-      entityId: "channel:42",
+      entityId: "channel:telegram:42",
       entityType: "channel",
       activeNowScore: 0.92,
       quietNowScore: 0.08,
@@ -107,7 +107,7 @@ describe("snapshot rhythm profile projection", () => {
 
   it("频道场景也显示当前频道节律，而不是被 urgent filter 丢掉", () => {
     insertProfile({
-      entityId: "channel:99",
+      entityId: "channel:telegram:99",
       entityType: "channel",
       activeNowScore: 0.92,
       quietNowScore: 0.08,
@@ -129,7 +129,7 @@ function privateInput(): Parameters<typeof buildUserPromptSnapshot>[0] {
     G: makePrivateGraph(),
     messages: [],
     observations: [],
-    item: { action: "conversation", target: "channel:42", facetId: "core" } as never,
+    item: { action: "conversation", target: "channel:telegram:42", facetId: "core" } as never,
     round: 0,
     board: { maxSteps: 3, contextVars: {} },
     nowMs: NOW_MS,
@@ -145,7 +145,7 @@ function channelInput(): Parameters<typeof buildUserPromptSnapshot>[0] {
     G: makeChannelGraph(),
     messages: [],
     observations: [],
-    item: { action: "conversation", target: "channel:99", facetId: "core" } as never,
+    item: { action: "conversation", target: "channel:telegram:99", facetId: "core" } as never,
     round: 0,
     board: { maxSteps: 3, contextVars: {} },
     nowMs: NOW_MS,
@@ -159,15 +159,15 @@ function channelInput(): Parameters<typeof buildUserPromptSnapshot>[0] {
 function makePrivateGraph(): WorldModel {
   const G = new WorldModel();
   G.addAgent(ALICE_SELF);
-  G.addContact("contact:42", { display_name: "Mika" });
-  G.addChannel("channel:42", { chat_type: "private", display_name: "Mika" });
+  G.addContact("contact:telegram:42", { display_name: "Mika" });
+  G.addChannel("channel:telegram:42", { chat_type: "private", display_name: "Mika" });
   return G;
 }
 
 function makeChannelGraph(): WorldModel {
   const G = new WorldModel();
   G.addAgent(ALICE_SELF);
-  G.addChannel("channel:99", { chat_type: "channel", display_name: "Tech Feed" });
+  G.addChannel("channel:telegram:99", { chat_type: "channel", display_name: "Tech Feed" });
   return G;
 }
 

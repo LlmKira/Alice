@@ -57,6 +57,7 @@ import {
   startOneBotEventReceiver,
 } from "./platform/onebot-receiver.js";
 import { AdaptiveKappa, computeAllPressures, createPressureHistory } from "./pressure/aggregate.js";
+import { createCuriosityHistory } from "./pressure/p6-curiosity.js";
 import {
   ALICE_DB_PATH,
   ALICE_GROUP_CACHE_DB_PATH,
@@ -215,7 +216,6 @@ async function main() {
   const buffer = new EventBuffer();
   const queue = new ActionQueue();
   let oneBotReceiver: OneBotReceiverController | null = null;
-  const noveltyHistory: number[] = [];
   const recentEventCounts: number[] = [];
   const recentActions: EvolveState["recentActions"] = [];
 
@@ -329,7 +329,7 @@ async function main() {
     buffer,
     queue,
     config,
-    noveltyHistory,
+    curiosityHistory: createCuriosityHistory(),
     recentEventCounts,
     recentActions,
     dispatcher,

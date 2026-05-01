@@ -232,9 +232,9 @@ describe("relationships.mod — update_group_profile (VI-4)", () => {
 describe("relationships.mod — contribute (VI-3/VI-4 增强)", () => {
   it("展示 portrait（如果有）", () => {
     const ctx = makeRelCtx({
-      targetNodeId: "contact:alice",
+      targetNodeId: "contact:telegram:1001",
       contactProfiles: {
-        "contact:alice": {
+        "contact:telegram:1001": {
           activeHours: new Array(24).fill(0),
           interests: [],
           lastUpdatedTick: 50,
@@ -246,7 +246,7 @@ describe("relationships.mod — contribute (VI-3/VI-4 增强)", () => {
         },
       },
     });
-    ctx.graph.addContact("contact:alice");
+    ctx.graph.addContact("contact:telegram:1001");
 
     // biome-ignore lint/style/noNonNullAssertion: test
     const items = relationshipsMod.contribute!(ctx as unknown as ModContext<unknown>);

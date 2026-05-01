@@ -225,10 +225,10 @@ function lineP1(
 
 /**
  * 从 contact 实体找到对应私聊 channel 上的 last_outgoing_text。
- * 命名规则：contact:X → channel:X（私聊共享数字 ID）。
+ * 命名规则：contact:telegram:X → channel:telegram:X（私聊共享 native ID）。
  */
 function findLastOutgoingText(eid: string, G: WorldModel): string {
-  // contact:123 → channel:123
+  // contact:telegram:123 → channel:telegram:123
   const channelId = ensureChannelId(eid);
   if (!channelId || !G.has(channelId)) return "";
   return G.getChannel(channelId).last_outgoing_text ?? "";

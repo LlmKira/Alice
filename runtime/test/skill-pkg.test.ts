@@ -1,12 +1,4 @@
-import {
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  readlinkSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -45,8 +37,8 @@ function makeRoots(): TestRoots {
 
 function writeSkillVersion(root: string, version: string, description: string): string {
   const skillDir = join(root, `skill-${version}`);
-  const name = "demo-skill";
-  mkdirSync(join(skillDir, "bin"), { recursive: true });
+  const name = "luck";
+  mkdirSync(skillDir, { recursive: true });
 
   writeFileSync(
     join(skillDir, "manifest.yaml"),
@@ -68,27 +60,16 @@ function writeSkillVersion(root: string, version: string, description: string): 
       '    whenToUse: "when testing package lifecycle"',
     ].join("\n"),
   );
-  writeFileSync(join(skillDir, "bin", `${name}.ts`), "console.log('demo')\n");
 
   return join(skillDir, "manifest.yaml");
 }
 
-/** 验证 symlink 指向正确的目标（相对路径，解析后应指向 store 中的文件） */
-function expectSymlinkPointsToStore(
-  binDir: string,
-  name: string,
-  storeRoot: string,
-  hash: string,
-): void {
-  const symlinkPath = join(binDir, name);
-  expect(existsSync(symlinkPath)).toBe(true);
-  expect(lstatSync(symlinkPath).isSymbolicLink()).toBe(true);
-
-  // 解析 symlink 的实际目标
-  const resolvedTarget = resolve(binDir, readlinkSync(symlinkPath));
-  const expectedTarget = join(storeRoot, hash, name);
-  expect(resolvedTarget).toBe(expectedTarget);
-  expect(existsSync(resolvedTarget)).toBe(true);
+function expectExportedWrapper(binDir: string, name: string): void {
+  const commandPath = join(binDir, name);
+  expect(existsSync(commandPath)).toBe(true);
+  expect(readFileSync(commandPath, "utf-8")).toContain(`export ALICE_SKILL="${name}"`);
+  expect(readFileSync(commandPath, "utf-8")).toContain(`exec "$self_dir/.${name}.real" "$@"`);
+  expect(existsSync(join(binDir, `.${name}.real`))).toBe(true);
 }
 
 describe("skill package lifecycle", () => {
@@ -99,25 +80,25 @@ describe("skill package lifecycle", () => {
 
     await installSkill(v1Manifest, roots);
 
-    const v1Entry = getEntry("demo-skill", roots.registryPath);
+    const v1Entry = getEntry("luck", roots.registryPath);
     expect(v1Entry).toBeDefined();
-    expect(v1Entry?.commandPath).toBe(join(roots.binDir, "demo-skill"));
-    expectSymlinkPointsToStore(roots.binDir, "demo-skill", roots.storeRoot, v1Entry?.hash ?? "");
+    expect(v1Entry?.commandPath).toBe(join(roots.binDir, "luck"));
+    expectExportedWrapper(roots.binDir, "luck");
 
-    await upgradeSkill("demo-skill", v2Manifest, roots);
+    await upgradeSkill("luck", v2Manifest, roots);
 
-    const v2Entry = getEntry("demo-skill", roots.registryPath);
+    const v2Entry = getEntry("luck", roots.registryPath);
     expect(v2Entry?.version).toBe("2.0.0");
     expect(v2Entry?.previousHash).toBe(v1Entry?.hash);
-    expectSymlinkPointsToStore(roots.binDir, "demo-skill", roots.storeRoot, v2Entry?.hash ?? "");
+    expectExportedWrapper(roots.binDir, "luck");
 
-    await rollbackSkill("demo-skill", roots);
+    await rollbackSkill("luck", roots);
 
-    const rolledBack = getEntry("demo-skill", roots.registryPath);
+    const rolledBack = getEntry("luck", roots.registryPath);
     expect(rolledBack?.version).toBe("1.0.0");
     expect(rolledBack?.hash).toBe(v1Entry?.hash);
     expect(rolledBack?.previousHash).toBe(v2Entry?.hash);
-    expectSymlinkPointsToStore(roots.binDir, "demo-skill", roots.storeRoot, rolledBack?.hash ?? "");
+    expectExportedWrapper(roots.binDir, "luck");
   });
 
   it("removes exported artifacts from the system prefix on uninstall", async () => {
@@ -125,11 +106,11 @@ describe("skill package lifecycle", () => {
     const manifestPath = writeSkillVersion(roots.root, "1.0.0", "demo skill v1");
 
     await installSkill(manifestPath, roots);
-    expect(existsSync(join(roots.binDir, "demo-skill"))).toBe(true);
+    expect(existsSync(join(roots.binDir, "luck"))).toBe(true);
 
-    await removeSkill("demo-skill", roots);
+    await removeSkill("luck", roots);
 
-    expect(existsSync(join(roots.binDir, "demo-skill"))).toBe(false);
-    expect(getEntry("demo-skill", roots.registryPath)).toBeUndefined();
+    expect(existsSync(join(roots.binDir, "luck"))).toBe(false);
+    expect(getEntry("luck", roots.registryPath)).toBeUndefined();
   });
 });

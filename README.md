@@ -202,10 +202,12 @@ The whole system runs on a tick loop. Every tick, the pressure field evolves. Wh
 ## Quick Start
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LlmKira/Alice/main/runtime/install.sh | sh
+curl -fsSLO https://raw.githubusercontent.com/LlmKira/Alice/main/runtime/install.sh
+less install.sh
+sh install.sh
 ```
 
-Requires: Node.js 22+, `pnpm`, SQLite, Docker, and either Go 1.22+ or Docker for the initial binary build.
+Requires: Node.js 22+, `pnpm`, PM2, SQLite, Docker, and either Go 1.22+ or Docker for the initial binary build.
 
 The installer now builds both kinds of runtime executables:
 
@@ -215,14 +217,23 @@ The installer now builds both kinds of runtime executables:
 After installation:
 
 ```bash
-mkdir ~/alice && cd ~/alice
-alice init     # Create .env template
-vim .env       # Fill TELEGRAM_* and LLM_* fields
-alice doctor   # Verify environment
-alice run      # Start (foreground, Ctrl+C to stop)
+cd /usr/local/lib/alice
+sudo cp runtime/.env.example runtime/.env
+sudo vim runtime/.env
+alice doctor
+pm2 start ecosystem.config.cjs
+pm2 logs alice-runtime
+pm2 save
 ```
 
-If you deploy from source instead of using the installer, do not skip `pnpm run build:bin`:
+If Telegram asks for a login code or 2FA on first start, authorize once in the foreground with the same `.env`, then stop it with `Ctrl+C` and let PM2 take over:
+
+```bash
+cd /usr/local/lib/alice/runtime
+./node_modules/.bin/tsx --env-file=.env src/index.ts
+```
+
+If you deploy from source instead of using the installer, use the same PM2 path and do not skip `pnpm run build:bin`:
 
 ```bash
 git clone https://github.com/LlmKira/Alice.git
@@ -240,9 +251,21 @@ test -x dist/bin/self
 test -x dist/bin/alice-pkg
 ```
 
+Start from the repository root:
+
+```bash
+cd /path/to/Alice
+cp runtime/.env.example runtime/.env
+vim runtime/.env
+ALICE_RUNTIME_DIR=$PWD/runtime runtime/dist/bin/alice doctor
+pm2 start ecosystem.config.cjs
+pm2 logs alice-runtime
+pm2 save
+```
+
 If `alice doctor` reports missing `System bin`, or you see errors like `irc: not found`, the runtime was started without those compiled entries. Re-run `pnpm run build:bin` from `runtime/` or re-run the installer.
 
-For the full deployment and troubleshooting guide, see [`runtime/README.md`](./runtime/README.md) and [`runtime/deploy/systemd/README.md`](./runtime/deploy/systemd/README.md).
+For the full deployment and troubleshooting guide, see [`runtime/README.md`](./runtime/README.md).
 
 Required `.env` fields for first login:
 
@@ -250,31 +273,34 @@ Required `.env` fields for first login:
 TELEGRAM_API_ID=123456
 TELEGRAM_API_HASH=abcdef123456
 TELEGRAM_PHONE=+8613800138000
+TELEGRAM_ADMIN=123456789
 
-LLM_BASE_URL=https://api.openai.com/v1
 LLM_API_KEY=sk-xxx
-LLM_MODEL=gpt-4o
 ```
+
+Non-secret model and endpoint settings live in [`runtime/config.toml`](./runtime/config.toml). Optional secrets such as `TTS_GROUP_ID` also belong in `runtime/.env`.
 
 ### Multi-Instance
 
-Each working directory is an independent bot instance:
+Each repository copy is an independent bot instance:
 
 ```bash
-mkdir ~/bot1 && cd ~/bot1 && alice init && alice start
-mkdir ~/bot2 && cd ~/bot2 && alice init && alice start  # Different config
+cp -a /usr/local/lib/alice /opt/alice-bot2
+cd /opt/alice-bot2
+vim runtime/.env
+pm2 start ecosystem.config.cjs --name alice-bot2
 ```
 
 ### alice CLI
 
 | Command | Description |
 |---------|-------------|
-| `alice init` | Initialize current directory (create .env template) |
-| `alice run` | Run in foreground (logs to stdout) |
-| `alice start` | Run in background (logs to `logs/YYYY-MM-DD.log`) |
-| `alice stop` | Stop background process |
-| `alice status` | Show status and log location |
-| `alice doctor` | Environment diagnostics |
+| `alice` | Run environment diagnostics |
+| `alice doctor` | Run environment diagnostics |
+| `alice version` | Show version |
+| `alice help` | Show help |
+
+Process management is intentionally left to PM2: `pm2 start`, `pm2 logs`, `pm2 restart`, and `pm2 stop`.
 
 > **Note:** Do not run `pnpm run db:migrate` separately — Alice migrates automatically on first start.
 
@@ -297,7 +323,7 @@ cd simulation && uv sync && uv run python run_all.py
 
 ```
 runtime/                    # TypeScript — the living system
-├── cmd/alice/              # Go CLI (init, run, doctor)
+├── cmd/alice/              # Go doctor CLI
 ├── cmd/skills/             # Go skill binaries (weather, music, ...)
 ├── internal/               # Go internal packages
 ├── src/engine/             # Three-thread loop (perceive/evolve/act)

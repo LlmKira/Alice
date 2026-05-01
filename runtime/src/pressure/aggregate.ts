@@ -13,7 +13,7 @@ import { p2InformationPressure } from "./p2-information.js";
 import { p3RelationshipCooling } from "./p3-relationship.js";
 import { p4ThreadDivergence } from "./p4-thread.js";
 import { p5ResponseObligation } from "./p5-response.js";
-import { p6Curiosity } from "./p6-curiosity.js";
+import { type CuriosityHistory, p6CuriosityWithHistory } from "./p6-curiosity.js";
 import type { PropagationConfig } from "./propagation.js";
 import { propagatePressuresMatrix as propagatePressures } from "./propagation.js";
 
@@ -222,6 +222,8 @@ export function computeAllPressures(
     eta?: number;
     /** ADR-112: P6 curiosity pressure smoothing window. */
     k?: number;
+    /** ADR-268/P6 audit: 显式 curiosity smoothing history，避免模块级共享状态。 */
+    curiosityHistory?: CuriosityHistory;
     /** FJ-MM 惯性系数 ρ ∈ [0,1)。传播前将本地压力与历史均值混合，抑制瞬态尖峰。默认 0.2。设 0 禁用。 */
     rho?: number;
     /** APPNP 传播配置。未设置时使用 legacy one-hop。 */
@@ -244,6 +246,7 @@ export function computeAllPressures(
     nowMs = Date.now(),
     eta = 0.6,
     k = 20,
+    curiosityHistory,
     rho = 0.2,
     propagationConfig,
     channelRateEma,
@@ -256,7 +259,7 @@ export function computeAllPressures(
   const r3 = p3RelationshipCooling(G, n, nowMs, channelRateEma, tickDt);
   const r4 = p4ThreadDivergence(G, n, nowMs, threadAgeScale);
   const r5 = p5ResponseObligation(G, n, nowMs);
-  const r6 = p6Curiosity(G, nowMs, eta, k);
+  const r6 = p6CuriosityWithHistory(G, nowMs, eta, k, curiosityHistory);
 
   // ADR-23: P_prospect（独立加法项，不参与 Laplacian 传播）
   const rProspect = pProspect(G, n, nowMs, kSteepness);

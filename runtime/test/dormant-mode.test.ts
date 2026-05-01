@@ -29,6 +29,7 @@ import { createDeliberationState } from "../src/engine/deliberation.js";
 import { type EvolveState, evolveTick } from "../src/engine/evolve.js";
 import { WorldModel } from "../src/graph/world-model.js";
 import { AdaptiveKappa, createPressureHistory } from "../src/pressure/aggregate.js";
+import { createCuriosityHistory } from "../src/pressure/p6-curiosity.js";
 import { DORMANT_PRESSURE_FACTOR, isInQuietWindow } from "../src/pressure/signal-decay.js";
 import { EventBuffer } from "../src/telegram/events.js";
 import { TickClock } from "../src/utils/time.js";
@@ -88,7 +89,7 @@ function buildDormantState(
     buffer: new EventBuffer(),
     queue: new ActionQueue(),
     config,
-    noveltyHistory: [0.5, 0.5, 0.5],
+    curiosityHistory: createCuriosityHistory(),
     recentEventCounts: [],
     recentActions: [],
     dispatcher: stubDispatcher(),
@@ -232,7 +233,7 @@ describe("ADR-225: Dormant Mode", () => {
     state.config.timezoneOffset = offset;
 
     // 添加亲密联系人的频道，有 directed 消息
-    state.G.addChannel("channel:bestfriend", {
+    state.G.addChannel("channel:telegram:bestfriend", {
       unread: 3,
       tier_contact: 5, // tier 5 = 亲密
       chat_type: "private",
@@ -241,12 +242,12 @@ describe("ADR-225: Dormant Mode", () => {
       last_incoming_ms: Date.now(),
       last_activity_ms: Date.now(),
     });
-    state.G.addContact("contact:bestfriend", {
+    state.G.addContact("contact:telegram:bestfriend", {
       tier: 5,
       display_name: "BestFriend",
     });
-    state.G.addRelation("self", "monitors", "channel:bestfriend");
-    state.G.addRelation("channel:bestfriend", "belongs_to", "contact:bestfriend");
+    state.G.addRelation("self", "monitors", "channel:telegram:bestfriend");
+    state.G.addRelation("channel:telegram:bestfriend", "belongs_to", "contact:telegram:bestfriend");
 
     evolveTick(state);
     expect(state.mode).toBe("wakeup");
@@ -265,7 +266,7 @@ describe("ADR-225: Dormant Mode", () => {
     });
     state.config.timezoneOffset = offset;
 
-    state.G.addChannel("channel:stranger", {
+    state.G.addChannel("channel:telegram:stranger", {
       unread: 3,
       tier_contact: 500,
       chat_type: "private",
@@ -274,12 +275,12 @@ describe("ADR-225: Dormant Mode", () => {
       last_incoming_ms: Date.now(),
       last_activity_ms: Date.now(),
     });
-    state.G.addContact("contact:stranger", {
+    state.G.addContact("contact:telegram:stranger", {
       tier: 500,
       display_name: "Stranger",
     });
-    state.G.addRelation("self", "monitors", "channel:stranger");
-    state.G.addRelation("channel:stranger", "belongs_to", "contact:stranger");
+    state.G.addRelation("self", "monitors", "channel:telegram:stranger");
+    state.G.addRelation("channel:telegram:stranger", "belongs_to", "contact:telegram:stranger");
 
     evolveTick(state);
     // 应保持 dormant

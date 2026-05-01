@@ -83,6 +83,7 @@ vi.mock("../src/telegram/actions.js", () => ({
 vi.mock("../src/telegram/apps/sticker-palette.js", () => ({
   resolveLabel: vi.fn().mockReturnValue(null),
   resolveByEmoji: vi.fn().mockReturnValue(null),
+  KEYWORD_TO_EMOJI: {},
   getAvailableKeywords: vi.fn().mockReturnValue("Emotions: happy, sad. Actions: hug, laugh"),
 }));
 
@@ -1122,8 +1123,8 @@ describe("sendDmImpl", () => {
     expect(actions.sendText).toHaveBeenCalledWith(ctx.client, 12345, "你好");
   });
 
-  it("contact:12345 格式也能正常解析", async () => {
-    const result = await impl(ctx, { who: "contact:12345", text: "hi" });
+  it("contact:telegram:12345 格式也能正常解析", async () => {
+    const result = await impl(ctx, { who: "contact:telegram:12345", text: "hi" });
     expect(result).toEqual({ success: true, msgId: undefined, obligationsConsumed: 0 });
     expect(actions.sendText).toHaveBeenCalled();
   });
@@ -1165,14 +1166,18 @@ describe("sendDmImpl", () => {
 
   it("图更新：last_outgoing_text + 事件分派", async () => {
     await impl(ctx, { who: "~12345", text: "hello" });
-    expect(ctx.G.setDynamic).toHaveBeenCalledWith("channel:12345", "last_outgoing_text", "hello");
+    expect(ctx.G.setDynamic).toHaveBeenCalledWith(
+      "channel:telegram:12345",
+      "last_outgoing_text",
+      "hello",
+    );
     expect(ctx.dispatcher.dispatch).toHaveBeenCalledWith("SEND_MESSAGE", {
-      chatId: "channel:12345",
+      chatId: "channel:telegram:12345",
       text: "hello",
       msgId: undefined,
     });
     expect(ctx.dispatcher.dispatch).toHaveBeenCalledWith("DECLARE_ACTION", {
-      target: "channel:12345",
+      target: "channel:telegram:12345",
     });
   });
 

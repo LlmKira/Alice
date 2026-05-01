@@ -62,8 +62,8 @@ describe("relationships.mod — Formative Memories (first-impression)", () => {
       { chatId: "channel:group2", senderName: null, text: "有人看了新电影吗", tick: 85 },
     ]);
 
-    const ctx = makeCtx({ targetNodeId: "contact:42" });
-    ctx.graph.addContact("contact:42", {
+    const ctx = makeCtx({ targetNodeId: "contact:telegram:42" });
+    ctx.graph.addContact("contact:telegram:42", {
       tier: 500,
       display_name: "Bob",
       interaction_count: 1,
@@ -94,8 +94,8 @@ describe("relationships.mod — Formative Memories (first-impression)", () => {
       { chatId: "channel:g", senderName: null, text: "hello", tick: 50 },
     ]);
 
-    const ctx = makeCtx({ targetNodeId: "contact:42" });
-    ctx.graph.addContact("contact:42", {
+    const ctx = makeCtx({ targetNodeId: "contact:telegram:42" });
+    ctx.graph.addContact("contact:telegram:42", {
       tier: 150,
       display_name: "Charlie",
       interaction_count: 1,
@@ -112,9 +112,9 @@ describe("relationships.mod — Formative Memories (first-impression)", () => {
       created_ms: 10,
       novelty: 1.0,
       reinforcement_count: 1,
-      source_contact: "contact:42",
+      source_contact: "contact:telegram:42",
     });
-    ctx.graph.addRelation("contact:42", "knows", "info_test_1");
+    ctx.graph.addRelation("contact:telegram:42", "knows", "info_test_1");
 
     // biome-ignore lint/style/noNonNullAssertion: test
     const items = relationshipsMod.contribute!(ctx as unknown as ModContext);
@@ -128,8 +128,8 @@ describe("relationships.mod — Formative Memories (first-impression)", () => {
       { chatId: "channel:g", senderName: null, text: "hello", tick: 50 },
     ]);
 
-    const ctx = makeCtx({ targetNodeId: "contact:42" });
-    ctx.graph.addContact("contact:42", {
+    const ctx = makeCtx({ targetNodeId: "contact:telegram:42" });
+    ctx.graph.addContact("contact:telegram:42", {
       tier: 150,
       display_name: "Dave",
       interaction_count: 5,
@@ -145,8 +145,8 @@ describe("relationships.mod — Formative Memories (first-impression)", () => {
   it("message_log 无该联系人数据 → 不注入 first-impression", () => {
     mockedGetRecentMessages.mockReturnValue([]);
 
-    const ctx = makeCtx({ targetNodeId: "contact:42" });
-    ctx.graph.addContact("contact:42", {
+    const ctx = makeCtx({ targetNodeId: "contact:telegram:42" });
+    ctx.graph.addContact("contact:telegram:42", {
       tier: 500,
       display_name: "Eve",
       interaction_count: 0,
@@ -165,8 +165,8 @@ describe("relationships.mod — Formative Memories (first-impression)", () => {
       { chatId: "channel:g", senderName: null, text: longText, tick: 90 },
     ]);
 
-    const ctx = makeCtx({ targetNodeId: "contact:42" });
-    ctx.graph.addContact("contact:42", {
+    const ctx = makeCtx({ targetNodeId: "contact:telegram:42" });
+    ctx.graph.addContact("contact:telegram:42", {
       tier: 500,
       display_name: "Frank",
       interaction_count: 0,
@@ -191,8 +191,8 @@ describe("relationships.mod — Formative Memories (first-impression)", () => {
       throw new Error("Database not initialized");
     });
 
-    const ctx = makeCtx({ targetNodeId: "contact:42" });
-    ctx.graph.addContact("contact:42", {
+    const ctx = makeCtx({ targetNodeId: "contact:telegram:42" });
+    ctx.graph.addContact("contact:telegram:42", {
       tier: 500,
       display_name: "Grace",
       interaction_count: 0,
@@ -211,8 +211,8 @@ describe("relationships.mod — Formative Memories (first-impression)", () => {
       { chatId: "channel:g", senderName: null, text: "hi there", tick: 90 },
     ]);
 
-    const ctx = makeCtx({ targetNodeId: "contact:42" });
-    ctx.graph.addContact("contact:42", {
+    const ctx = makeCtx({ targetNodeId: "contact:telegram:42" });
+    ctx.graph.addContact("contact:telegram:42", {
       tier: 500,
       display_name: "Helen",
       interaction_count: 2,
@@ -233,8 +233,8 @@ describe("relationships.mod — Formative Memories (first-impression)", () => {
       { chatId: "channel:g", senderName: null, text: "valid message", tick: 85 },
     ]);
 
-    const ctx = makeCtx({ targetNodeId: "contact:42" });
-    ctx.graph.addContact("contact:42", {
+    const ctx = makeCtx({ targetNodeId: "contact:telegram:42" });
+    ctx.graph.addContact("contact:telegram:42", {
       tier: 500,
       display_name: "Ivan",
       interaction_count: 0,

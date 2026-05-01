@@ -313,12 +313,12 @@ describe("buildSituationBriefing", () => {
     // carol 的 id 是 "carol" 不是 "contact:carol"，所以 findLastOutgoingText 需要 contact:X → channel:X
     // buildTestGraph 里 carol id = "carol"，所以对应 channel 应该是 "channel:carol"（strip "contact:" prefix）
     // 但 "carol" 没有 "contact:" 前缀。让我用一个有正确前缀的 contact 来测试
-    G.addContact("contact:999", {
+    G.addContact("contact:telegram:999", {
       display_name: "Dave",
       tier: 150,
       last_active_ms: 1,
     });
-    G.addChannel("channel:999", {
+    G.addChannel("channel:telegram:999", {
       display_name: "Dave Chat",
       chat_type: "private",
       last_outgoing_text: "周末愉快！",
@@ -326,7 +326,7 @@ describe("buildSituationBriefing", () => {
     const p = mockPressures({
       P1: {},
       P2: {},
-      P3: { "contact:999": 3.0 },
+      P3: { "contact:telegram:999": 3.0 },
       P4: {},
       P5: {},
       P6: {},

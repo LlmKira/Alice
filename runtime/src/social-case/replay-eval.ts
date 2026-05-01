@@ -75,14 +75,14 @@ interface ParsedReplayCommand {
 
 export const SOCIAL_CASE_REPLAY_IDS = {
   alice: "alice",
-  actorA: "contact:42",
-  actorB: "contact:43",
-  actorC: "contact:44",
-  techGroup: "channel:-1001",
-  secondGroup: "channel:-1002",
-  unrelatedGroup: "channel:-1003",
-  privateA: "channel:42",
-  privateC: "channel:44",
+  actorA: "contact:telegram:42",
+  actorB: "contact:telegram:43",
+  actorC: "contact:telegram:44",
+  techGroup: "channel:telegram:-1001",
+  secondGroup: "channel:telegram:-1002",
+  unrelatedGroup: "channel:telegram:-1003",
+  privateA: "channel:telegram:42",
+  privateC: "channel:telegram:44",
 } as const;
 
 const INTERNAL_TERMS = [
@@ -217,7 +217,7 @@ export const SOCIAL_CASE_REPLAY_SCENARIOS: readonly SocialCaseReplayScenario[] =
         "Mostly repaired, with a boundary",
         "In 技术群",
       ],
-      forbiddenText: ["angry and spoke too harshly", "contact:42", "channel:-1001"],
+      forbiddenText: ["angry and spoke too harshly", "contact:telegram:42", "channel:telegram:-1001"],
       forbidInternalTerms: true,
     },
     candidate: {
@@ -253,7 +253,7 @@ export const SOCIAL_CASE_REPLAY_SCENARIOS: readonly SocialCaseReplayScenario[] =
         "Social case with A",
         "A repeat of the same harm would reopen the case",
       ],
-      forbiddenText: ["angry and spoke too harshly", "contact:42", "channel:-1001"],
+      forbiddenText: ["angry and spoke too harshly", "contact:telegram:42", "channel:telegram:-1001"],
       forbidInternalTerms: true,
     },
     candidate: {
@@ -283,7 +283,7 @@ export const SOCIAL_CASE_REPLAY_SCENARIOS: readonly SocialCaseReplayScenario[] =
     events: BASE_CASE_EVENTS,
     prompt: {
       socialCaseVisible: false,
-      forbiddenText: ["Social case with A", "angry and spoke too harshly", "contact:42"],
+      forbiddenText: ["Social case with A", "angry and spoke too harshly", "contact:telegram:42"],
       forbidInternalTerms: true,
     },
     candidate: {
@@ -307,7 +307,7 @@ export const SOCIAL_CASE_REPLAY_SCENARIOS: readonly SocialCaseReplayScenario[] =
     prompt: {
       socialCaseVisible: true,
       requiredText: ["Social case with A", "angry and spoke too harshly"],
-      forbiddenText: ["contact:42", "channel:-1001"],
+      forbiddenText: ["contact:telegram:42", "channel:telegram:-1001"],
       forbidInternalTerms: true,
     },
     candidate: {
@@ -330,7 +330,7 @@ export const SOCIAL_CASE_REPLAY_SCENARIOS: readonly SocialCaseReplayScenario[] =
     prompt: {
       socialCaseVisible: true,
       requiredText: ["Social case with A", "Mostly repaired, with a boundary"],
-      forbiddenText: ["angry and spoke too harshly", "contact:42", "channel:-1001"],
+      forbiddenText: ["angry and spoke too harshly", "contact:telegram:42", "channel:telegram:-1001"],
       forbidInternalTerms: true,
     },
     candidate: {
@@ -408,7 +408,7 @@ export const SOCIAL_CASE_REPLAY_SCENARIOS: readonly SocialCaseReplayScenario[] =
         "Repair has started, but closure is not established yet",
         "我刚才说过头了",
       ],
-      forbiddenText: ["contact:42", "channel:-1001"],
+      forbiddenText: ["contact:telegram:42", "channel:telegram:-1001"],
       forbidInternalTerms: true,
     },
     candidate: {
@@ -488,8 +488,8 @@ export const SOCIAL_CASE_REPLAY_SCENARIOS: readonly SocialCaseReplayScenario[] =
       forbiddenText: [
         "我私下跟你道歉",
         "A apologized only in private",
-        "contact:42",
-        "channel:-1001",
+        "contact:telegram:42",
+        "channel:telegram:-1001",
       ],
       forbidInternalTerms: true,
     },
@@ -551,8 +551,8 @@ export const SOCIAL_CASE_REPLAY_SCENARIOS: readonly SocialCaseReplayScenario[] =
         "我支持你，A 刚才说得太过分了",
         "C support",
         "privately offered support",
-        "contact:44",
-        "channel:44",
+        "contact:telegram:44",
+        "channel:telegram:44",
       ],
       forbidInternalTerms: true,
     },
@@ -615,7 +615,7 @@ export const SOCIAL_CASE_REPLAY_SCENARIOS: readonly SocialCaseReplayScenario[] =
         "Alice insult",
         "A 你故意误导大家吧",
       ],
-      forbiddenText: ["contact:42", "channel:-1001"],
+      forbiddenText: ["contact:telegram:42", "channel:telegram:-1001"],
       forbidInternalTerms: true,
     },
     candidate: {
@@ -714,8 +714,8 @@ export const SOCIAL_CASE_REPLAY_SCENARIOS: readonly SocialCaseReplayScenario[] =
         "exclusion",
         "Alice asked about a timeout",
         "message noise",
-        "contact:43",
-        "contact:44",
+        "contact:telegram:43",
+        "contact:telegram:44",
       ],
       forbidInternalTerms: true,
     },

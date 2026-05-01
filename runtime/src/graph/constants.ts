@@ -333,9 +333,10 @@ const TELEGRAM_NUMBER_RE = /^-?\d+$/u;
  */
 export function chatIdToContactId(chatId: string): ContactNodeId | null {
   const parsed = parsePlatformEntityId(chatId);
-  if (!parsed) return null;
-  if (parsed.kind === "contact") return chatId as ContactNodeId;
-  if (parsed.kind === "channel") return platformContactId(parsed.platform, parsed.nativeId);
+  if (parsed) {
+    if (parsed.kind === "contact") return chatId as ContactNodeId;
+    return platformContactId(parsed.platform, parsed.nativeId);
+  }
   return null;
 }
 
@@ -390,8 +391,8 @@ export function extractNumericId(id: string): TelegramId | null {
 }
 
 /**
- * 确保 ID 为平台限定 channel 格式（channel:<platform>:<nativeId>）。
- * 纯数字字符串按 Telegram native id 处理；旧 `channel:<id>` / `contact:<id>` 不再接受。
+ * 确保 ID 为 channel 格式。
+ * 新写入统一使用平台限定 ID。
  * @see docs/adr/155-branded-graph-id.md
  */
 export function ensureChannelId(id: string): ChannelNodeId | null {
@@ -485,9 +486,13 @@ export function resolveContactAndChannel(
   const contactId = ensureContactId(target);
   const parsed = parsePlatformEntityId(target);
   const mirroredContactId =
-    parsed?.kind === "channel" ? platformContactId(parsed.platform, parsed.nativeId) : null;
+    parsed?.kind === "channel"
+      ? platformContactId(parsed.platform, parsed.nativeId)
+      : null;
   const mirroredChannelId =
-    parsed?.kind === "contact" ? platformChannelId(parsed.platform, parsed.nativeId) : null;
+    parsed?.kind === "contact"
+      ? platformChannelId(parsed.platform, parsed.nativeId)
+      : null;
   return {
     contactId:
       contactId && has(contactId)
