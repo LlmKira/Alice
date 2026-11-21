@@ -24,3 +24,9 @@ logs/
 
 # 测试产物
 test/.test-*
+
+# 单实例锁（运行时产物）
+alice.lock
+
+# pi 原型 transcript（派生缓存，journal 是事实源）
+pi-data/

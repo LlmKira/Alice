@@ -1,1104 +1,659 @@
 /**
- * Alice Runtime 入口。
- *
- * 启动流程：
- * 1. 加载配置
- * 2. 初始化数据库
- * 3. 连接 Telegram
- * 4. 恢复/构建图 + 人格
- * 5. 恢复 Mod 状态 + lastActionTick（ADR-33）
- * 6. 安全网预检（LLM 连通 + Telegram 自检 + 贴纸同步 + Skill 同步 + 压力管线 dry-run）
- * 7. 绑定事件 → 启动 EVOLVE 循环 + ACT 循环
- * 8. 优雅退出
+ * 生产入口，只做组装：Telegram 入站 → Journal → step() → 外壳执行副作用 → 结果写回 Journal。
+ * `--check`：校验配置、打开并迁移数据库、折叠日志、组装，然后退出；不连 Telegram，不调模型。
+ * `--login`：只登录 Telegram（交互输入验证码、两步验证密码），写好 alice.session 后退出；不碰 Journal。
  */
-
-import { writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { generateText } from "ai";
-
-import { TRAIT_BELIEF_DECAY } from "./belief/types.js";
-import { loadConfig } from "./config.js";
-import { checkToolSurfaceCompleteness } from "./core/d3-completeness.js";
-import { createAliceDispatcher } from "./core/dispatcher.js";
-import { loadAllMods } from "./core/mod-loader.js";
-import { ALICE_HOME } from "./core/shell-executor.js";
-import { writeAuditEvent } from "./db/audit.js";
-import { closeDb, getDb, initDb } from "./db/connection.js";
-import { recoverLastActionTick, runMaintenance } from "./db/maintenance.js";
-import {
-  flushGraph,
-  loadGraphFromDb,
-  loadLatestPersonality,
-  migrateFromSnapshots,
-  savePersonalitySnapshot,
-} from "./db/snapshot.js";
-import { type ActContext, startActLoop } from "./engine/act/index.js";
-import { ActionQueue } from "./engine/action-queue.js";
-import { createDeliberationState } from "./engine/deliberation.js";
-import { initEpisodeState } from "./engine/episode.js";
-import { type EvolveState, POST_WAKEUP_RECOVERY_MS, startEvolveLoop } from "./engine/evolve.js";
-import {
-  decideStartupMode,
-  latestRuntimeSeenMs,
-  POST_RESTART_RECOVERY_MIN_OFFLINE_MS,
-} from "./engine/startup-mode.js";
-import { startEngineApi } from "./engine-api/server.js";
-import { ALICE_SELF, telegramChannelId } from "./graph/constants.js";
-import { recordForwardShare } from "./graph/dynamic-props.js";
-import { buildTensionMap } from "./graph/tension.js";
-import type { WorldModel } from "./graph/world-model.js";
-import { initProviders, selectProviderForFirstPass } from "./llm/client.js";
-import { closeGroupCache, initGroupCache } from "./llm/group-cache.js";
-import { closeMediaCache, initMediaCache } from "./llm/media-cache.js";
-import { onBreakerStateChange } from "./llm/resilience.js";
-import { createOneBotTransportAdapter } from "./platform/onebot.js";
-import {
-  type OneBotReceiverController,
-  startOneBotEventReceiver,
-} from "./platform/onebot-receiver.js";
-import { AdaptiveKappa, computeAllPressures, createPressureHistory } from "./pressure/aggregate.js";
-import { createCuriosityHistory } from "./pressure/p6-curiosity.js";
-import {
-  ALICE_DB_PATH,
-  ALICE_GROUP_CACHE_DB_PATH,
-  ALICE_MEDIA_CACHE_DB_PATH,
-  ensureParentDir,
-} from "./runtime-paths.js";
-import { syncEnv } from "./skills/pkg.js";
-import { ensureAllArtifacts, loadRegistry } from "./skills/registry.js";
-import {
-  forwardMessage,
-  getMessages,
-  joinChat,
-  leaveChat,
-  markRead,
-  sendReaction,
-  sendSticker,
-  sendText,
-  setTyping,
-} from "./telegram/actions.js";
-import { bindAdminCommands } from "./telegram/admin.js";
-import { sendAlbumPhoto } from "./telegram/album-send.js";
-import {
-  getAvailableKeywords,
-  resolveByEmoji,
-  resolveLabel,
-  syncInstalledSets,
-} from "./telegram/apps/sticker-palette.js";
-import { buildInitialGraph } from "./telegram/bootstrap.js";
+import { execFile } from "node:child_process";
+import { randomInt } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+import { loadConfig, loadRuntimeConfig } from "./config.js";
+import { closeDb, initDb } from "./db/connection.js";
+import { appendEvent, forEachEvent } from "./journal.js";
+import { Errands } from "./llm/errand.js";
+import { chatTokens, createGateway } from "./llm/gateway.js";
+import { fetchHnTop } from "./llm/hn.js";
+import { localTagger, seeFrame, transcribeVoice } from "./llm/perceive.js";
+import { rerank } from "./llm/rerank.js";
+import { callSpeechModel, SPEECH_MODELS } from "./llm/speech-model.js";
+import { describeSticker, formatStickerMedia, StickerCache } from "./llm/sticker-perceive.js";
+import { perceiveMood, perceiveTone } from "./llm/tone.js";
+import { synthesizeSpeech } from "./llm/tts.js";
+import { CALL_TONE, VoiceCallSession } from "./llm/voice-call.js";
+import { productionMechanisms } from "./mechanisms/registry.js";
+import type { AliceEvent } from "./mind/events.js";
+import { Failed } from "./mind/failure.js";
+import { isAsleepIn, isRotating, type Mind } from "./mind/rotation.js";
+import type { AliceState } from "./mind/state.js";
+import { STICKER_WORDS } from "./mind/words.js";
+import { noiseSource } from "./noise-source.js";
+import { gated, whenRunning } from "./ops/gate.js";
+import { Operator } from "./ops/operator.js";
+import { SpendMeter } from "./ops/spend.js";
+import { withPromptLog } from "./prompt-log.js";
+import { codeVersion, recordRun } from "./runs.js";
+import { ALICE_DB_PATH, ALICE_STATE_DIR, ensureParentDir } from "./runtime-paths.js";
+import { createFold, Shell, type ShellPorts } from "./shell.js";
+import { rotationOf } from "./sim/will-arms.js";
+import { acquireSingleInstanceLock, SingleInstanceLockError } from "./single-instance.js";
+import { executeAct } from "./telegram/acts.js";
+import { Album } from "./telegram/album.js";
+import { CATCH_UP_MS, catchUp, dialogScopes, Groups, Inbox } from "./telegram/catch-up.js";
 import { createClient, createDispatcher, destroyClient, startClient } from "./telegram/client.js";
-import { isTelegramActionError, TelegramActionError } from "./telegram/errors.js";
-import { bindEvents, cacheOutgoingMsg, EventBuffer, warmOutgoingCache } from "./telegram/events.js";
-import { cleanupPhantomContacts } from "./telegram/mapper.js";
-import { initAdminNotify, notifyAdmin } from "./telegram/notify-admin.js";
-import { createLogger } from "./utils/logger.js";
-import { TickClock } from "./utils/time.js";
-import { computeLoudness } from "./voices/loudness.js";
-import { PersonalityVector } from "./voices/personality.js";
-import { selectAction } from "./voices/selection.js";
+import { discover } from "./telegram/discover.js";
+import { isTelegramActionError } from "./telegram/errors.js";
+import { Acquaintances } from "./telegram/first-dm.js";
+import { Gates, Telegram } from "./telegram/gates.js";
+import {
+  listStickerHints,
+  paletteSize,
+  resolveStickerFileId,
+  syncStickerCache,
+  unresolvedStickerWords,
+  upsertStickerPerception,
+} from "./telegram/palette.js";
+import {
+  createMtcuteCallClient,
+  type PhoneCallSignalingUpdate,
+  type PhoneCallUpdate,
+  TelegramPhoneCalls,
+} from "./telegram/phone-call.js";
+import { describeRoom, pullReactions, Scene } from "./telegram/scene.js";
+import { Shelf } from "./telegram/shelf.js";
+import { bindTelegramWorldAdapter, targetOf } from "./telegram/world-adapter.js";
+import { TRACE_EVERY_MS, traceWriter } from "./trace-log.js";
+import { closeLogger, createLogger, onProblemLogged } from "./utils/logger.js";
 
-const log = createLogger("alice");
-const RUNTIME_HEARTBEAT_INTERVAL_MS = 30 * 1000;
+const log = createLogger("runtime");
 
-function recordRuntimeHeartbeat(G: WorldModel, nowMs = Date.now()): void {
-  if (!G.has(ALICE_SELF)) return;
-  G.updateAgent(ALICE_SELF, { runtime_last_seen_ms: nowMs });
-  flushGraph(G);
-}
+/** 心跳日志的间隔。 */
+const HEARTBEAT_MS = 5 * 60_000;
+/** 停下之后最多等这么久让连接、计时器自己散掉，再强制退出（pm2 的 kill_timeout 是 30 秒）。 */
+const EXIT_GRACE_MS = 5_000;
+/** 停机时等后台的事（对话轮询、查群的样子）收尾的上限：它们已经中止，不该在这个上限之外拖住关库。 */
+const BACKGROUND_GRACE_MS = 3_000;
 
-async function main() {
-  log.info("Alice Runtime starting...");
-
-  // 1. 配置
+async function login(): Promise<void> {
+  acquireSingleInstanceLock(join(ALICE_STATE_DIR, "alice.lock"));
   const config = loadConfig();
-
-  // 2. 数据库
-  ensureParentDir(ALICE_DB_PATH);
-  ensureParentDir(ALICE_MEDIA_CACHE_DB_PATH);
-  ensureParentDir(ALICE_GROUP_CACHE_DB_PATH);
-  initDb(ALICE_DB_PATH);
-  initMediaCache(ALICE_MEDIA_CACHE_DB_PATH);
-  initGroupCache(ALICE_GROUP_CACHE_DB_PATH);
-  log.info("Database initialized");
-
-  // 3. Telegram 连接
   const client = createClient(config);
-  const dp = createDispatcher(client);
   await startClient(client, config.telegramPhone);
   const self = await client.getMe();
-  const selfId = String(self.id);
-  log.info("Logged in", { selfId, username: self.username });
-
-  // ADR-33 Phase 2: 从旧 graph_snapshots 迁移到 graph_nodes/graph_edges（一次性）
-  migrateFromSnapshots();
-
-  // 4. 恢复或构建图
-  let G = loadGraphFromDb();
-  if (G) {
-    log.info("Graph restored from DB", { tick: G.tick, nodes: G.size });
-    // ADR-206: 清理历史幽灵联系人（频道以自身身份发消息产生的 contact 镜像）
-    const phantomCount = cleanupPhantomContacts(G);
-    if (phantomCount > 0) {
-      log.info("Cleaned up phantom contacts", { count: phantomCount });
-    }
-  } else {
-    log.info("No graph data found, building initial graph...");
-    G = await buildInitialGraph(client);
-    flushGraph(G);
-    log.info("Initial graph saved", { nodes: G.size, edges: G.edgeCount });
-  }
-
-  // ADR-123 D2: 注册域衰减参数（在 evolve 前、所有 graph 路径后）
-  // @see docs/adr/123-crystallization-substrate-generalization.md §D2
-  G.beliefs.registerDomainDecay("trait:", TRAIT_BELIEF_DECAY);
-  // ADR-123 §D3/D4: jargon 和 expression 域衰减参数
-  G.beliefs.registerDomainDecay("jargon:", {
-    halfLife: 720,
-    muPrior: 0,
-    sigma2Inf: 1.0,
-    theta: 0.001,
-  });
-  G.beliefs.registerDomainDecay("expression:", {
-    halfLife: 1440,
-    muPrior: 0,
-    sigma2Inf: 1.0,
-    theta: 0.001,
-  });
-  // ADR-208: interest 域 — 复用 trait 的未结晶衰减参数（8h 半衰期，等待结晶期间快速衰减）
-  // @see docs/adr/208-cognitive-label-interest-domain.md
-  G.beliefs.registerDomainDecay("interest:", TRAIT_BELIEF_DECAY);
-
-  // 恢复或创建人格
-  // M7: 单一引用对象——所有消费者通过 personalityRef.current 访问，
-  // onPersonalityUpdate 只需更新一处，不再需要同步多个字段。
-  const personalityRef = {
-    current: loadLatestPersonality() ?? new PersonalityVector(config.piHome),
-  };
-  log.info("Personality loaded", personalityRef.current.toString());
-
-  // 同步人格信息到图节点（供 strategy.mod 漂移审计使用）
-  if (G.has(ALICE_SELF)) {
-    G.updateAgent(ALICE_SELF, {
-      personality_weights: JSON.stringify(personalityRef.current.weights),
-      pi_home: JSON.stringify(config.piHome),
-    });
-  }
-
-  // 5. 初始化运行时组件
-  // Mod 系统：加载所有 Mods → 创建 Dispatcher
-  const mods = loadAllMods();
-  const dispatcher = createAliceDispatcher({
-    graph: G,
-    mods,
-    targetWhitelist: config.focusWhitelist,
-  });
-  log.info("Mod system initialized", {
-    mods: mods.map((m) => m.meta.name),
-    instructions: dispatcher.getInstructionNames(),
-    queries: dispatcher.getQueryNames(),
-  });
-
-  // D3 Axiom 3: 工具面完整性检查（启动诊断，不阻塞）
-  // @see paper/ §Axiom 3 "Tool Surface Completeness"
-  checkToolSurfaceCompleteness(dispatcher);
-
-  // ADR-33: 恢复 Mod 状态（重启后不丢失 memorizedFacts/outcomeHistory/strategy 缓存）
-  const modStatesRestored = dispatcher.loadModStatesFromDb();
-  if (modStatesRestored) {
-    log.info("Mod states restored from DB");
-  }
-
-  // ADR-33: 恢复 lastActionTick（避免重启后立即触发空闲自启动）
-  const lastActionTick = recoverLastActionTick();
-
-  const clock = new TickClock({
-    dtMin: config.dtMin,
-    dtMax: config.dtMax,
-    kappaT: config.kappaT,
-    startTick: G.tick,
-  });
-  const buffer = new EventBuffer();
-  const queue = new ActionQueue();
-  let oneBotReceiver: OneBotReceiverController | null = null;
-  const recentEventCounts: number[] = [];
-  const recentActions: EvolveState["recentActions"] = [];
-
-  // 绑定管理员命令（group=-1，在 EventBuffer handler 之前执行）
-  const adminCtx = {
-    config,
-    client,
-    clock,
-    G,
-    get personality() {
-      return personalityRef.current;
-    },
-    queue,
-    dispatcher,
-    mods,
-  };
-  bindAdminCommands(dp, adminCtx);
-
-  // ADR-90 W1: 启动预热 outgoing message cache — reply directed 检测重启恢复
-  const warmedCount = warmOutgoingCache();
-  log.info("Outgoing message cache warmed from DB", { count: warmedCount });
-
-  // 绑定 Telegram 事件 → EventBuffer
-  const selfUsername = self.username ?? undefined;
-  bindEvents(
-    dp,
-    G,
-    buffer,
-    () => selfId,
-    () => clock.tick,
-    () => selfUsername,
-    client,
-  );
-  if (config.qqOneBotEventWsUrl) {
-    oneBotReceiver = startOneBotEventReceiver({
-      url: config.qqOneBotEventWsUrl,
-      accessToken: config.qqOneBotAccessToken,
-      selfId,
-      selfDisplayName: self.username ?? "Alice",
-      getTick: () => clock.tick,
-      buffer,
-      reconnectMinMs: config.qqOneBotReconnectMinMs,
-      reconnectMaxMs: config.qqOneBotReconnectMaxMs,
-    });
-    log.info("OneBot event receiver started");
-  }
-
-  // EVOLVE 状态
-  // ADR-33/110: lastActionTick → lastActionMs。
-  // 尝试从图中任意节点读取 last_alice_action_ms（墙钟直读）；
-  // 不存在时回退到 tick 差值估算；全无则用 Date.now()。
-  const startupNowMs = Date.now();
-  let estimatedLastActionMs = startupNowMs;
-  if (lastActionTick > 0) {
-    // 搜索图中最近的 last_alice_action_ms（任一 channel/contact 节点）
-    let bestMs = 0;
-    for (const nid of [...G.getEntitiesByType("channel"), ...G.getEntitiesByType("contact")]) {
-      const ms = Number(G.getDynamic(nid, "last_alice_action_ms") ?? 0);
-      if (ms > bestMs) bestMs = ms;
-    }
-    estimatedLastActionMs =
-      bestMs > 0 ? bestMs : startupNowMs - (G.tick - lastActionTick) * config.dtMax;
-  }
-
-  const lastRuntimeSeenMs =
-    G.has(ALICE_SELF) && G.getAgent(ALICE_SELF).runtime_last_seen_ms != null
-      ? G.getAgent(ALICE_SELF).runtime_last_seen_ms
-      : 0;
-  const lastRuntimeShutdownMs =
-    G.has(ALICE_SELF) && G.getAgent(ALICE_SELF).runtime_shutdown_ms != null
-      ? G.getAgent(ALICE_SELF).runtime_shutdown_ms
-      : 0;
-  const runtimeSeenMs = latestRuntimeSeenMs({
-    lastSeenMs: lastRuntimeSeenMs,
-    shutdownMs: lastRuntimeShutdownMs,
-  });
-  const startupMode = decideStartupMode({
-    runtimeOfflineMs: runtimeSeenMs > 0 ? startupNowMs - runtimeSeenMs : 0,
-    actionSilenceMs: startupNowMs - estimatedLastActionMs,
-    wakeupOfflineThresholdS: config.wakeupOfflineThresholdS,
-    postRestartRecoveryMinOfflineMs: POST_RESTART_RECOVERY_MIN_OFFLINE_MS,
-  });
-  const { initialMode, shouldUsePostRestartRecovery } = startupMode;
-  if (initialMode === "wakeup") {
-    log.info("Entering wakeup mode — long runtime offline detected", {
-      runtimeOfflineS: Math.round(startupMode.runtimeOfflineS),
-      actionSilenceS: Math.round(startupMode.actionSilenceS),
-      thresholdS: config.wakeupOfflineThresholdS,
-    });
-  } else if (shouldUsePostRestartRecovery) {
-    log.info("Entering post-restart recovery window", {
-      recoveryMs: POST_WAKEUP_RECOVERY_MS,
-      runtimeOfflineS: Math.round(startupMode.runtimeOfflineS),
-      actionSilenceS: Math.round(startupMode.actionSilenceS),
-    });
-  } else {
-    log.info("Entering patrol mode after short restart", {
-      runtimeOfflineS: Math.round(startupMode.runtimeOfflineS),
-      actionSilenceS: Math.round(startupMode.actionSilenceS),
-      recoveryMinOfflineS: POST_RESTART_RECOVERY_MIN_OFFLINE_MS / 1000,
-    });
-  }
-  recordRuntimeHeartbeat(G, startupNowMs);
-
-  const evolveState: EvolveState = {
-    G,
-    get personality() {
-      return personalityRef.current;
-    },
-    clock,
-    buffer,
-    queue,
-    config,
-    curiosityHistory: createCuriosityHistory(),
-    recentEventCounts,
-    recentActions,
-    dispatcher,
-    lastActionMs: estimatedLastActionMs,
-    pressureHistory: createPressureHistory(),
-    deliberation: createDeliberationState(),
-    attentionDebtMap: new Map(),
-    lastSelectedTarget: null,
-    lastSelectedCandidate: null,
-    // Agent Mode FSM — ADR-190: 根据离线时长决定初始模态
-    mode: initialMode,
-    focusTarget: undefined,
-    modeEnteredMs: startupNowMs,
-    adaptiveKappa: new AdaptiveKappa(config.kappa),
-    channelRateEma: new Map(),
-    // ADR-191: spike 信号数据源（perceiveTick 产物）
-    lastChannelCounts: new Map(),
-    // ADR-147 D2: 事件计数 EMA 初始值（冷启动）
-    eventCountEma: 10,
-    // ADR-147 D12: 连续洪水 tick 计数
-    floodTickCount: 0,
-    // ADR-190: Wakeup 状态
-    wakeupTicksElapsed: 0,
-    wakeupEngagedTargets: new Set(),
-    // Runtime restart also resets queue/engagement context; use the same recovery control loop.
-    wakeupRecoveryUntilMs: shouldUsePostRestartRecovery
-      ? startupNowMs + POST_WAKEUP_RECOVERY_MS
-      : undefined,
-    lastAPI: 0,
-    lastAPIPeak: 0,
-    lastFlushMs: startupNowMs,
-    currentDt: 0,
-    // ADR-190: LLM 失败指数退避初始状态
-    llmBackoff: { consecutiveFailures: 0, lastFailureMs: 0 },
-    // ADR-215: Cognitive Episode Graph
-    episodeState: initEpisodeState(),
-  };
-
-  // ACT 上下文
-  const actCtx: ActContext = {
-    client,
-    G,
-    config,
-    queue,
-    get personality() {
-      return personalityRef.current;
-    },
-    dispatcher,
-    buffer, // ADR-107: EventBuffer 引用
-    getCurrentTick: () => clock.tick,
-    getCurrentPressures: () => {
-      const p = computeAllPressures(G, clock.tick, {
-        kappa: config.kappa,
-        threadAgeScale: config.threadAgeScale,
-        mu: config.mu,
-        d: config.d,
-
-        deltaDeadline: config.delta,
-      });
-      return [p.P1, p.P2, p.P3, p.P4, p.P5, p.P6];
-    },
-    // ADR-173: 延迟记录——act 确认真实 Telegram 行动后写入 recentActions
-    recordAction: (action: string, target: string | null) => {
-      const nowMs = Date.now();
-      recentActions.push({ tick: clock.tick, action, ms: nowMs, target });
-      // 窗口清理（与旧 enqueueAndRecord 逻辑一致）
-      const windowStartMs = nowMs - config.actionRateWindow * 1000;
-      while (recentActions.length > 0 && recentActions[0].ms <= windowStartMs) {
-        recentActions.shift();
-      }
-    },
-    // ADR-190: LLM 调用结果通知——驱动 evolve 调度层指数退避
-    reportLLMOutcome: (success: boolean) => {
-      if (success) {
-        evolveState.llmBackoff.consecutiveFailures = 0;
-      } else {
-        evolveState.llmBackoff.consecutiveFailures++;
-        evolveState.llmBackoff.lastFailureMs = Date.now();
-      }
-    },
-    onPersonalityUpdate: (pv) => {
-      // M7: 单点更新——所有消费者通过 getter 自动获取最新值
-      personalityRef.current = pv;
-      // 同步到图节点（供 strategy.mod 人格漂移审计读取）
-      if (G.has(ALICE_SELF)) {
-        G.updateAgent(ALICE_SELF, { personality_weights: JSON.stringify(pv.weights) });
-      }
-      // 人格快照由 snapshotAndMaintain 定时器统一保存（墙钟间隔），
-      // 此处不再使用 tick % snapshotIntervalS（tick 计数 vs 秒数语义不匹配）。
-      // @see F8 fix: ADR-113 遗留项
-    },
-  };
-
-  // ── ADR-54 安全网：启动预检 ──────────────────────────────────────────────
-
-  // S2: mtcute 连接监控 — 注册 error/connectionState 处理器
-  // mtcute 内部自动重连，这里做日志记录以便排查
-  // @see docs/adr/54-pre-mortem-safety-net.md §S2
-  client.onError.add((err: Error) => {
-    log.error("mtcute connection error", { error: err.message });
-    writeAuditEvent(clock.tick, "error", "mtcute", "Connection error", {
-      error: err.message,
-    });
-  });
-  // ADR-147 D4: mtcute 重连状态感知 — 精确标记积压期
-  // `updating` = 正在追赶积压 updates，`connected` = 追赶完成。
-  // 首次连接: onUsable → connected（无 updating 阶段，recoveringStartMs=0 不触发）
-  // 重连恢复: connected → onCatchingUp(true) → updating → ... → onCatchingUp(false) → connected
-  // @see docs/adr/147-flood-backlog-recovery.md §D4
-  let recoveringStartMs = 0;
-  client.onConnectionState.add((state: string) => {
-    log.info("mtcute connection state changed", { state });
-    if (state === "updating") {
-      recoveringStartMs = Date.now();
-      buffer.isRecovering = true;
-      log.warn("mtcute entering recovery mode — catching up backlog");
-      writeAuditEvent(clock.tick, "warn", "mtcute", "Entering recovery mode (catching up)");
-    } else if (state === "connected" && recoveringStartMs > 0) {
-      const durationMs = Date.now() - recoveringStartMs;
-      buffer.isRecovering = false;
-      recoveringStartMs = 0;
-      log.info("mtcute recovery complete", { durationMs });
-      writeAuditEvent(clock.tick, "warn", "mtcute", `Recovery complete in ${durationMs}ms`);
-    }
-    if (state === "offline" || state === "closed") {
-      writeAuditEvent(clock.tick, "warn", "mtcute", `Connection state: ${state}`);
-    }
-  });
-
-  // D5: 初始化 provider fallback 链（ADR-123 §D5）
-  initProviders(config);
-
-  // ADR-263: group reception Ax shadow judge 只做旁路诊断，不接管 evidence/control。
-  const { initGroupReceptionShadowJudge } = await import("./mods/observer/group-reception.js");
-  initGroupReceptionShadowJudge(config);
-
-  // S-EA: 启动 Engine API（TCP）
-  // Skill CLI 脚本通过 TCP 读取 config / graph 属性。
-  // @see docs/adr/202-engine-api.md
-  let engineApiCleanup: (() => Promise<void>) | null = null;
-  let enginePort = 0;
-  // deps 引用保持可变——S8 syncEnv 完成后注入 registry + 收紧 strict 模式
-  const engineApiDeps: Parameters<typeof startEngineApi>[0] = {
-    config: {
-      timezoneOffset: config.timezoneOffset,
-      exaApiKey: config.exaApiKey ?? "",
-      musicApiBaseUrl: config.musicApiBaseUrl ?? "",
-      youtubeApiKey: config.youtubeApiKey ?? "",
-    },
-    G,
-    targetWhitelist: config.focusWhitelist,
-    getTick: () => clock.tick,
-    transportAdapters: config.qqOneBotApiBaseUrl
-      ? {
-          qq: createOneBotTransportAdapter({
-            apiBaseUrl: config.qqOneBotApiBaseUrl,
-            accessToken: config.qqOneBotAccessToken,
-            timeoutMs: config.qqOneBotTimeoutMs,
-          }),
-        }
-      : undefined,
-    telegramSend: async ({ chatId, text, replyTo }) => {
-      const rawChatId = typeof chatId === "number" ? chatId : Number(chatId);
-      // Typing indicator + 自然延迟（对齐 action-executor 行为）。
-      // irc say/reply 通过 Engine API 发送，不经过 action-executor 的 typing 管线，
-      // 需要在此处补偿，否则对端看不到"正在输入"。
-      try {
-        await setTyping(client, rawChatId);
-        const charCount = [...text].length;
-        const delayMs = Math.min(Math.max(charCount * 80, 800), 8000);
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-      } catch {
-        // typing 失败不阻断发送
-      }
-      const msgId = await sendText(client, rawChatId, text, { replyToMsgId: replyTo });
-      // 显式取消 typing 定时器（mtcute 5s 自动续发，不取消会残留）
-      setTyping(client, rawChatId, true).catch(() => {});
-      const graphId = telegramChannelId(rawChatId);
-      if (msgId != null && graphId) {
-        cacheOutgoingMsg(graphId, msgId);
-      }
-      if (graphId && G.has(graphId)) {
-        G.setDynamic(graphId, "last_outgoing_text", [...text].slice(0, 150).join(""));
-        dispatcher.dispatch("SEND_MESSAGE", { chatId: graphId, text, msgId });
-        dispatcher.dispatch("DECLARE_ACTION", { target: graphId });
-      }
-      return { msgId: msgId ?? null };
-    },
-    telegramMarkRead: async (chatId) => {
-      const rawChatId = typeof chatId === "number" ? chatId : Number(chatId);
-      await markRead(client, rawChatId);
-      const graphId = telegramChannelId(rawChatId);
-      if (graphId && G.has(graphId)) {
-        G.setDynamic(graphId, "unread", 0);
-        G.setDynamic(graphId, "mentions_alice", false);
-        G.setDynamic(graphId, "recently_cleared_ms", Date.now());
-      }
-      return { ok: true as const };
-    },
-    telegramReact: async ({ chatId, msgId, emoji }) => {
-      const rawChatId = typeof chatId === "number" ? chatId : Number(chatId);
-      await sendReaction(client, rawChatId, msgId, emoji);
-      const graphId = telegramChannelId(rawChatId);
-      if (graphId) {
-        dispatcher.dispatch("DECLARE_ACTION", { target: graphId, isMessage: false });
-      }
-      return { ok: true as const };
-    },
-    telegramJoin: async (chatIdOrLink) => {
-      await joinChat(client, chatIdOrLink);
-      return { ok: true as const };
-    },
-    telegramLeave: async (chatId) => {
-      const rawChatId = typeof chatId === "number" ? chatId : Number(chatId);
-      await leaveChat(client, rawChatId);
-      return { ok: true as const };
-    },
-    telegramSticker: async ({ chatId, sticker: keyword }) => {
-      const rawChatId = typeof chatId === "number" ? chatId : Number(chatId);
-      // Typing indicator（sticker 也需要短暂的"正在输入"模拟自然感）
-      try {
-        await setTyping(client, rawChatId);
-        await new Promise((resolve) => setTimeout(resolve, 600));
-      } catch {
-        // typing 失败不阻断发送
-      }
-      const graphId = telegramChannelId(rawChatId);
-      const db = getDb();
-      // 多层解析：维度关键词 → emoji → raw fileId
-      let fileId: string | null = resolveLabel(db, keyword, graphId ?? undefined);
-      if (!fileId) fileId = resolveByEmoji(db, keyword, graphId ?? undefined);
-      if (!fileId && keyword.startsWith("CAACAgI")) fileId = keyword;
-      if (!fileId) {
-        const available = getAvailableKeywords(db);
-        throw new TelegramActionError(
-          "invalid_sticker_keyword",
-          `No sticker matches "${keyword}". Valid: ${available}`,
-        );
-      }
-      const msgId = await sendSticker(client, rawChatId, fileId);
-      setTyping(client, rawChatId, true).catch(() => {});
-      if (msgId != null && graphId) {
-        cacheOutgoingMsg(graphId, msgId);
-        dispatcher.dispatch("DECLARE_ACTION", { target: graphId });
-      }
-      return { msgId: msgId ?? null };
-    },
-    // TTS 语音消息：textToSpeech → sendVoice → fallback sendText
-    telegramVoice: async ({ chatId, text, emotion, replyTo }) => {
-      const rawChatId = typeof chatId === "number" ? chatId : Number(chatId);
-      const graphId = telegramChannelId(rawChatId);
-      const { isTTSEnabled, textToSpeech } = await import("./llm/tts.js");
-      const { sendVoice } = await import("./telegram/actions.js");
-      const ttsConfig = {
-        ttsBaseUrl: config.ttsBaseUrl,
-        ttsApiKey: config.ttsApiKey,
-        ttsModel: config.ttsModel,
-        ttsVoice: config.ttsVoice,
-        ttsGroupId: config.ttsGroupId,
-      };
-      if (!isTTSEnabled(ttsConfig)) {
-        throw new Error("TTS not configured (set TTS_BASE_URL and TTS_API_KEY in .env)");
-      }
-      // 情感验证
-      const VALID_EMOTIONS = new Set([
-        "happy",
-        "sad",
-        "angry",
-        "fearful",
-        "disgusted",
-        "surprised",
-        "calm",
-        "fluent",
-        "whisper",
-      ]);
-      const validEmotion =
-        emotion && VALID_EMOTIONS.has(emotion)
-          ? (emotion as import("./llm/tts.js").TTSEmotion)
-          : undefined;
-      // Typing indicator
-      try {
-        await setTyping(client, rawChatId);
-      } catch {
-        /* typing 失败不阻断 */
-      }
-      const audioBuffer = await textToSpeech(text.slice(0, 1000), ttsConfig, validEmotion);
-      let sentMsgId: number | undefined;
-      let deliveredAs: "voice" | "text" = "voice";
-      let fallbackReason: string | undefined;
-      if (audioBuffer) {
-        try {
-          sentMsgId = await sendVoice(client, rawChatId, audioBuffer, { replyToMsgId: replyTo });
-        } catch (error) {
-          if (!isTelegramActionError(error) || error.code !== "voice_messages_forbidden") {
-            throw error;
-          }
-          log.warn("Voice messages forbidden, falling back to text", { chatId: rawChatId });
-          sentMsgId =
-            (await sendText(client, rawChatId, text, { replyToMsgId: replyTo })) ?? undefined;
-          deliveredAs = "text";
-          fallbackReason = "voice_messages_forbidden";
-        }
-      } else {
-        // TTS 合成失败 → 回退为文本消息
-        log.warn("TTS synthesis failed, falling back to text", { chatId: rawChatId });
-        sentMsgId =
-          (await sendText(client, rawChatId, text, { replyToMsgId: replyTo })) ?? undefined;
-        deliveredAs = "text";
-        fallbackReason = "tts_synthesis_failed";
-      }
-      setTyping(client, rawChatId, true).catch(() => {});
-      if (sentMsgId != null && graphId) {
-        cacheOutgoingMsg(graphId, sentMsgId);
-        dispatcher.dispatch("SEND_MESSAGE", {
-          chatId: graphId,
-          text,
-          mediaType: deliveredAs === "voice" ? "voice" : undefined,
-        });
-        dispatcher.dispatch("DECLARE_ACTION", { target: graphId });
-      }
-      return { msgId: sentMsgId ?? null, deliveredAs, fallbackReason };
-    },
-    // ADR-206 W8: 跨聊天转发 + 可选附加评论
-    telegramForward: async ({ fromChatId, msgId, toChatId, comment }) => {
-      const fwdMsgId = await forwardMessage(client, fromChatId, msgId, toChatId);
-      const toGraphId = telegramChannelId(toChatId);
-      if (fwdMsgId != null && toGraphId) {
-        cacheOutgoingMsg(toGraphId, fwdMsgId);
-        dispatcher.dispatch("DECLARE_ACTION", { target: toGraphId });
-      }
-      // 附加评论：转发成功后，以 reply 形式发送评论
-      let commentMsgId: number | null = null;
-      if (comment?.trim() && fwdMsgId != null) {
-        commentMsgId =
-          (await sendText(client, toChatId, comment, { replyToMsgId: fwdMsgId })) ?? null;
-        if (commentMsgId != null && toGraphId) {
-          cacheOutgoingMsg(toGraphId, commentMsgId);
-        }
-      }
-      const fromGraphId = telegramChannelId(fromChatId);
-      if (fwdMsgId != null && fromGraphId && toGraphId) {
-        const targetName =
-          G.has(toGraphId) && G.getDynamic(toGraphId, "display_name")
-            ? String(G.getDynamic(toGraphId, "display_name"))
-            : String(toChatId);
-        recordForwardShare(G, {
-          fromGraphId,
-          msgId,
-          toGraphId,
-          targetName,
-        });
-      }
-      return { forwardedMsgId: fwdMsgId ?? null, commentMsgId };
-    },
-    telegramAlbumSend: async ({ assetId, targetChatId, caption, replyTo }) => {
-      return sendAlbumPhoto(client, {
-        assetId,
-        targetChatId,
-        caption,
-        replyTo,
-        onSent: (msgId) => {
-          const graphId = telegramChannelId(targetChatId);
-          if (graphId) {
-            cacheOutgoingMsg(graphId, msgId);
-            dispatcher.dispatch("DECLARE_ACTION", { target: graphId });
-          }
-        },
-      });
-    },
-    // ADR-204 W2: Telegram 文件下载回调
-    telegramDownload: async ({ chatId, msgId, output }) => {
-      // 安全约束：output 路径必须在 ALICE_HOME 下
-      const resolved = resolve(output);
-      if (!resolved.startsWith(ALICE_HOME)) {
-        throw new Error(`output path must be under ALICE_HOME (${ALICE_HOME})`);
-      }
-      const rawChatId = typeof chatId === "number" ? chatId : Number(chatId);
-      const msgs = await getMessages(client, rawChatId, [msgId]);
-      const msg = msgs[0];
-      if (!msg) throw new Error(`message ${msgId} not found in chat ${chatId}`);
-      const media = msg.media;
-      if (!media) throw new Error(`message ${msgId} has no media`);
-      // 排除不可下载的 media 类型（Dice, Contact, Location 等）
-      const downloadable =
-        "type" in media
-          ? [
-              "photo",
-              "audio",
-              "voice",
-              "sticker",
-              "document",
-              "video",
-              "videoNote",
-              "animation",
-            ].includes(media.type)
-          : false;
-      if (!downloadable) throw new Error(`message ${msgId} media type is not downloadable`);
-      const buffer = Buffer.from(
-        await client.downloadAsBuffer(media as Parameters<typeof client.downloadAsBuffer>[0]),
-      );
-      // 确保目标目录存在
-      const { mkdirSync } = await import("node:fs");
-      mkdirSync(dirname(resolved), { recursive: true });
-      writeFileSync(resolved, buffer);
-      // 推断 MIME type（从 mtcute media 类型或扩展名）
-      const mime =
-        "mimeType" in media
-          ? String(media.mimeType ?? "application/octet-stream")
-          : "application/octet-stream";
-      return { path: resolved, mime, size: buffer.length };
-    },
-    // ADR-204 W2: Telegram 文件上传回调
-    telegramUpload: async ({ chatId, path: filePath, caption, replyTo }) => {
-      // 安全约束：path 必须在 ALICE_HOME 下
-      const resolved = resolve(filePath);
-      if (!resolved.startsWith(ALICE_HOME)) {
-        throw new Error(`file path must be under ALICE_HOME (${ALICE_HOME})`);
-      }
-      const { readFileSync, existsSync } = await import("node:fs");
-      if (!existsSync(resolved)) throw new Error(`file not found: ${resolved}`);
-      const rawChatId = typeof chatId === "number" ? chatId : Number(chatId);
-      const fileBuffer = readFileSync(resolved);
-      const fileName = resolved.split("/").pop() ?? "file";
-      // 使用 InputMedia.auto 构建媒体
-      const { InputMedia } = await import("@mtcute/node");
-      const inputMedia = InputMedia.auto(fileBuffer, { fileName });
-      const sent = await client.sendMedia(rawChatId, inputMedia, {
-        caption,
-        replyTo,
-      });
-      const graphId = telegramChannelId(rawChatId);
-      if (sent?.id != null && graphId) {
-        cacheOutgoingMsg(graphId, sent.id);
-        dispatcher.dispatch("DECLARE_ACTION", { target: graphId });
-      }
-      return { msgId: sent?.id ?? null };
-    },
-    dispatchInstruction: (instruction, args) => dispatcher.dispatch(instruction, args),
-    query: (name, args) => dispatcher.query(name, args),
-    resolveCommandKind: (name) => {
-      if (dispatcher.getQueryDef(name)) return "query";
-      if (dispatcher.getInstructionDef(name)) return "instruction";
-      return undefined;
-    },
-    getMods: () => dispatcher.mods,
-    // S8 完成后收紧为 strict（注入 registry + 翻转开关）
-    strictCapabilities: false,
-  };
-  try {
-    const engineResult = await startEngineApi(engineApiDeps);
-    engineApiCleanup = engineResult.cleanup;
-    enginePort = engineResult.port;
-    // 注入端口到 shell-executor 模块变量
-    const { setEnginePort } = await import("./core/shell-executor.js");
-    setEnginePort(enginePort);
-    log.info("Engine API started", { port: enginePort });
-  } catch (e) {
-    log.warn("Engine API failed to start (non-fatal)", {
-      error: e instanceof Error ? e.message : String(e),
-    });
-  }
-
-  // ADR-129: 熔断器 → Admin 通知
-  initAdminNotify({ client });
-  onBreakerStateChange((providerName, event) => {
-    if (event === "open") {
-      notifyAdmin(
-        `breaker:${providerName}`,
-        `LLM provider "${providerName}" 熔断器 OPEN — Alice 暂时无法说话`,
-      );
-    } else if (event === "closed") {
-      notifyAdmin(`breaker-recovery:${providerName}`, `LLM provider "${providerName}" 已恢复`);
-    }
-  });
-
-  // S1: LLM 连通性预检 — 失败重试 3 次再 exit，网络瞬态超时不应杀进程
-  // @see docs/adr/54-pre-mortem-safety-net.md §S1
-  {
-    const S1_MAX_ATTEMPTS = 3;
-    const S1_TIMEOUT_MS = 15_000;
-    let s1Passed = false;
-    for (let attempt = 1; attempt <= S1_MAX_ATTEMPTS; attempt++) {
-      try {
-        const { provider, model } = selectProviderForFirstPass();
-        await generateText({
-          model: provider(model),
-          prompt: "ping",
-          maxOutputTokens: 1,
-          maxRetries: 0,
-          abortSignal: AbortSignal.timeout(S1_TIMEOUT_MS),
-        });
-        log.info("LLM connectivity check passed", { attempt });
-        s1Passed = true;
-        break;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (attempt < S1_MAX_ATTEMPTS) {
-          const delayMs = 2_000 * 2 ** (attempt - 1); // 2s, 4s
-          log.warn("LLM connectivity check failed, retrying", { attempt, delayMs, error: msg });
-          await new Promise((r) => setTimeout(r, delayMs));
-        } else {
-          log.fatal("LLM connectivity check failed after all attempts", {
-            attempts: S1_MAX_ATTEMPTS,
-            error: err,
-          });
-          writeAuditEvent(-1, "fatal", "startup", "LLM connectivity check failed", { error: msg });
-        }
-      }
-    }
-    if (!s1Passed) process.exit(1);
-  }
-
-  // S5: 启动自检消息 — 向 Telegram 收藏夹发送自检，验证 mtcute + Telegram API 可用
-  // @see docs/adr/54-pre-mortem-safety-net.md §S5
-  try {
-    const startupMsg = `[Alice] Runtime started — ${new Date().toISOString()} — tick #${clock.tick}`;
-    await client.sendText("me", startupMsg);
-    log.info("Startup self-check message sent to Saved Messages");
-  } catch (err) {
-    log.error("Failed to send startup self-check message", { error: err });
-    // 不 exit — Telegram 连接已通过 getMe() 验证，sendText 失败可能是临时问题
-  }
-
-  // S7: 贴纸调色板同步 — 增量同步已安装贴纸集到 palette
-  // 幂等：新贴纸入库 + 过期贴纸清理 + fileId 刷新。VLM 贴纸不受影响。
-  try {
-    const stats = await syncInstalledSets(client, getDb());
-    if (stats.added > 0 || stats.removed > 0) {
-      log.info("Sticker palette synced", stats);
-    }
-  } catch (e) {
-    log.warn("Sticker palette sync failed (non-fatal)", { error: e });
-  }
-
-  // S8: Skill 包同步 — 收敛到 alice-env.yaml 声明的期望状态
-  // @see docs/adr/201-os-for-llm.md
-  try {
-    const envPath = new URL("../skills/alice-env.yaml", import.meta.url).pathname;
-    const skillSync = await syncEnv(envPath, { enginePort });
-    if (skillSync.installed.length > 0 || skillSync.upgraded.length > 0) {
-      log.info("Skills synced", skillSync);
-    }
-    // Skill 同步完成后注入 registry + 收紧 strict 模式
-    // deps 是引用类型——修改后 route() 的每次请求都会读到最新值
-    engineApiDeps.registry = loadRegistry();
-    const artifactsResult = ensureAllArtifacts();
-    if (artifactsResult.synced > 0 || artifactsResult.fixed > 0) {
-      log.info("Skill artifacts verified", {
-        synced: artifactsResult.synced,
-        fixed: artifactsResult.fixed,
-        broken: artifactsResult.broken.length > 0 ? artifactsResult.broken : undefined,
-      });
-    }
-    if (artifactsResult.broken.length > 0) {
-      log.warn("Some skills have broken artifacts and could not be fixed", {
-        broken: artifactsResult.broken,
-      });
-    }
-    engineApiDeps.strictCapabilities = true;
-    log.info("Engine API capability check: strict mode enabled");
-  } catch (e) {
-    log.warn("Skill sync failed (non-fatal, capability check stays lenient)", {
-      error: e instanceof Error ? e.message : String(e),
-    });
-  }
-
-  // S6: 压力管线 dry-run — 跑一遍 pressures → tensionMap → loudness → selectAction
-  // 不推进 tick、不写 DB、不入队，只验证计算管线无异常 / 无 NaN
-  // @see docs/adr/54-pre-mortem-safety-net.md §S6
-  try {
-    const dryPressures = computeAllPressures(G, clock.tick, {
-      kappa: config.kappa,
-      threadAgeScale: config.threadAgeScale,
-      mu: config.mu,
-      d: config.d,
-      deltaDeadline: config.delta,
-    });
-    const dryTensionMap = buildTensionMap(
-      dryPressures.contributions,
-      dryPressures.prospectContributions,
-    );
-    const { loudness: dryLoudness } = computeLoudness(
-      dryTensionMap,
-      personalityRef.current,
-      G,
-      clock.tick,
-      {
-        recentEventCounts,
-        targetWhitelist: config.focusWhitelist,
-      },
-    );
-    const [, dryAction] = selectAction(dryLoudness);
-
-    // 验证无 NaN
-    const pValues = [
-      dryPressures.P1,
-      dryPressures.P2,
-      dryPressures.P3,
-      dryPressures.P4,
-      dryPressures.P5,
-      dryPressures.P6,
-      dryPressures.API,
-      dryPressures.API_peak,
-    ];
-    const hasNaN = pValues.some((v) => Number.isNaN(v)) || dryLoudness.some((v) => Number.isNaN(v));
-    if (hasNaN) {
-      log.fatal("Pressure pipeline dry-run produced NaN", {
-        pressures: pValues.map((v) => v.toFixed(4)),
-        loudness: dryLoudness.map((v) => v.toFixed(4)),
-      });
-      writeAuditEvent(-1, "fatal", "startup", "Pressure pipeline NaN", {
-        pressures: pValues,
-        loudness: Array.from(dryLoudness),
-      });
-      process.exit(1);
-    }
-
-    log.info("Pressure pipeline dry-run passed", {
-      API: dryPressures.API.toFixed(3),
-      P1: dryPressures.P1.toFixed(3),
-      P6: dryPressures.P6.toFixed(3),
-      entities: dryTensionMap.size,
-      selectedVoice: dryAction,
-    });
-  } catch (err) {
-    log.fatal("Pressure pipeline dry-run failed", { error: err });
-    writeAuditEvent(-1, "fatal", "startup", "Pressure pipeline exception", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    process.exit(1);
-  }
-
-  // S7: Docker sandbox session 预热 — 在第一个 tick 前创建容器，消除冷启动延迟
-  // 致命：sandbox 起不来 = 所有 shell 命令都无法执行，runtime 无意义
-  try {
-    const { warmupSandboxSession } = await import("./skills/container-runner.js");
-    await warmupSandboxSession(enginePort);
-    log.info("Docker sandbox session pre-warmed");
-  } catch (err) {
-    log.fatal("Docker sandbox session warmup failed — cannot execute shell commands", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    writeAuditEvent(clock.tick, "error", "safety-net", "S7: Docker sandbox warmup failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    process.exit(1);
-  }
-
-  // ── 安全网预检完成 ─────────────────────────────────────────────────────────
-
-  // 6. 启动三线程
-  const evolveController = startEvolveLoop(evolveState);
-  const actPromise = startActLoop(actCtx);
-  log.info("EVOLVE + ACT loops started", {
-    dtMin: config.dtMin,
-    dtMax: config.dtMax,
-    kappaT: config.kappaT,
-    startTick: clock.tick,
-  });
-
-  const runtimeHeartbeat = setInterval(() => {
-    try {
-      recordRuntimeHeartbeat(G);
-    } catch (e) {
-      log.warn("Runtime heartbeat failed", { error: e });
-    }
-  }, RUNTIME_HEARTBEAT_INTERVAL_MS);
-
-  // ADR-33: 定期保存 Mod 状态 + 维护（与图快照对齐）
-  // 使用 snapshotIntervalS 的墙钟秒数作为 setInterval 间隔
-  let stickerSyncCounter = 0;
-  const snapshotAndMaintain = setInterval(() => {
-    try {
-      const tick = clock.tick;
-      dispatcher.saveModStatesToDb(tick);
-      // F8 fix: 人格快照随墙钟定时器保存，不依赖 tick 计数
-      savePersonalitySnapshot(tick, personalityRef.current);
-      // 每次快照间隔执行日志清理
-      if (tick > 0) {
-        const alerts = runMaintenance(tick, G, {
-          rhythmProfileRebuild: {
-            intervalMs: config.rhythmProfileRebuildIntervalS * 1000,
-            timezoneOffset: config.timezoneOffset,
-          },
-        });
-        if (alerts.length > 0) {
-          dispatcher.dispatch("UPDATE_ANOMALIES", { anomalies: alerts });
-        }
-      }
-      // ADR-168 Wave 2: 贴纸同步（每 5 次快照间隔 = snapshotIntervalS × 5 秒）
-      stickerSyncCounter++;
-      if (stickerSyncCounter >= 5) {
-        stickerSyncCounter = 0;
-        syncInstalledSets(client, getDb()).catch((e) => {
-          log.warn("Periodic sticker sync failed (non-fatal)", { error: e });
-        });
-      }
-    } catch (e) {
-      log.error("snapshotAndMaintain failed", e);
-    }
-  }, config.snapshotIntervalS * 1000);
-
-  // 7. 优雅退出
-  let shutdownInProgress = false;
-  const shutdown = async () => {
-    if (shutdownInProgress) return;
-    shutdownInProgress = true;
-    log.info("Shutting down...");
-
-    // 停定期任务
-    clearInterval(runtimeHeartbeat);
-    clearInterval(snapshotAndMaintain);
-    oneBotReceiver?.close();
-
-    // 关闭 Engine API
-    if (engineApiCleanup) {
-      try {
-        await engineApiCleanup();
-      } catch (e) {
-        log.warn("Engine API cleanup error (ignored)", { error: e });
-      }
-    }
-
-    // 停 EVOLVE
-    evolveController.abort();
-
-    // 停 ACT
-    queue.close();
-    await actPromise;
-
-    // 保存最终状态
-    if (G.has(ALICE_SELF)) {
-      const shutdownMs = Date.now();
-      G.updateAgent(ALICE_SELF, {
-        runtime_last_seen_ms: shutdownMs,
-        runtime_shutdown_ms: shutdownMs,
-      });
-    }
-    flushGraph(G);
-    savePersonalitySnapshot(clock.tick, personalityRef.current);
-    dispatcher.saveModStatesToDb(clock.tick);
-    log.info("Final snapshot saved", { tick: clock.tick });
-
-    // 清理
-    await destroyClient();
-    closeGroupCache();
-    closeMediaCache();
-    closeDb();
-    log.info("Shutdown complete");
-    // P1-3: 给予 I/O 回调缓冲时间（TCP FIN、MTProto session 保存等），
-    // 避免 process.exit(0) 截断异步清理。
-    const SHUTDOWN_IO_BUFFER_MS = 2000;
-    setTimeout(() => process.exit(0), SHUTDOWN_IO_BUFFER_MS);
-  };
-
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
-  process.on("unhandledRejection", (reason) => {
-    log.error("Unhandled rejection", {
-      error: reason instanceof Error ? reason.message : String(reason),
-    });
-  });
+  log.info("Logged in; session saved", { selfId: String(self.id), name: self.displayName });
+  await destroyClient();
 }
 
-main().catch((err) => {
-  log.fatal("Fatal error", err);
-  process.exit(1);
+async function main(): Promise<void> {
+  if (process.argv.includes("--login")) return login();
+  const check = process.argv.includes("--check");
+  // 单实例锁在任何连接之前获取；检查模式不连 Telegram，不占锁。
+  if (!check) acquireSingleInstanceLock(join(ALICE_STATE_DIR, "alice.lock"));
+
+  // 全部配置一次读完、校验完（--check 也在这里拦下写错的声音名、开关）。
+  const config = loadRuntimeConfig();
+  const opsConfig = config.ops;
+  const persona = readFileSync(new URL("../SOUL.md", import.meta.url), "utf8");
+  if (!persona.trim()) throw new Error("SOUL.md is empty");
+
+  ensureParentDir(ALICE_DB_PATH);
+  initDb(ALICE_DB_PATH);
+  const spend = new SpendMeter(join(ALICE_STATE_DIR, "spend"), Date.now, (error) =>
+    log.warn("Spend ledger write failed", error),
+  );
+  // 操作员控制面要在任何模型调用之前就位：花费从第一次调用起记，暂停状态从上次运行接着来。
+  let sendToOperator: (text: string) => Promise<void> = async () => {};
+  let selftest: () => Promise<string> = async () => "还没连上 Telegram。";
+  let shell: Shell | null = null;
+  let shutdown: (exitCode: number) => Promise<void> = async () => {};
+  const operator = new Operator(
+    {
+      now: Date.now,
+      send: (text) => sendToOperator(text),
+      stop: () => {
+        // 在 pm2 下：请 pm2 自己停（列表里显示 stopped，它发 SIGINT 过来走同一条关停路）。
+        // 不在 pm2 下或 pm2 叫不动：自己以 0 退出（ecosystem 的 stop_exit_codes 让 pm2 不再拉起）。
+        const pmId = process.env.pm_id;
+        if (pmId === undefined) void shutdown(0);
+        else execFile("pm2", ["stop", pmId], (error) => error && void shutdown(0));
+      },
+      state: () => shell?.current ?? folded.state,
+      log: (message, fields) => log.info(message, fields),
+      selftest: () => selftest(),
+    },
+    {
+      operatorId: opsConfig.operatorId,
+      controlPath: join(ALICE_STATE_DIR, "ops-control.json"),
+      spend,
+      capUsd: opsConfig.capUsd,
+    },
+  );
+  // 所有模型调用经这一个网关，每次调用当场记账（到了日上限就暂停）。
+  const gateway = createGateway({
+    apiKey: config.speech.apiKey,
+    charge: (spent) => operator.charge(spent),
+  });
+  // 看图时和看图模型一起问本机标注器（角色、标签、尺度）；没配就只有描述。
+  const tagger = config.taggerUrl ? localTagger(config.taggerUrl) : null;
+
+  // 查一下的开关只在这里判一次：关着时她看不到这个动作，后台端口也没有执行者。
+  const mechanisms = productionMechanisms(config.errands !== null);
+  // 线上轮换（PLAN 第 25 件）：配了候选就挂两套，分组按种子算、换组记进 Journal；没配就只有生产。
+  const mind: Mind = config.rotation
+    ? rotationOf(config.rotation, config.errands !== null ? ["errand"] : [])
+    : mechanisms;
+  const rotation = isRotating(mind) ? mind.rotation : null;
+  const errands = config.errands ? new Errands({ gateway, exaKey: config.errands.exaKey }) : null;
+  const background: ShellPorts["background"] = errands
+    ? async (_scope, act, context, signal) => {
+        if (act.kind !== "delegate") throw new Failed({ reason: "unavailable" });
+        // 每次模型调用和搜索由网关当场记账；合计另随结果写进 act.done / act.failed 的 usage（研究用）。
+        return errands.run(act.task, context, Date.now(), signal);
+      }
+    : async () => {
+        throw new Failed({ reason: "unavailable" });
+      };
+  const album = new Album((query, documents, top) => rerank(gateway, query, documents, top));
+  const stickerCache = new StickerCache(join(ALICE_STATE_DIR, "sticker-cache.db"));
+  const shelf = new Shelf();
+  // 她在群里见过谁、和谁有过私聊来往：第一次私聊前经共同的群拿到对方（telegram/first-dm.ts）。
+  const acquaintances = new Acquaintances();
+  // 执行器的限额（加群、找群、连发）：从 Journal 恢复计数，重启不清零。
+  const gates = new Gates();
+  // Journal 的投影：启动折叠和运行时都只从写进了日志的事件更新（同一个函数）。
+  // 她见过的消息（推送和对话轮询补拉的去重、找缺口，telegram/catch-up.ts）。
+  const inbox = new Inbox();
+  // 她在哪些群里：启动后才出现的群按刚被拉进来算。
+  const groups = new Groups();
+  // 现场事实（telegram/scene.ts）：每条消息、每个群最后写进 Journal 的样子，只写变了的。
+  const scene = new Scene();
+  const seenHn = new Set<string>();
+  const project = (event: AliceEvent, state: AliceState) => {
+    scene.observe(event);
+    album.observe(event);
+    shelf.observe(event, state);
+    acquaintances.observe(event);
+    gates.observe(event);
+    inbox.observe(event);
+    groups.observe(event);
+    if (event.type === "post.received" && event.scope === "hn:top") seenHn.add(event.messageId);
+  };
+  const fold = createFold(mind, project);
+  const counts = forEachEvent((event) => fold.feed(event));
+  const folded = fold.result();
+  const refinedStickers = syncStickerCache(stickerCache.entries());
+  if (refinedStickers > 0) log.info("Refined sticker palette from VLM cache", { refinedStickers });
+  const stickers = paletteSize();
+  const promptLogDir = config.promptLogDir;
+  const version = codeVersion();
+  log.info("Journal folded", {
+    ...version,
+    db: ALICE_DB_PATH,
+    stateDir: ALICE_STATE_DIR,
+    promptLogs: promptLogDir,
+    events: counts.read,
+    skippedLegacyRows: counts.skipped,
+    chats: Object.keys(folded.state.chats).length,
+    pendingTimers: folded.timers.length,
+    interruptedCalls: folded.interrupted.length,
+    mechanisms: mechanisms.map((m) => m.name),
+    rotation,
+    speechModel: config.speechModel,
+    tts: config.tts ? `${config.tts.provider}/${config.tts.model}` : null,
+    voiceCalls: config.voiceCalls,
+    stickers,
+    albumPhotos: album.size,
+    paused: operator.paused,
+    spentTodayUsd: Number(spend.today().total.toFixed(4)),
+    dailyCapUsd: operator.cap(),
+  });
+  if (stickers === 0)
+    log.warn("Sticker palette is empty: sticker sends will be recorded as failed");
+  const unresolved = unresolvedStickerWords(STICKER_WORDS);
+  if (unresolved.length > 0)
+    log.warn("Sticker words with no sticker in the palette", { words: unresolved });
+
+  if (check) {
+    log.info("Startup check passed");
+    closeDb();
+    return;
+  }
+
+  const client = createClient(config);
+  const dispatcher = createDispatcher(client);
+  client.onConnectionState.add((state) => operator.watch.connection(state));
+  await startClient(client, config.telegramPhone);
+  const self = await client.getMe();
+  const telegram = new Telegram(client, gates, undefined, acquaintances);
+  sendToOperator = async (text) => {
+    await client.sendText(Number(opsConfig.operatorId), text);
+  };
+  onProblemLogged(() => operator.watch.errorLogged());
+
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+  let catchUpTimer: ReturnType<typeof setInterval> | null = null;
+  let traceTimer: ReturnType<typeof setInterval> | null = null;
+  let calls: TelegramPhoneCalls | null = null;
+  let shuttingDown = false;
+  // 后台的事（对话轮询、查群的样子、启动时的群列表）：停机时先中止，再等它们收尾，最后才关连接、关库。
+  const bgAbort = new AbortController();
+  const bgTasks = new Set<Promise<void>>();
+  const track = <T>(task: Promise<T>): Promise<T> => {
+    const tracked = task.then(
+      () => {},
+      () => {},
+    );
+    bgTasks.add(tracked);
+    void tracked.finally(() => bgTasks.delete(tracked));
+    return task;
+  };
+  shutdown = async (exitCode: number) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log.info("Shutting down", { exitCode });
+    if (heartbeat) clearInterval(heartbeat);
+    if (catchUpTimer) clearInterval(catchUpTimer);
+    if (traceTimer) clearInterval(traceTimer);
+    // 还没发出去的后台请求不再发（reason 是 Failed interrupted，和外壳停机的说法一致），在途的尽快结束。
+    bgAbort.abort(new Failed({ reason: "interrupted" }));
+    await calls?.dispose();
+    await shell?.stop();
+    // 等它们把正在写的日志、投影写完再关库；超过上限就不等了（请求已经中止，剩下的是收尾）。
+    await Promise.race([
+      Promise.all([...bgTasks]),
+      sleep(BACKGROUND_GRACE_MS, undefined, { ref: false }),
+    ]);
+    await destroyClient();
+    stickerCache.close();
+    closeDb();
+    await closeLogger();
+    process.exitCode = exitCode;
+    setTimeout(() => process.exit(exitCode), EXIT_GRACE_MS).unref();
+  };
+
+  /** 她做对外动作用的上下文（外壳的 act 端口和操作员自检共用一条执行路径）。 */
+  const actContext = (scope: string, signal: AbortSignal) => ({
+    telegram: telegram.with(signal),
+    target: targetOf(scope),
+    stickerFileId: resolveStickerFileId,
+    album,
+    shelf,
+    scope,
+    now: () => Date.now(),
+    speak: (text: string) => {
+      if (!config.tts) throw new Failed({ reason: "unavailable" });
+      return synthesizeSpeech(config.tts, text, { signal, charge: gateway.charge });
+    },
+    // 发文字前"正在输入"的那几秒（telegram/typing.ts）；停机时不再等。
+    pause: (ms: number) => sleep(ms, undefined, { signal }),
+  });
+  // 操作员自检：往操作员私聊发一张贴纸、一条语音，走和她一样的执行路径，不进 Journal。
+  selftest = async () => {
+    const scope = `telegram:${opsConfig.operatorId}`;
+    const tries: Array<[string, Parameters<typeof executeAct>[1]]> = [
+      ["贴纸", { kind: "sticker", word: "happy" }],
+      ["语音", { kind: "voice", text: "喂，听得到吗？是我呀。" }],
+    ];
+    const lines: string[] = [];
+    for (const [name, act] of tries) {
+      try {
+        await executeAct(actContext(scope, new AbortController().signal), act);
+        lines.push(`${name}：发出去了`);
+      } catch (error) {
+        const why = isTelegramActionError(error) ? error.code : String(error).slice(0, 120);
+        lines.push(`${name}：没发出去（${why}）`);
+        log.warn("Selftest failed", { act: act.kind, error });
+      }
+    }
+    return lines.join("\n");
+  };
+
+  // 暂停落在端口边界（ops/gate.ts）：暂停时每个端口当即拒绝，在办的后台的事被中止。
+  const ports: ShellPorts = gated(
+    {
+      now: () => Date.now(),
+      append: (event) => void appendEvent(event),
+      journaled: (event, state) => {
+        project(event, state);
+        // 自检只看运行时的事件（不看折叠的历史）；出错不能冒充 Journal 写入失败（那会让外壳停下）。
+        try {
+          operator.observe(event);
+        } catch (error) {
+          log.warn("Ops observe failed", error);
+        }
+      },
+      callModel: withPromptLog(
+        (prompt, call, signal) =>
+          callSpeechModel(gateway, prompt, { kind: call.kind, model: config.speechModel, signal }),
+        promptLogDir,
+        { sha: version.sha, model: SPEECH_MODELS[config.speechModel].id },
+        (error) => log.warn("Prompt log write failed", error),
+      ),
+      act: (scope, act, signal) => executeAct(actContext(scope, signal), act),
+      // 叫醒她时判冲着她的话的口气（Jev），和发言调用并发；结果写进 Journal，敌意的那条不算一次往来。
+      perceiveTone: (chatType, lines, ids, signal) =>
+        perceiveTone(gateway, chatType, lines, ids, signal),
+      // 她写下的心情（她自己的词）是好是坏：同一个判口气的模型，写进那条心情的事件里。
+      perceiveMood: (mood, signal) => perceiveMood(gateway, mood, signal),
+      background,
+      query: async (_scope, kind, act, context, signal) => {
+        const at = Date.now();
+        switch (kind) {
+          case "album-search": {
+            const q = act.kind === "album-search" ? act.query : "";
+            const hits = await album.searchItems(q, at);
+            const result =
+              hits.length === 0
+                ? `想找的“${q}”，相册里没有匹配的图。`
+                : hits
+                    .map(
+                      (h) =>
+                        `[${h.asset}] ${[h.description, h.caption && `配文“${h.caption}”`].filter(Boolean).join("，")}（${h.sender} ${h.ago}在群里发的）`,
+                    )
+                    .join("\n");
+            return { value: hits, result };
+          }
+          case "chat-search": {
+            const q = act.kind === "chat-search" ? act.query : "";
+            const found = await discover(telegram.with(signal), q);
+            return { value: found.found, result: found.text, found: found.found };
+          }
+          case "delegate": {
+            if (!errands) throw new Failed({ reason: "unavailable" });
+            const task = act.kind === "delegate" ? act.task : "";
+            const done = await errands.run(task, context, at, signal);
+            return {
+              value: done.result,
+              result: done.result,
+              ...(done.usage ? { usage: done.usage } : {}),
+            };
+          }
+          default:
+            throw new Failed({ reason: "unavailable" }, `unsupported query: ${kind}`);
+        }
+      },
+      schedule: (delayMs, fire) => {
+        const timer = setTimeout(fire, delayMs);
+        return () => clearTimeout(timer);
+      },
+      fatal: (error) => {
+        log.fatal("Journal write failed; stopping", error);
+        void shutdown(1);
+      },
+      log: (message, fields) => log.info(message, fields),
+      stickers: () => listStickerHints(14),
+      paused: () => operator.paused,
+    },
+    operator,
+  );
+  // 她自己的随机性（mind/noise.ts）：种子每次启动取一次，抽出的数写进 Journal，折叠与回放只读日志。
+  const running = new Shell(
+    ports,
+    mind,
+    persona,
+    folded,
+    undefined,
+    noiseSource(randomInt(2 ** 31)),
+  );
+  shell = running;
+
+  const adapter = bindTelegramWorldAdapter(dispatcher, {
+    selfId: String(self.id),
+    selfUsername: self.username ?? undefined,
+    ignoredSenders: config.ignoredSenders,
+    now: ports.now,
+    onEvent: (event) => {
+      // 操作员私聊里的 /ops 命令：在这里处理，不进 Journal，不进她的时间线。
+      if (operator.intercept(event)) return;
+      running.dispatch(event);
+      // 群里有人说话、上次查群的样子超过 6 小时：再查一次，变了才写。
+      if (
+        event.type === "message.received" &&
+        event.chatType === "group" &&
+        scene.roomDue(event.scope, ports.now())
+      ) {
+        const described = describeRoom(telegram.with(bgAbort.signal), event.scope, ports.now)
+          .then((room) => {
+            if (room && scene.roomChanged(room)) running.dispatch(room);
+          })
+          .catch((error: unknown) => {
+            // 停机中止不算没查成（限流、没权限这些别的错照记）。
+            if (!bgAbort.signal.aborted) log.warn("Room description failed", error);
+          });
+        track(described);
+      }
+    },
+    perceive: {
+      image: whenRunning(operator, (jpeg) => seeFrame(gateway, tagger, jpeg, "photo")),
+      gif: whenRunning(operator, (jpeg) => seeFrame(gateway, tagger, jpeg, "gif")),
+      video: whenRunning(operator, (jpeg) => seeFrame(gateway, tagger, jpeg, "video")),
+      voice: whenRunning(operator, (ogg) => transcribeVoice(gateway, ogg)),
+      sticker: whenRunning(
+        operator,
+        async (
+          meta: { fileId?: string; fileUniqueId?: string; emoji?: string; setTitle?: string },
+          load: () => Promise<Uint8Array>,
+        ) => {
+          const id = meta.fileUniqueId;
+          const cached = id ? stickerCache.get(id) : null;
+          const perceived = cached ?? (await describeSticker(gateway, await load(), meta));
+          if (id && !cached) stickerCache.set(id, perceived);
+          if (id && meta.fileId) {
+            upsertStickerPerception({
+              fileId: meta.fileId,
+              fileUniqueId: id,
+              emoji: meta.emoji,
+              setName: meta.setTitle,
+              ...perceived,
+            });
+          }
+          return formatStickerMedia(perceived, meta);
+        },
+      ),
+    },
+    warn: (message, error) => log.warn(message, error),
+    admit: (scope, messageId) => inbox.admit(scope, messageId),
+    newGroup: (scope) => groups.isNew(scope),
+    scene: {
+      stickerSet: (set, found) => scene.stickerSet(telegram.with(bgAbort.signal), set, found),
+      changes: (scope, messageId, seen, at) => scene.changes(scope, messageId, seen, at),
+    },
+  });
+  if (config.voiceCalls && config.tts) {
+    const tts = config.tts;
+    const callModel = SPEECH_MODELS[config.speechModel];
+    const sessions = new Map<number, VoiceCallSession>();
+    const voiceCalls = new TelegramPhoneCalls({
+      client: createMtcuteCallClient(client),
+      allowUser: (uid) =>
+        !operator.paused &&
+        !config.ignoredSenders.has(String(uid)) &&
+        (String(uid) === opsConfig.operatorId || Boolean(running.current.chats[`telegram:${uid}`])),
+      onConnected: (uid) => {
+        const chat = running.current.chats[`telegram:${uid}`];
+        const recent = (chat?.timeline ?? [])
+          .slice(-8)
+          .map((e) => `${e.sender ? e.sender.name : "Alice"}: ${e.text ?? `[${e.contentType}]`}`)
+          .join("\n");
+        const session = new VoiceCallSession({
+          asr: (ogg) => transcribeVoice(gateway, ogg),
+          reply: async (history, callerText) => {
+            const { body } = await gateway.post<{
+              choices?: Array<{ message?: { content?: string | null } }>;
+              usage?: {
+                prompt_tokens?: number;
+                completion_tokens?: number;
+                completion_tokens_details?: { reasoning_tokens?: number };
+              };
+            }>({
+              kind: "speech",
+              model: callModel.id,
+              path: "/chat/completions",
+              timeoutMs: 30_000,
+              attempts: 2,
+              tokens: chatTokens,
+              body: {
+                model: callModel.id,
+                ...callModel.extra,
+                max_tokens: 200 + callModel.thinking,
+                messages: [
+                  {
+                    role: "system",
+                    content: `${persona.trim()}\n\n${CALL_TONE}${recent ? `\n\n最近聊天：\n${recent}` : ""}`,
+                  },
+                  ...history.slice(-12).map((t) => ({
+                    role: (t.role === "caller" ? "user" : "assistant") as "user" | "assistant",
+                    content: t.text,
+                  })),
+                  ...(history.at(-1)?.role === "caller"
+                    ? []
+                    : [{ role: "user" as const, content: callerText }]),
+                ],
+              },
+            });
+            return body.choices?.[0]?.message?.content?.trim() ?? "";
+          },
+          speak: (text, signal) => synthesizeSpeech(tts, text, { signal, charge: gateway.charge }),
+          sendFrame: (pcm, signal) => voiceCalls.sendAudioFrames(uid, pcm, { signal }),
+          onEnd: (reason) => {
+            sessions.delete(uid);
+            if (reason === "hangup") void voiceCalls.hangup(uid).catch(() => {});
+          },
+          onError: (error) => log.warn("Voice call turn failed", { userId: uid, error }),
+        });
+        sessions.set(uid, session);
+        void session.start();
+      },
+      onAudio: (uid, pcm) => sessions.get(uid)?.handleAudio(pcm),
+      onClosed: (uid, reason) => {
+        const s = sessions.get(uid);
+        sessions.delete(uid);
+        s?.dispose(reason);
+      },
+      onError: (error) => log.warn("Phone call transport failed", { error }),
+      log: (line) => log.info(line),
+    });
+    calls = voiceCalls;
+    dispatcher.onRawUpdate(async (_client, update) => {
+      if (update._ === "updatePhoneCall") {
+        await voiceCalls.handleUpdate(update.phoneCall as unknown as PhoneCallUpdate);
+      } else if (update._ === "updatePhoneCallSignalingData") {
+        await voiceCalls.handleSignalingData(update as unknown as PhoneCallSignalingUpdate);
+      }
+    });
+  }
+  running.start();
+  track(
+    dialogScopes(telegram.with(bgAbort.signal))
+      .then((scopes) => groups.started(scopes))
+      .catch((error: unknown) => {
+        if (!bgAbort.signal.aborted)
+          log.warn("Dialog list failed; new groups are not recognised", error);
+      }),
+  );
+  heartbeat = setInterval(() => log.info("heartbeat", operator.heartbeat()), HEARTBEAT_MS);
+  heartbeat.unref();
+  // 意愿层快照（trace-log.ts）：只读她此刻的状态，写进 live/traces/，不进 Journal、不改她做什么。
+  const writeTrace = traceWriter(join(ALICE_STATE_DIR, "traces"), version.sha, (error) =>
+    log.warn("Trace snapshot write failed", error),
+  );
+  traceTimer = setInterval(() => writeTrace(running.current, Date.now()), TRACE_EVERY_MS);
+  traceTimer.unref();
+  // 对话轮询：补回 Telegram 没推送的消息（大超级群、频道），只补这次启动之后的。
+  const startedAt = Date.now();
+  let lastHnAt = 0;
+  const HN_EVERY_MS = 30 * 60_000;
+  let catchUpRun: Promise<void> | null = null;
+  catchUpTimer = setInterval(() => {
+    if (catchUpRun) return;
+    const run = catchUp(telegram.with(bgAbort.signal), inbox, adapter.receive, startedAt)
+      .then((round) => log.info("catch-up", { ...round }))
+      // 别人消息上的表情合计 Telegram 不推送：对刚有人说话的群拉一次（telegram/scene.ts）。
+      .then(async () => {
+        for (const { scope, ids } of scene.activeRooms(Date.now())) {
+          const pulled = await pullReactions(telegram.with(bgAbort.signal), scope, ids).catch(
+            (error: unknown) => {
+              if (!bgAbort.signal.aborted) log.warn("Reaction pull failed", error);
+              return [];
+            },
+          );
+          for (const p of pulled) {
+            const update = scene.changes(
+              scope,
+              p.messageId,
+              { reactions: p.reactions },
+              ports.now(),
+            );
+            if (update) running.dispatch(update);
+          }
+        }
+      })
+      .then(async () => {
+        // 刷手机看公开榜单（ADR-276 环节一：睡着或暂停时不拉 HN 热门）。
+        const now = ports.now();
+        if (
+          operator.paused ||
+          isAsleepIn(mind, running.current, now) ||
+          now - lastHnAt < HN_EVERY_MS
+        )
+          return;
+        lastHnAt = now;
+        const stories = await fetchHnTop(5);
+        for (const s of stories) {
+          if (seenHn.has(s.id)) continue;
+          seenHn.add(s.id);
+          running.dispatch({
+            type: "post.received",
+            at: ports.now(),
+            scope: "hn:top",
+            messageId: s.id,
+            title: "Hacker News",
+            text: s.url ? `${s.title}\n${s.url}` : s.title,
+          });
+        }
+      })
+      .catch((error: unknown) => {
+        // 停机中止不算没补成；限流、网络这些别的错照记。
+        if (!bgAbort.signal.aborted) log.warn("Catch-up failed", error);
+      })
+      .finally(() => {
+        if (catchUpRun === run) catchUpRun = null;
+      });
+    catchUpRun = run;
+    track(run);
+  }, CATCH_UP_MS);
+  catchUpTimer.unref();
+  log.info("Alice runtime started", {
+    selfId: String(self.id),
+    journal: ALICE_DB_PATH,
+    paused: operator.paused,
+    ...version,
+  });
+  // 每次启动一行：哪一版代码、哪些机制（以后用同一版代码重放 Journal）。
+  recordRun(
+    join(ALICE_STATE_DIR, "runs.jsonl"),
+    {
+      at: Date.now(),
+      ...version,
+      mechanisms: mechanisms.map((m) => m.name),
+      ...(rotation ? { rotation } : {}),
+      speechModel: config.speechModel,
+    },
+    (error) => log.warn("Run record write failed", error),
+  );
+  void sendToOperator(
+    `上线了${operator.paused ? "（仍在暂停，/ops resume 继续）" : ""}。/ops help 看命令。`,
+  ).catch((error) => log.warn("Operator message failed", error));
+
+  process.once("SIGINT", () => void shutdown(0));
+  process.once("SIGTERM", () => void shutdown(0));
+}
+
+main().catch(async (error) => {
+  if (error instanceof SingleInstanceLockError) log.fatal(error.message);
+  else log.fatal("Runtime failed", error);
+  await destroyClient();
+  closeDb();
+  await closeLogger();
+  process.exitCode = 1;
 });

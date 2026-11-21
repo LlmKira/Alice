@@ -1,1 +1,0 @@
-ALTER TABLE `tick_log` ADD `api_peak` real;

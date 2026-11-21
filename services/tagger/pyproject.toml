@@ -1,0 +1,10 @@
+[project]
+name = "alice-tagger"
+version = "0.1.0"
+description = "Alice 的本机看图标注服务（WD v3，CPU ONNX）"
+requires-python = ">=3.12"
+dependencies = [
+  "numpy==2.4.6",
+  "onnxruntime==1.32.0",
+  "pillow==13.0.0",
+]

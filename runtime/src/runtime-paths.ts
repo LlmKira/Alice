@@ -1,42 +1,20 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-function resolveFromStateDir(envKey: string, fallbackName: string): string {
-  const explicit = process.env[envKey];
-  if (explicit) return resolve(explicit);
-  return resolve(ALICE_STATE_DIR, fallbackName);
-}
-
 /**
- * Mutable runtime state root.
- *
- * Defaults to the current working directory so local development keeps the
- * existing behavior, while deployments can relocate state with ALICE_STATE_DIR.
+ * 运行时状态目录：Journal、锁、错误日志、提示日志、花费账、暂停状态（gitignore 的 runtime/live/）。
+ * 默认是当前目录下的 live/，这样 pnpm start、start:check 和 pm2（ecosystem.config.cjs）用的是同一个库、同一把锁；
+ * 上线用的是干净的新库，旧的 runtime/alice.db 不再是默认。
  */
-export const ALICE_STATE_DIR = process.env.ALICE_STATE_DIR
-  ? resolve(process.env.ALICE_STATE_DIR)
-  : process.cwd();
+export const ALICE_STATE_DIR = resolve(process.env.ALICE_STATE_DIR ?? "live");
 
 export const ALICE_DB_PATH = resolve(
-  process.env.ALICE_DB_PATH ?? process.env.DB_PATH ?? "alice.db",
+  process.env.ALICE_DB_PATH ?? resolve(ALICE_STATE_DIR, "alice.db"),
 );
-export const ALICE_MEDIA_CACHE_DB_PATH = resolveFromStateDir(
-  "ALICE_MEDIA_CACHE_DB_PATH",
-  "media-cache.db",
+
+export const ALICE_ERROR_LOG_PATH = resolve(
+  process.env.ALICE_ERROR_LOG_PATH ?? resolve(ALICE_STATE_DIR, "alice-errors.log"),
 );
-export const ALICE_GROUP_CACHE_DB_PATH = resolveFromStateDir(
-  "ALICE_GROUP_CACHE_DB_PATH",
-  "group-cache.db",
-);
-export const ALICE_ERROR_LOG_PATH = resolveFromStateDir("ALICE_ERROR_LOG_PATH", "alice-errors.log");
-export const ALICE_GROUP_RECEPTION_SHADOW_LOG_PATH = resolveFromStateDir(
-  "ALICE_GROUP_RECEPTION_SHADOW_LOG_PATH",
-  "eval-artifacts/ax-group-reception-shadow.jsonl",
-);
-// Engine API TCP 端口。0 = OS 分配随机端口。
-export const ALICE_ENGINE_PORT = process.env.ALICE_ENGINE_PORT
-  ? Number(process.env.ALICE_ENGINE_PORT)
-  : 0;
 
 export function ensureParentDir(path: string): void {
   mkdirSync(dirname(path), { recursive: true });

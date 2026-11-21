@@ -1,441 +1,246 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { loadConfig, loadRuntimeConfig } from "../src/config.js";
 
-const SECRET_ENV_KEYS = [
+const ENV_KEYS = [
   "ALICE_CONFIG_PATH",
   "TEST_TELEGRAM_API_ID",
-  "TEST_LLM_API_KEY",
   "TEST_TELEGRAM_HASH",
   "TEST_TELEGRAM_PHONE",
-  "TEST_TELEGRAM_ADMIN",
-  "TEST_EXA_KEY",
-  "TEST_YOUTUBE_KEY",
-  "TEST_ONEBOT_TOKEN",
-  "TEST_TTS_GROUP_ID",
+  "TEST_LLM_API_KEY",
 ] as const;
 
-const previousEnv = new Map<string, string | undefined>();
-
-function writeConfig(path: string, extra = ""): void {
-  writeFileSync(
-    path,
-    `
+const CONFIG = `
 [telegram]
 api_id_env = "TEST_TELEGRAM_API_ID"
 api_hash_env = "TEST_TELEGRAM_HASH"
 phone_env = "TEST_TELEGRAM_PHONE"
-admin_env = "TEST_TELEGRAM_ADMIN"
 
-[[llm.endpoints]]
-name = "steady"
-base_url = "https://llm.example/v1"
+[speech]
 api_key_env = "TEST_LLM_API_KEY"
-model = "steady-model"
+`;
 
-[[llm.endpoints]]
-name = "fresh"
-base_url = "https://llm.example/v1"
-api_key_env = "TEST_LLM_API_KEY"
-model = "fresh-model"
-
-[[llm.endpoints]]
-name = "auxiliary"
-base_url = "https://auxiliary.example/v1"
-api_key_env = "TEST_LLM_API_KEY"
-model = "auxiliary-model"
-
-[llm.routing]
-first_pass = ["fresh", "steady"]
-tool_tick = ["steady"]
-eval = ["steady"]
-auxiliary = ["auxiliary", "steady"]
-reflect = ["steady"]
-
-[services]
-exa_api_key_env = "TEST_EXA_KEY"
-youtube_api_key_env = "TEST_YOUTUBE_KEY"
-
-${extra}
-`.trimStart(),
-    "utf-8",
-  );
-}
+const previous = new Map<string, string | undefined>();
+let tempDir = "";
 
 beforeEach(() => {
-  for (const key of SECRET_ENV_KEYS) previousEnv.set(key, process.env[key]);
+  for (const key of ENV_KEYS) previous.set(key, process.env[key]);
   process.env.TEST_TELEGRAM_API_ID = "123";
-  process.env.TEST_LLM_API_KEY = "llm-secret";
-  process.env.TEST_TELEGRAM_HASH = "tg-hash";
+  process.env.TEST_TELEGRAM_HASH = "hash";
   process.env.TEST_TELEGRAM_PHONE = "+10000000000";
-  process.env.TEST_TELEGRAM_ADMIN = "42";
-  process.env.TEST_EXA_KEY = "exa-secret";
-  process.env.TEST_YOUTUBE_KEY = "youtube-secret";
-  process.env.TEST_ONEBOT_TOKEN = "onebot-secret";
-  process.env.TEST_TTS_GROUP_ID = "tts-group-secret";
+  process.env.TEST_LLM_API_KEY = "secret";
+  tempDir = mkdtempSync(join(tmpdir(), "alice-config-"));
+  process.env.ALICE_CONFIG_PATH = join(tempDir, "config.toml");
+  writeFileSync(process.env.ALICE_CONFIG_PATH, CONFIG);
 });
 
 afterEach(() => {
-  for (const key of SECRET_ENV_KEYS) {
-    const previous = previousEnv.get(key);
-    if (previous === undefined) delete process.env[key];
-    else process.env[key] = previous;
+  rmSync(tempDir, { recursive: true, force: true });
+  for (const key of ENV_KEYS) {
+    const value = previous.get(key);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
   }
-  previousEnv.clear();
-  vi.resetModules();
+  previous.clear();
 });
 
-describe("loadConfig TOML", () => {
-  it("从 TOML 读取非敏感配置，并通过 env 名称注入 secret", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "alice-config-"));
-    const configPath = join(tempDir, "config.toml");
-    writeConfig(
-      configPath,
-      `
-[time]
-timezone_offset = 9
+describe("loadConfig", () => {
+  it("loads Telegram and speech settings from the named environment variables", () => {
+    expect(loadConfig()).toEqual({
+      telegramApiId: 123,
+      telegramApiHash: "hash",
+      telegramPhone: "+10000000000",
+      speech: { apiKey: "secret" },
+      ignoredSenders: new Set(),
+    });
+  });
 
-[action_rate]
-cap_group = 6
-`,
-    );
-    process.env.ALICE_CONFIG_PATH = configPath;
-
+  it("reads the ignored senders from the environment, not from the repository", () => {
+    process.env.ALICE_IGNORED_SENDERS = " 1000000002 ,1000000003,";
     try {
-      vi.resetModules();
-      const { loadConfig } = await import("../src/config.js");
-      const config = loadConfig();
-
-      expect(config.telegramApiId).toBe(123);
-      expect(config.telegramApiHash).toBe("tg-hash");
-      expect(config.telegramPhone).toBe("+10000000000");
-      expect(config.telegramAdmin).toBe("42");
-      expect(config.operatorChannelId).toBe("channel:telegram:42");
-      expect(config.providers).toEqual([
-        expect.objectContaining({
-          name: "steady",
-          baseUrl: "https://llm.example/v1",
-          apiKey: "llm-secret",
-          model: "steady-model",
-        }),
-        expect.objectContaining({ name: "fresh", model: "fresh-model" }),
-        expect.objectContaining({ name: "auxiliary", model: "auxiliary-model" }),
-      ]);
-      expect(config.llmRouting).toEqual({
-        firstPass: ["fresh", "steady"],
-        toolTick: ["steady"],
-        eval: ["steady"],
-        auxiliary: ["auxiliary", "steady"],
-        reflect: ["steady"],
-      });
-      expect(config.llmBaseUrl).toBe("https://llm.example/v1");
-      expect(config.llmApiKey).toBe("llm-secret");
-      expect(config.exaApiKey).toBe("exa-secret");
-      expect(config.youtubeApiKey).toBe("youtube-secret");
-      expect(config.soulProfile).toBe("default");
-      expect(config.qqOneBotApiBaseUrl).toBe("");
-      expect(config.qqOneBotEventWsUrl).toBe("");
-      expect(config.qqOneBotAccessToken).toBe("");
-      expect(config.qqOneBotTimeoutMs).toBe(10_000);
-      expect(config.qqOneBotReconnectMinMs).toBe(1_000);
-      expect(config.qqOneBotReconnectMaxMs).toBe(60_000);
-      expect(config.timezoneOffset).toBe(9);
-      expect(config.rateCap.group).toBe(6);
+      expect([...loadConfig().ignoredSenders]).toEqual(["1000000002", "1000000003"]);
     } finally {
-      rmSync(tempDir, { recursive: true, force: true });
+      delete process.env.ALICE_IGNORED_SENDERS;
     }
   });
 
-  it("读取 soul profile 配置", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "alice-config-soul-"));
-    const configPath = join(tempDir, "config.toml");
-    writeConfig(
-      configPath,
-      `
-[soul]
-profile = "ojou"
-`,
-    );
-    process.env.ALICE_CONFIG_PATH = configPath;
-
-    try {
-      vi.resetModules();
-      const { loadConfig } = await import("../src/config.js");
-      const config = loadConfig();
-
-      expect(config.soulProfile).toBe("ojou");
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  it("缺少 provider secret 时不回退旧 LLM_* env", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "alice-config-missing-secret-"));
-    const configPath = join(tempDir, "config.toml");
-    writeConfig(configPath);
-    process.env.ALICE_CONFIG_PATH = configPath;
+  it("rejects a missing secret", () => {
     delete process.env.TEST_LLM_API_KEY;
-    process.env.LLM_API_KEY = "legacy-secret";
-
-    try {
-      vi.resetModules();
-      const { loadConfig } = await import("../src/config.js");
-      const config = loadConfig();
-
-      expect(config.llmApiKey).toBe("");
-      expect(config.providers[0]?.apiKey).toBe("");
-    } finally {
-      delete process.env.LLM_API_KEY;
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+    expect(() => loadConfig()).toThrow("TEST_LLM_API_KEY");
   });
 
-  it("读取 QQ OneBot bridge 配置", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "alice-config-qq-onebot-"));
-    const configPath = join(tempDir, "config.toml");
-    writeConfig(
-      configPath,
-      `
-[qq]
-onebot_api_base_url = "http://127.0.0.1:3000"
-onebot_event_ws_url = "ws://127.0.0.1:3001"
-onebot_access_token_env = "TEST_ONEBOT_TOKEN"
-onebot_timeout_ms = 3000
-onebot_reconnect_min_ms = 2000
-onebot_reconnect_max_ms = 30000
-`,
-    );
-    process.env.ALICE_CONFIG_PATH = configPath;
+  it("rejects a non-integer Telegram API id", () => {
+    process.env.TEST_TELEGRAM_API_ID = "abc";
+    expect(() => loadConfig()).toThrow("Telegram API ID must be an integer");
+  });
+});
 
-    try {
-      vi.resetModules();
-      const { loadConfig } = await import("../src/config.js");
-      const config = loadConfig();
-
-      expect(config.qqOneBotApiBaseUrl).toBe("http://127.0.0.1:3000");
-      expect(config.qqOneBotEventWsUrl).toBe("ws://127.0.0.1:3001");
-      expect(config.qqOneBotAccessToken).toBe("onebot-secret");
-      expect(config.qqOneBotTimeoutMs).toBe(3000);
-      expect(config.qqOneBotReconnectMinMs).toBe(2000);
-      expect(config.qqOneBotReconnectMaxMs).toBe(30000);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+describe("loadRuntimeConfig (what --check validates before she goes live)", () => {
+  const env = (extra: Record<string, string>) => ({
+    ...process.env,
+    ALICE_OPERATOR_ID: "42",
+    ...extra,
   });
 
-  it("可选 secret env 名允许用空字符串显式禁用", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "alice-config-empty-optional-env-"));
-    const configPath = join(tempDir, "config.toml");
-    writeFileSync(
-      configPath,
-      `
-[telegram]
-api_id_env = "TEST_TELEGRAM_API_ID"
-api_hash_env = "TEST_TELEGRAM_HASH"
-phone_env = "TEST_TELEGRAM_PHONE"
-admin_env = "TEST_TELEGRAM_ADMIN"
-
-[[llm.endpoints]]
-name = "steady"
-base_url = "https://llm.example/v1"
-api_key_env = "TEST_LLM_API_KEY"
-model = "steady-model"
-
-[llm.routing]
-first_pass = ["steady"]
-tool_tick = ["steady"]
-eval = ["steady"]
-
-[vision]
-api_key_env = ""
-
-[tts]
-api_key_env = ""
-group_id_env = ""
-
-[asr]
-api_key_env = ""
-
-[services]
-exa_api_key_env = ""
-youtube_api_key_env = ""
-`.trimStart(),
-      "utf-8",
-    );
-    process.env.ALICE_CONFIG_PATH = configPath;
-
-    try {
-      vi.resetModules();
-      const { loadConfig } = await import("../src/config.js");
-      const config = loadConfig();
-
-      expect(config.exaApiKey).toBe("");
-      expect(config.youtubeApiKey).toBe("");
-      expect(config.ttsApiKey).toBe("");
-      expect(config.ttsGroupId).toBe("");
-      expect(config.asrApiKey).toBe("");
-      expect(config.visionApiKey).toBe("llm-secret");
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+  it("requires ALICE_TTS to be on or off when specified", () => {
+    expect(() => loadRuntimeConfig(env({ ALICE_TTS: "bad" }))).toThrow("ALICE_TTS");
   });
 
-  it("MiniMax group_id 通过 env 注入，避免 TOML 暴露实例账号标识", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "alice-config-tts-group-"));
-    const configPath = join(tempDir, "config.toml");
-    writeConfig(
-      configPath,
-      `
-[tts]
-group_id_env = "TEST_TTS_GROUP_ID"
-`,
-    );
-    process.env.ALICE_CONFIG_PATH = configPath;
-
-    try {
-      vi.resetModules();
-      const { loadConfig } = await import("../src/config.js");
-      const config = loadConfig();
-
-      expect(config.ttsGroupId).toBe("tts-group-secret");
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+  it("decides the lookup switch once: on with an exa key, off without one or when switched off", () => {
+    expect(loadRuntimeConfig(env({ EXA_API_KEY: "k" })).errands).toEqual({ exaKey: "k" });
+    expect(loadRuntimeConfig(env({ EXA_API_KEY: "" })).errands).toBeNull();
+    expect(loadRuntimeConfig(env({ EXA_API_KEY: "k", ALICE_ERRANDS: "off" })).errands).toBeNull();
+    expect(() => loadRuntimeConfig(env({ ALICE_ERRANDS: "no" }))).toThrow("ALICE_ERRANDS");
   });
 
-  it("自动发现 ALICE_STATE_DIR 下的焦点白名单文件", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "alice-focus-whitelist-"));
-    const whitelistPath = join(tempDir, "focus-whitelist.txt");
-    const configPath = join(tempDir, "config.toml");
-    writeFileSync(
-      whitelistPath,
-      [
-        "# 只允许这些目标",
-        "channel:telegram:-1001234567890 # 主群",
-        "",
-        "channel:telegram:7785440246",
-      ].join("\n"),
-      "utf-8",
+  it("needs the operator", () => {
+    expect(() => loadRuntimeConfig({ ...process.env, ALICE_OPERATOR_ID: "" })).toThrow(
+      "ALICE_OPERATOR_ID",
     );
-    writeConfig(configPath);
-
-    const previousStateDir = process.env.ALICE_STATE_DIR;
-    process.env.ALICE_CONFIG_PATH = configPath;
-    process.env.ALICE_STATE_DIR = tempDir;
-
-    try {
-      vi.resetModules();
-      const { loadConfig } = await import("../src/config.js");
-      const config = loadConfig();
-
-      expect(config.focusWhitelistPath).toBe(whitelistPath);
-      expect(Array.from(config.focusWhitelist ?? [])).toEqual([
-        "channel:telegram:-1001234567890",
-        "channel:telegram:7785440246",
-      ]);
-    } finally {
-      if (previousStateDir === undefined) delete process.env.ALICE_STATE_DIR;
-      else process.env.ALICE_STATE_DIR = previousStateDir;
-      rmSync(tempDir, { recursive: true, force: true });
-    }
   });
 
-  it("优先使用 TOML 内联焦点白名单", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "alice-focus-whitelist-inline-"));
-    const configPath = join(tempDir, "config.toml");
-    writeConfig(
-      configPath,
-      `
-[focus]
-whitelist = ["channel:telegram:-1001234567890", "channel:telegram:7785440246"]
-`,
-    );
-    process.env.ALICE_CONFIG_PATH = configPath;
-
-    try {
-      vi.resetModules();
-      const { loadConfig } = await import("../src/config.js");
-      const config = loadConfig();
-
-      expect(config.focusWhitelistPath).toBe("config.toml:focus.whitelist");
-      expect(Array.from(config.focusWhitelist ?? [])).toEqual([
-        "channel:telegram:-1001234567890",
-        "channel:telegram:7785440246",
-      ]);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+  it("sends pictures for tagging only to this machine; without the URL there is no tagger", () => {
+    const url = (u: string) => loadRuntimeConfig(env({ ALICE_TAGGER_URL: u })).taggerUrl;
+    expect(url("http://127.0.0.1:39100")).toBe("http://127.0.0.1:39100");
+    expect(url("http://localhost:39100")).toBe("http://localhost:39100");
+    expect(url("")).toBeNull();
+    expect(() => url("https://tagger.example.com")).toThrow("ALICE_TAGGER_URL");
+    expect(() => url("127.0.0.1:39100")).toThrow("ALICE_TAGGER_URL");
   });
 
-  it("拒绝 TOML 内联裸 Telegram 数字白名单", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "alice-focus-whitelist-telegram-"));
-    const configPath = join(tempDir, "config.toml");
-    writeConfig(
-      configPath,
-      `
-[focus]
-whitelist = ["-1001234567890", "7785440246"]
-`,
-    );
-    process.env.ALICE_CONFIG_PATH = configPath;
-
-    try {
-      vi.resetModules();
-      const { loadConfig } = await import("../src/config.js");
-      expect(() => loadConfig()).toThrow(/invalid focus whitelist target "-1001234567890"/u);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+  it("rotates only when a candidate is named, and then only with a seed", () => {
+    expect(loadRuntimeConfig(env({ ALICE_ROTATE: "" })).rotation).toBeNull();
+    expect(
+      loadRuntimeConfig(env({ ALICE_ROTATE: "phone", ALICE_ROTATE_SEED: "s1" })).rotation,
+    ).toEqual({ candidate: "phone", seed: "s1", unit: null });
+    expect(() => loadRuntimeConfig(env({ ALICE_ROTATE: "phone" }))).toThrow("ALICE_ROTATE_SEED");
+    expect(() =>
+      loadRuntimeConfig(
+        env({ ALICE_ROTATE: "phone", ALICE_ROTATE_SEED: "s1", ALICE_ROTATE_UNIT: "group" }),
+      ),
+    ).toThrow("ALICE_ROTATE_UNIT");
   });
 
-  it("拒绝无法归一化的焦点白名单项", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "alice-focus-whitelist-invalid-"));
-    const configPath = join(tempDir, "config.toml");
-    writeConfig(
-      configPath,
-      `
-[focus]
-whitelist = ["channel:-1001234567890", "https://t.me/example"]
-`,
-    );
-    process.env.ALICE_CONFIG_PATH = configPath;
+  /** 把语音合成的环境变量清空：本机的 .env/.env.local 里有密钥，不清空就测不到"没有密钥"的分支。 */
+  const noTts = {
+    ELEVENLABS_API_KEY: "",
+    ELEVENLABS_VOICE_ID: "",
+    TTS_PROVIDER: "",
+    TTS_API_KEY: "",
+    MINIMAX_API_KEY: "",
+    TTS_BASE_URL: "",
+    TTS_MODEL: "",
+    TTS_VOICE: "",
+    TTS_GROUP_ID: "",
+    ALICE_TTS: "",
+  };
 
-    try {
-      vi.resetModules();
-      const { loadConfig } = await import("../src/config.js");
-
-      expect(() => loadConfig()).toThrow(
-        /invalid focus whitelist target "channel:-1001234567890"/u,
-      );
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+  it("disables TTS when no key is present or ALICE_TTS=off", () => {
+    expect(loadRuntimeConfig(env(noTts)).tts).toBeNull();
+    expect(
+      loadRuntimeConfig(env({ ...noTts, TTS_BASE_URL: "https://api.minimax.io" })).tts,
+    ).toBeNull();
+    expect(loadRuntimeConfig(env({ ...noTts, TTS_API_KEY: "k", ALICE_TTS: "off" })).tts).toBeNull();
+    expect(
+      loadRuntimeConfig(env({ ...noTts, ELEVENLABS_API_KEY: "el", ALICE_TTS: "off" })).tts,
+    ).toBeNull();
   });
 
-  it("支持 TOML 显式覆盖焦点白名单路径", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "alice-focus-whitelist-explicit-"));
-    const whitelistPath = join(tempDir, "custom-focus.txt");
-    const configPath = join(tempDir, "config.toml");
-    writeFileSync(whitelistPath, "channel:telegram:123456789\n", "utf-8");
-    writeConfig(
-      configPath,
-      `
-[focus]
-whitelist_path = "${whitelistPath}"
-`,
+  it("prefers ElevenLabs (eleven_v4_turbo) when ELEVENLABS_API_KEY is present, and allows switching to MiniMax", () => {
+    expect(
+      loadRuntimeConfig(env({ ...noTts, ELEVENLABS_API_KEY: "el", TTS_API_KEY: "k" })).tts,
+    ).toEqual({
+      provider: "elevenlabs",
+      apiKey: "el",
+      model: "eleven_v4_turbo",
+      voice: "cgSgspJ2msm6clMCkdW9",
+      stability: 0.4,
+      similarityBoost: 0.75,
+    });
+    expect(
+      loadRuntimeConfig(
+        env({
+          ...noTts,
+          ELEVENLABS_API_KEY: "el",
+          TTS_MODEL: "eleven_v4",
+          ELEVENLABS_VOICE_ID: "JBFqnCBsd6RMkjVDRZzb",
+        }),
+      ).tts,
+    ).toMatchObject({
+      provider: "elevenlabs",
+      model: "eleven_v4",
+      voice: "JBFqnCBsd6RMkjVDRZzb",
+    });
+    expect(
+      loadRuntimeConfig(
+        env({ ...noTts, ELEVENLABS_API_KEY: "el", TTS_API_KEY: "k", TTS_PROVIDER: "minimax" }),
+      ).tts,
+    ).toMatchObject({
+      provider: "minimax",
+      apiKey: "k",
+      model: "speech-2.8-hd",
+    });
+    expect(() => loadRuntimeConfig(env({ ...noTts, TTS_PROVIDER: "elevenlabs" }))).toThrow(
+      "ELEVENLABS_API_KEY",
     );
-    process.env.ALICE_CONFIG_PATH = configPath;
+    expect(() => loadRuntimeConfig(env({ ...noTts, TTS_PROVIDER: "other" }))).toThrow(
+      "TTS_PROVIDER",
+    );
+  });
 
-    try {
-      vi.resetModules();
-      const { loadConfig } = await import("../src/config.js");
-      const config = loadConfig();
+  it("enables MiniMax (speech-2.8-hd) when only a MiniMax key is there", () => {
+    expect(loadRuntimeConfig(env({ ...noTts, TTS_API_KEY: "k" })).tts).toEqual({
+      provider: "minimax",
+      baseUrl: "https://api.minimaxi.com",
+      apiKey: "k",
+      model: "speech-2.8-hd",
+      voice: "qiaopi_mengmei",
+      groupId: null,
+    });
+    expect(loadRuntimeConfig(env({ ...noTts, MINIMAX_API_KEY: "m" })).tts).toMatchObject({
+      provider: "minimax",
+      apiKey: "m",
+      model: "speech-2.8-hd",
+      voice: "qiaopi_mengmei",
+    });
+    expect(
+      loadRuntimeConfig(
+        env({
+          ...noTts,
+          TTS_API_KEY: "k",
+          TTS_BASE_URL: "https://api.minimax.io",
+          TTS_MODEL: "speech-2.8-turbo",
+          TTS_VOICE: "Wise_Woman",
+          TTS_GROUP_ID: "g1",
+        }),
+      ).tts,
+    ).toEqual({
+      provider: "minimax",
+      baseUrl: "https://api.minimax.io",
+      apiKey: "k",
+      model: "speech-2.8-turbo",
+      voice: "Wise_Woman",
+      groupId: "g1",
+    });
+  });
 
-      expect(config.focusWhitelistPath).toBe(whitelistPath);
-      expect(Array.from(config.focusWhitelist ?? [])).toEqual(["channel:telegram:123456789"]);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+  it("enables ALICE_VOICE_CALLS by default when TTS is present, and allows explicit off", () => {
+    expect(loadRuntimeConfig(env({ ...noTts, ALICE_VOICE_CALLS: "" })).voiceCalls).toBe(false);
+    expect(loadRuntimeConfig(env({ ...noTts, ELEVENLABS_API_KEY: "el" })).voiceCalls).toBe(true);
+    expect(loadRuntimeConfig(env({ ...noTts, TTS_API_KEY: "k" })).voiceCalls).toBe(true);
+    expect(
+      loadRuntimeConfig(env({ ...noTts, TTS_API_KEY: "k", ALICE_VOICE_CALLS: "off" })).voiceCalls,
+    ).toBe(false);
+    expect(
+      loadRuntimeConfig(env({ ...noTts, TTS_API_KEY: "k", ALICE_VOICE_CALLS: "on" })).voiceCalls,
+    ).toBe(true);
+    expect(() => loadRuntimeConfig(env({ ...noTts, ALICE_VOICE_CALLS: "on" }))).toThrow(
+      "ALICE_VOICE_CALLS=on",
+    );
+    expect(() => loadRuntimeConfig(env({ ...noTts, ALICE_VOICE_CALLS: "maybe" }))).toThrow(
+      "ALICE_VOICE_CALLS",
+    );
   });
 });

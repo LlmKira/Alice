@@ -1,432 +1,371 @@
 /**
- * ADR-82 → ADR-225: Diary Mod 单元测试 — Working Memory 模型。
- *
- * 验证：
- * - diary 写入：合并-或-分配（consolidate-on-write）
- * - per-turn cap + 字符限制
- * - 显著性衰减 + 槽位替换
- * - contribute() 注入 + 目标感知排序
- * - onTickEnd 淡出清理
- * - Jaccard 相似度函数
- *
- * @see docs/adr/82-diary-inner-world.md
- * @see docs/adr/225-diary-working-memory.md
+ * 2 月日记原样（diary: "feb"，eval-artifacts/emotion/feb-diary.md）的性质：日记有界、会过期、不针对谁的跨会话
+ * 可见、关于某人的只在和他的私聊里出现且只出最新一条；行动回声只放这个会话一小时内的话；日记块在系统提示里
+ * 人格之后；生产提示词里什么都没有。写入前的去重只属于 reflect（见 reflect.test.ts）。
  */
 import { describe, expect, it } from "vitest";
+import { type DiaryEntry, febShown, writeDiary } from "../src/mechanisms/pressure/diary.js";
 import {
-  charBigrams,
-  type DiaryState,
-  diaryMod,
-  effectiveSalience,
-  jaccardSimilarity,
-  type Thought,
-} from "../src/mods/diary.mod.js";
+  createPressure,
+  echo,
+  emptyWorld,
+  febDiary,
+  PRODUCTION,
+  pressureProduction,
+  thought,
+  type World,
+} from "../src/mechanisms/pressure/index.js";
+import { DIARY } from "../src/mechanisms/pressure/params.js";
+import { type Act, affordances } from "../src/mind/affordances.js";
+import type { SpeechRequest } from "../src/mind/effects.js";
+import type { AliceEvent, MessageReceived } from "../src/mind/events.js";
+import { type ChatState, emptyState } from "../src/mind/state.js";
+import { speechRequest, step } from "../src/mind/step.js";
+import { codeMode } from "../src/speech/decision.js";
+import { renderSpeechPrompt } from "../src/speech/prompt.js";
+import { modelReply, program } from "./model-reply.js";
 
-// -- 安全提取 ------------------------------------------------------------------
+const MIN = 60_000;
+const H = 60 * MIN;
+const T = Date.UTC(2026, 10, 10, 7, 0);
+const DM = "telegram:1";
+const DM2 = "telegram:2";
+const GROUP = "telegram:-5";
 
-const writeDiary = diaryMod.instructions?.diary.impl;
-const contribute = diaryMod.contribute;
-const onTickStart = diaryMod.onTickStart;
-const onTickEnd = diaryMod.onTickEnd;
+const feb = {
+  diary: febDiary({ thinking: false }),
+  thought: thought({ examples: false, conversation: true }),
+};
+const diaryArm = createPressure(affordances, { ...PRODUCTION, ...feb });
+const echoArm = createPressure(affordances, { ...PRODUCTION, ...feb, echo });
 
-if (!writeDiary || !contribute || !onTickStart || !onTickEnd) {
-  throw new Error("diaryMod missing required methods");
-}
-
-// -- 测试 helper ---------------------------------------------------------------
-
-const NOW = Date.now();
-
-function makeMockCtx(
-  tick: number,
-  state: DiaryState,
-  targetNodeId: string | null = null,
-  nowMs: number = NOW,
-) {
+let n = 0;
+function msg(at: number, o: Partial<MessageReceived> = {}): MessageReceived {
+  n++;
+  const scope = o.scope ?? DM;
   return {
-    graph: {
-      has: () => false,
-      getContact: () => ({}),
-      nodeAttrs: () => ({}),
-      getDynamic: () => undefined,
-    } as never,
-    state,
-    tick,
-    nowMs,
-    getModState: (modName: string) => {
-      if (modName === "relationships") return { targetNodeId };
-      return undefined;
-    },
-    dispatch: () => undefined,
+    type: "message.received",
+    at,
+    scope,
+    chatType: scope.startsWith("telegram:-") ? "group" : "private",
+    messageId: `m${n}`,
+    senderId: scope === DM2 ? "u2" : "u1",
+    senderName: scope === DM2 ? "小鹿" : "莉莉丝",
+    text: "hi",
+    contentType: "text",
+    replyToMessageId: null,
+    directed: !scope.startsWith("telegram:-"),
+    ...o,
   };
 }
+const decided = (at: number, scope: string): AliceEvent => ({
+  type: "speech.decided",
+  at,
+  scope,
+  callId: `c${++n}`,
+  decision: { acts: [] },
+});
+const note = (at: number, entry: string, scope = DM, about: string | null = null): AliceEvent => ({
+  type: "act.done",
+  at,
+  scope,
+  act: { kind: "diary", about, entry },
+});
+const said = (at: number, scope: string, text: string): AliceEvent => ({
+  type: "message.sent",
+  at,
+  scope,
+  messageId: `s${++n}`,
+  text,
+  kind: "text",
+});
+/** 按 2 月日记这一组折叠（[日记] 由它折进世界）。 */
+const fold = (events: AliceEvent[], from: World = emptyWorld) =>
+  events.reduce((w, e) => diaryArm.reduce?.(w, e) as World, from);
+/** 一条私聊里写下的、不针对谁的条目。 */
+const entry = (text: string, at: number): DiaryEntry => ({
+  text,
+  about: null,
+  scope: DM,
+  group: false,
+  at,
+  importance: null,
+  present: [],
+});
 
-function freshState(): DiaryState {
-  return { turnWriteCount: 0, thoughts: [] };
+/** 用候选机制走一遍事件，取某个会话此刻的发言请求和提示词。 */
+function promptAt(events: AliceEvent[], scope: string, at: number, mechanism = diaryArm) {
+  const state = events.reduce((s, e) => step(s, e, [mechanism]).state, emptyState);
+  const request = speechRequest(state, state.chats[scope] as ChatState, at, null, [mechanism]);
+  return { request, prompt: renderSpeechPrompt("PERSONA", request) };
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 相似度函数
-// ═══════════════════════════════════════════════════════════════════════════
+describe("the format reads her diary", () => {
+  const request: SpeechRequest = {
+    scope: GROUP,
+    chatType: "group",
+    triggerMessageId: "2",
+    at: T,
+    affordances: ["send", "diary"],
+    contributions: [],
+    timeline: [
+      {
+        at: T - MIN,
+        messageId: "2",
+        sender: { id: "u1", name: "莉莉丝" },
+        text: "我把你的日志发群里了",
+        contentType: "text",
+        replyToMessageId: null,
+      },
+    ],
+  };
+  const acts: Act[] = [
+    { kind: "send", text: "你！！", replyTo: null },
+    { kind: "diary", about: "2", entry: "莉莉丝把我的日志发出去了，好丢人" },
+    { kind: "diary", about: null, entry: "今天好累" },
+  ];
 
-describe("Jaccard similarity", () => {
-  it("相同文本 → 1.0", () => {
-    expect(jaccardSimilarity("今天好累", "今天好累")).toBe(1.0);
+  it("reads back what it writes", () => {
+    expect(codeMode.parse(modelReply(acts), request)).toEqual({ decision: { acts }, defects: [] });
   });
 
-  it("完全不同 → ~0.0", () => {
-    expect(jaccardSimilarity("今天好累", "ABCDEFGH")).toBeLessThan(0.1);
+  it("reads tools.diary with and without a person", () => {
+    expect(
+      codeMode.parse(program('await tools.diary({ entry: "今天好累" });'), request).decision.acts,
+    ).toEqual([{ kind: "diary", about: null, entry: "今天好累" }]);
+    const both =
+      'await tools.say({ text: "哼" });\nawait tools.diary({ about: "2", entry: "她又偷看" });';
+    expect(codeMode.parse(program(both), request).decision.acts).toEqual([
+      { kind: "send", text: "哼", replyTo: null },
+      { kind: "diary", about: "2", entry: "她又偷看" },
+    ]);
   });
 
-  it("改写变体 → 超过阈值 0.35", () => {
-    const a = "今天一直在想爱丽丝泉那张卫星图，然后频道里又出现伊蕾娜";
-    const b = "又看到一张伊蕾娜，一直在想爱丽丝泉那张卫星图的感觉";
-    expect(jaccardSimilarity(a, b)).toBeGreaterThan(0.35);
-  });
-
-  it("不同话题 → 低于阈值", () => {
-    const a = "池泽从昨天下午到今天早上一直没有回复";
-    const b = "爱丽丝泉那张图让我想到了远方和存在感";
-    expect(jaccardSimilarity(a, b)).toBeLessThan(0.3);
-  });
-
-  it("charBigrams 正确生成 CJK 双字母组", () => {
-    const bg = charBigrams("你好世界");
-    expect(bg.has("你好")).toBe(true);
-    expect(bg.has("好世")).toBe(true);
-    expect(bg.has("世界")).toBe(true);
-    expect(bg.size).toBe(3);
-  });
-
-  it("空字符串 → 0", () => {
-    expect(jaccardSimilarity("", "")).toBe(0);
-    expect(jaccardSimilarity("hello", "")).toBe(0);
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 显著性衰减
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("effectiveSalience", () => {
-  it("刚写入 → 等于 base salience", () => {
-    const t: Thought = {
-      content: "test",
-      about: null,
-      salience: 1.0,
-      createdAt: NOW,
-      updatedAt: NOW,
-    };
-    expect(effectiveSalience(t, NOW)).toBe(1.0);
-  });
-
-  it("6 小时后 → 减半", () => {
-    const sixHoursAgo = NOW - 6 * 3600 * 1000;
-    const t: Thought = {
-      content: "test",
-      about: null,
-      salience: 1.0,
-      createdAt: sixHoursAgo,
-      updatedAt: sixHoursAgo,
-    };
-    expect(effectiveSalience(t, NOW)).toBeCloseTo(0.5, 2);
-  });
-
-  it("12 小时后 → 约 25%", () => {
-    const twelveHoursAgo = NOW - 12 * 3600 * 1000;
-    const t: Thought = {
-      content: "test",
-      about: null,
-      salience: 1.0,
-      createdAt: twelveHoursAgo,
-      updatedAt: twelveHoursAgo,
-    };
-    expect(effectiveSalience(t, NOW)).toBeCloseTo(0.25, 2);
+  it("a call to an act not offered here (no inner) is a defect, never said aloud", () => {
+    const off = codeMode.parse(
+      program(
+        'await tools.inner({ thought: "她到底懂不懂" });\nawait tools.say({ text: "才不要" });',
+      ),
+      request,
+    );
+    expect(off.decision.acts).toEqual([{ kind: "send", text: "才不要", replyTo: null }]);
+    expect(off.defects.map((d) => d.kind)).toEqual(["unknown"]);
   });
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-// diary 写入
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("ADR-225: Diary Mod — Working Memory", () => {
-  describe("diary instruction", () => {
-    it("基本写入成功 — 无当前 target 时分配全局槽位", () => {
-      const state = freshState();
-      const ctx = makeMockCtx(100, state);
-
-      const result = writeDiary(ctx as never, { content: "今天好累" });
-      expect(result).toMatchObject({ success: true, evolved: false });
-      expect(state.turnWriteCount).toBe(1);
-      expect(state.thoughts).toHaveLength(1);
-      expect(state.thoughts[0].content).toBe("今天好累");
-      expect(state.thoughts[0].about).toBeNull();
-    });
-
-    it("省略 about 时绑定当前 target，避免泛化残留进入全局池", () => {
-      const state = freshState();
-      const ctx = makeMockCtx(100, state, "contact:42");
-
-      const result = writeDiary(ctx as never, { content: "那句话还在心里刺刺的" });
-
-      expect(result).toMatchObject({ success: true, evolved: false });
-      expect(state.thoughts).toHaveLength(1);
-      expect(state.thoughts[0].about).toBe("contact:42");
-    });
-
-    it("带 about 参数写入", () => {
-      const state = freshState();
-      const ctx = makeMockCtx(100, state);
-
-      writeDiary(ctx as never, { content: "他最近在躲我", about: "contact:42" });
-      expect(state.thoughts[0].about).toBe("contact:42");
-    });
-
-    it("per-turn cap 限制（最多 2 条）", () => {
-      const state = freshState();
-      const ctx = makeMockCtx(100, state);
-
-      writeDiary(ctx as never, { content: "第一条" });
-      writeDiary(ctx as never, { content: "完全不同的话题" });
-      const result = writeDiary(ctx as never, { content: "第三条" }) as {
-        success: boolean;
-        error?: string;
-      };
-
-      expect(result.success).toBe(false);
-      expect(result.error).toContain("max 2");
-      expect(state.turnWriteCount).toBe(2);
-    });
-
-    it("超长内容自动截断", () => {
-      const state = freshState();
-      const ctx = makeMockCtx(100, state);
-
-      const longContent = "这是一段很长的日记".repeat(50);
-      writeDiary(ctx as never, { content: longContent });
-      expect(state.thoughts[0].content.length).toBeLessThanOrEqual(200);
-    });
-
-    it("合并写入 — 同主题改写合并为同一槽位", () => {
-      const state = freshState();
-      const ctx = makeMockCtx(100, state);
-
-      writeDiary(ctx as never, { content: "今天一直在想爱丽丝泉那张卫星图，红色沙漠变绿了" });
-      expect(state.thoughts).toHaveLength(1);
-
-      // 重置 per-turn cap（模拟新一轮）
-      state.turnWriteCount = 0;
-
-      // 改写同一想法
-      const result = writeDiary(ctx as never, {
-        content: "又看到伊蕾娜，一直在想爱丽丝泉那张卫星图的感觉",
-      });
-      expect(result).toMatchObject({ success: true, evolved: true });
-      // 应该合并而非新增
-      expect(state.thoughts).toHaveLength(1);
-      // 内容更新为最新版本
-      expect(state.thoughts[0].content).toContain("伊蕾娜");
-    });
-
-    it("不同��题写入分配不同槽位", () => {
-      const state = freshState();
-      const ctx = makeMockCtx(100, state);
-
-      writeDiary(ctx as never, { content: "今天一直在想爱丽丝泉" });
-      writeDiary(ctx as never, { content: "池泽没有回复我" });
-
-      expect(state.thoughts).toHaveLength(2);
-    });
-
-    it("不同 about 即使内容相似也不合并", () => {
-      const state = freshState();
-      const ctx = makeMockCtx(100, state);
-
-      writeDiary(ctx as never, { content: "好想念这个人", about: "contact:1" });
-      // 重置 per-turn cap
-      state.turnWriteCount = 0;
-      writeDiary(ctx as never, { content: "好想念这个人", about: "contact:2" });
-
-      expect(state.thoughts).toHaveLength(2);
-    });
-
-    it("容量满时替换最低显著性槽位", () => {
-      const state = freshState();
-      // 预填 7 个槽位
-      for (let i = 0; i < 7; i++) {
-        state.thoughts.push({
-          content: `想法${i}`,
-          about: null,
-          salience: 0.5 + i * 0.1,
-          createdAt: NOW - 3600_000,
-          updatedAt: NOW - 3600_000,
-        });
-      }
-      // 最低显著性的是 thoughts[0]（salience=0.5）
-
-      const ctx = makeMockCtx(100, state);
-      writeDiary(ctx as never, { content: "全新的重要想法" });
-
-      expect(state.thoughts).toHaveLength(7);
-      // thoughts[0] 应该被替换（最低 effectiveSalience）
-      expect(state.thoughts[0].content).toBe("全新的重要想法");
-    });
+describe("writing: bounded per decision, in total, and in time", () => {
+  it("keeps at most two entries from one decision", () => {
+    const w = fold([decided(T, DM), note(T, "一"), note(T, "二"), note(T, "三")]);
+    expect(w.diary.map((e) => e.text)).toEqual(["一", "二"]);
+    const next = fold([decided(T + MIN, DM), note(T + MIN, "四")], w);
+    expect(next.diary.map((e) => e.text)).toEqual(["一", "二", "四"]);
   });
 
-  // ── contribute() ──────────────────────────────────────────────────────
-
-  describe("contribute() 注入", () => {
-    it("无想法时不注入", () => {
-      const state = freshState();
-      const ctx = makeMockCtx(100, state);
-
-      const items = contribute(ctx as never);
-      expect(items).toHaveLength(0);
-    });
-
-    it("只注入当前 target 相关想法（priority 75）", () => {
-      const state = freshState();
-      state.thoughts.push({
-        content: "今天好累",
-        about: "contact:42",
-        salience: 1.0,
-        createdAt: NOW,
-        updatedAt: NOW,
-      });
-      const ctx = makeMockCtx(100, state, "contact:42");
-
-      const items = contribute(ctx as never);
-      expect(items).toHaveLength(1);
-      expect(items[0].bucket).toBe("header");
-      expect(items[0].priority).toBe(75);
-
-      const text = items[0].lines.join("\n");
-      expect(text).toContain("你最近的想法");
-      expect(text).toContain("今天好累");
-    });
-
-    it("global 想法不进入普通 prompt", () => {
-      const state = freshState();
-      state.thoughts.push({
-        content: "全局漂移想法",
-        about: null,
-        salience: 1.0,
-        createdAt: NOW,
-        updatedAt: NOW,
-      });
-      const ctx = makeMockCtx(100, state, "contact:42");
-
-      const items = contribute(ctx as never);
-      expect(items).toHaveLength(0);
-    });
-
-    it("无效 about 不会被误贴到当前 target", () => {
-      const state = freshState();
-      const ctx = makeMockCtx(100, state, "contact:42");
-
-      const result = writeDiary(ctx as never, {
-        content: "这条没有可靠归属",
-        about: "not-a-real-id",
-      }) as { success: boolean };
-
-      expect(result.success).toBe(true);
-      expect(state.thoughts[0].about).toBeNull();
-      expect(contribute(ctx as never)).toHaveLength(0);
-    });
-
-    it("总量不超过 5 条", () => {
-      const state = freshState();
-      for (let i = 0; i < 7; i++) {
-        state.thoughts.push({
-          content: `想法${i}`,
-          about: "contact:42",
-          salience: 1.0,
-          createdAt: NOW,
-          updatedAt: NOW,
-        });
-      }
-      const ctx = makeMockCtx(100, state, "contact:42");
-
-      const items = contribute(ctx as never);
-      const text = items[0].lines.join("\n");
-      const entryLines = text.split("\n").filter((l) => l.startsWith("- "));
-      expect(entryLines.length).toBeLessThanOrEqual(5);
-    });
-
-    it("不注入其他 target 的想法", () => {
-      const state = freshState();
-      state.thoughts.push({
-        content: "全局想法",
-        about: null,
-        salience: 1.0,
-        createdAt: NOW,
-        updatedAt: NOW,
-      });
-      state.thoughts.push({
-        content: "关于David的想法",
-        about: "contact:42",
-        salience: 0.5, // 显著性更低，但 target 匹配
-        createdAt: NOW,
-        updatedAt: NOW,
-      });
-      const ctx = makeMockCtx(100, state, "contact:42");
-
-      const items = contribute(ctx as never);
-      const text = items[0].lines.join("\n");
-      expect(text).toContain("关于David的想法");
-      expect(text).not.toContain("全局想法");
-    });
+  it("keeps at most the bound in total, dropping the oldest", () => {
+    let entries: ReturnType<typeof writeDiary> = [];
+    for (let i = 0; i < DIARY.kept + 7; i++)
+      entries = writeDiary(entries, entry(`${i}`, T + i), T + i);
+    expect(entries).toHaveLength(DIARY.kept);
+    expect(entries[0]?.text).toBe("7");
   });
 
-  // ── 生命周期钩子 ──────────────────────────────────────────────────��─
-
-  describe("生命周期钩子", () => {
-    it("onTickStart 重置 per-turn 计数", () => {
-      const state: DiaryState = { turnWriteCount: 2, thoughts: [] };
-      const ctx = makeMockCtx(101, state);
-
-      onTickStart(ctx as never);
-      expect(state.turnWriteCount).toBe(0);
-    });
-
-    it("onTickEnd 清理已淡出的想法", () => {
-      const state = freshState();
-      // 一条很旧的（24+ 小时前，显著性接近 0）
-      state.thoughts.push({
-        content: "旧想法",
-        about: null,
-        salience: 1.0,
-        createdAt: NOW - 48 * 3600_000,
-        updatedAt: NOW - 48 * 3600_000,
-      });
-      // 一条新的
-      state.thoughts.push({
-        content: "新想法",
-        about: null,
-        salience: 1.0,
-        createdAt: NOW - 100_000,
-        updatedAt: NOW - 100_000,
-      });
-
-      const ctx = makeMockCtx(300, state, null, NOW);
-      onTickEnd(ctx as never);
-
-      // 旧想法的 effectiveSalience: 1.0 × 2^(-48/6) = 1.0 × 2^-8 ≈ 0.004 < 0.05
-      // 应该被清理
-      expect(state.thoughts).toHaveLength(1);
-      expect(state.thoughts[0].content).toBe("新想法");
-    });
+  it("clips long entries and ignores empty ones", () => {
+    const long = "啊".repeat(DIARY.maxChars + 50);
+    const w = fold([decided(T, DM), note(T, long), note(T, "  ")]);
+    expect(w.diary).toHaveLength(1);
+    expect(w.diary[0]?.text).toHaveLength(DIARY.maxChars);
   });
 
-  // ── Zod Schema ────────────────────────────────────────────────────────
+  it("is not shown after the lifetime; stored until the retention, then dropped at the next write", () => {
+    const w = fold([decided(T, DM), note(T, "旧的")]);
+    expect(febShown(w.diary, null, T + DIARY.ttl - 1)).toHaveLength(1);
+    expect(febShown(w.diary, null, T + DIARY.ttl)).toHaveLength(0);
+    const later = fold([decided(T + DIARY.ttl, DM), note(T + DIARY.ttl, "新的")], w);
+    expect(later.diary.map((e) => e.text)).toEqual(["旧的", "新的"]);
+    const much = fold([decided(T + DIARY.retention, DM), note(T + DIARY.retention, "很久以后")], w);
+    expect(much.diary.map((e) => e.text)).toEqual(["很久以后"]);
+  });
 
-  describe("Zod schema 校验", () => {
-    it("空内容被 schema 拒绝", () => {
-      // biome-ignore lint/style/noNonNullAssertion: test — schema 已��存在
-      const schema = diaryMod.instructions!.diary.params.content.schema!;
-      expect(schema.safeParse("").success).toBe(false);
-      expect(schema.safeParse("   ").success).toBe(false);
-      expect(schema.safeParse("hello").success).toBe(true);
-    });
+  it("drops what the same audience already sees nearly word for word, and only that", () => {
+    const seen = [entry("说好了要拍给我看的 骗人的话就完蛋了", T)];
+    expect(
+      writeDiary(seen, entry("说好了要拍给我看的 骗人的话就完蛋了！", T + MIN), T + MIN, seen),
+    ).toEqual(seen);
+    // 别的受众看得见的、或早已不显示的，不算重复。
+    expect(
+      writeDiary(seen, entry("说好了要拍给我看的 骗人的话就完蛋了！", T + MIN), T + MIN),
+    ).toHaveLength(2);
+  });
+
+  it("drops the same thought reworded, keeps a feeling that moved on", () => {
+    const lines = [
+      "江野居然真的要表白了 藏得够深的 救命好期待周六",
+      "江野这笨蛋居然要表白了 藏得真够深 救命好期待周六",
+      "江野居然要表白了 藏得真够深的 救命好期待周六",
+      "说好答辩完去海边居然想一个人去，哼，谁稀罕啊",
+      "说要拍胶卷给我看... 哼，谁稀罕啊。不过看他模型没塌，真的松了一口气。",
+    ];
+    const kept = lines.reduce<DiaryEntry[]>(
+      (d, t, i) => writeDiary(d, entry(t, T + i), T + i, d),
+      [],
+    );
+    expect(kept.map((e) => e.text)).toEqual([lines[0], lines[3], lines[4]]);
+  });
+
+  it("feb writes what she writes, as in February (no de-duplication)", () => {
+    const w = fold([decided(T, DM), note(T, "好累"), decided(T + MIN, DM), note(T + MIN, "好累")]);
+    expect(w.diary.map((e) => e.text)).toEqual(["好累", "好累"]);
+  });
+
+  it("rebuilds the same diary from the same events", () => {
+    const events = [msg(T), decided(T, DM), note(T, "一", DM, "m1"), note(T + 1, "二")];
+    expect(fold(events)).toEqual(fold(events));
+  });
+});
+
+describe("showing: global everywhere, about someone only with them", () => {
+  it("files an entry under the sender of the referenced message, otherwise under no one", () => {
+    const m = msg(T, { scope: GROUP, senderId: "u1" });
+    const w = fold([m, decided(T, GROUP), note(T, "她在躲我", GROUP, m.messageId), note(T, "累")]);
+    expect(w.diary.map((e) => e.about)).toEqual(["u1", null]);
+  });
+
+  it("at most three global and one about the person, oldest first, five in all", () => {
+    // 每条内容各不相同（写下前会去掉换个说法的重复）。
+    const global = ["今天下雨了", "作业写不完", "猫咪掉毛", "想吃火锅"];
+    const about = ["她借了我伞", "她夸我画好看", "她又迟到", "她送我饼干"];
+    const first = msg(T);
+    const events: AliceEvent[] = [first];
+    for (let i = 0; i < 4; i++) {
+      events.push(decided(T + i * MIN, GROUP), note(T + i * MIN, global[i] as string, GROUP));
+      const at = T + i * MIN + 1;
+      events.push(decided(at, DM), note(at, about[i] as string, DM, first.messageId));
+    }
+    const w = fold(events);
+    const shown = febShown(w.diary, "u1", T + 10 * MIN).map((e) => e.text);
+    expect(shown).toEqual([global[1], global[2], global[3], about[3]]);
+    expect(shown.length).toBeLessThanOrEqual(DIARY.total);
+    expect(febShown(w.diary, null, T + 10 * MIN).map((e) => e.text)).toEqual(global.slice(1));
+  });
+
+  it("an entry written in a group appears in a private chat (2/19); one about u1 stays out of u2's chat", () => {
+    const g = msg(T, { scope: GROUP, senderId: "u1", senderName: "莉莉丝" });
+    const events: AliceEvent[] = [
+      msg(T - MIN),
+      msg(T - MIN, { scope: DM2 }),
+      g,
+      decided(T, GROUP),
+      note(T, "被当成程序围观，好难受", GROUP),
+      note(T, "莉莉丝把我的日志发出去了", GROUP, g.messageId),
+    ];
+    const dm = promptAt(events, DM, T + 5 * MIN).prompt.user;
+    expect(dm).toContain("· 心里还记着（只有我自己知道）：");
+    expect(dm).toContain("被当成程序围观，好难受");
+    expect(dm).toContain("关于 莉莉丝：莉莉丝把我的日志发出去了");
+    const other = promptAt(events, DM2, T + 5 * MIN).prompt.user;
+    expect(other).toContain("被当成程序围观，好难受");
+    expect(other).not.toContain("日志发出去了");
+  });
+
+  it("puts the diary and the echo in the card above the log", () => {
+    const events: AliceEvent[] = [
+      msg(T),
+      said(T + MIN, DM, "你是说哪方面稳定了"),
+      decided(T + MIN, DM),
+      note(T + MIN, "她是不是在内涵我"),
+    ];
+    const { prompt } = promptAt(events, DM, T + 2 * MIN, echoArm);
+    expect(prompt.system).not.toContain("她是不是在内涵我");
+    const card = prompt.user.split("\n\n")[0] ?? "";
+    expect(card).toContain("· 心里还记着（只有我自己知道）：\n  - 刚才：她是不是在内涵我");
+    expect(card).toContain('· 我最近在这里说过：\n  - [刚才] "你是说哪方面稳定了"');
+    // 日记本身不带回声：回声是单独的变体。
+    expect(promptAt(events, DM, T + 2 * MIN).prompt.user).not.toContain("你最近在这里说过");
+  });
+});
+
+describe("demonstrations", () => {
+  const events: AliceEvent[] = [msg(T - MIN), decided(T + 1, DM), note(T + 1, "今天好累", DM)];
+
+  it("the diary carries two demonstrations of writing; echo adds no rule without prior lines", () => {
+    const { request, prompt } = promptAt(events, DM, T + MIN);
+    expect(
+      request.contributions.some((c) => c.examples?.some((e) => e.scene === "被说了伤人的话")),
+    ).toBe(true);
+    // 示范是参考，在系统提示里；回声只写她最近说过的话这个事实，不附带写死规矩。
+    expect(prompt.system).toContain('await tools.diary({ entry: "被说了不太好听的话');
+    expect(promptAt(events, DM, T + MIN, echoArm).prompt.user).not.toContain("别重复自己");
+  });
+});
+
+describe("thought write-back (feb-thought)", () => {
+  const thoughtArm = createPressure(affordances, {
+    ...PRODUCTION,
+    diary: febDiary({ thinking: true }),
+    thought: thought({ examples: false }),
+  });
+  const think = (at: number, thought: string, scope = DM): AliceEvent => ({
+    type: "act.done",
+    at,
+    scope,
+    act: { kind: "think", thought },
+  });
+
+  it("shows this chat's last three thoughts within ten minutes, and nothing without the thought feature", () => {
+    const events: AliceEvent[] = [msg(T), msg(T, { scope: DM2 })];
+    events.push(think(T, "太早的"));
+    for (let i = 0; i < 4; i++) events.push(think(T + 6 * MIN + i, `想${i}`));
+    events.push(think(T + 6 * MIN, "别处想的", DM2));
+    const { request, prompt } = promptAt(events, DM, T + 12 * MIN, thoughtArm);
+    expect(request.affordances).toContain("think");
+    // 读回在卡片的"心里还记着"那一行，写成"刚才想过：……"。
+    const block = prompt.user.slice(prompt.user.indexOf("· 心里还记着")).split("\n\n")[0] ?? "";
+    expect(block).not.toContain("太早的");
+    expect(block).not.toContain("别处想的");
+    expect(block).not.toContain("想0");
+    expect(block).toContain("想过：想3");
+    expect(prompt.system).toContain('await tools.inner({ thought: "这话说得挺重的');
+    const noInner = createPressure(affordances, { ...PRODUCTION, thought: undefined });
+    const plain = promptAt(events, DM, T + 12 * MIN, noInner);
+    expect(plain.request.affordances).not.toContain("think");
+    expect(plain.prompt.user).not.toContain("想过：");
+  });
+});
+
+describe("action echo: this chat, the last hour, five lines", () => {
+  it("leaves out other chats and older lines, and keeps the last five", () => {
+    const events: AliceEvent[] = [msg(T), msg(T, { scope: DM2 })];
+    events.push(said(T, DM, "一小时前的"));
+    for (let i = 0; i < 6; i++) events.push(said(T + 30 * MIN + i, DM, `话${i}`));
+    events.push(said(T + 30 * MIN, DM2, "别处的话"));
+    const { prompt } = promptAt(events, DM, T + H + 1, echoArm);
+    // 回声在聊天记录上方的卡片里，到空行为止（记录里本来就有她一小时前那句）。
+    const echo = prompt.user.slice(prompt.user.indexOf("我最近在这里说过")).split("\n\n")[0] ?? "";
+    expect(echo).not.toContain("一小时前的");
+    expect(echo).not.toContain("别处的话");
+    expect(echo).not.toContain("话0");
+    expect(echo).toContain("话5");
+    expect(echo.split("\n").filter((l) => l.startsWith("  - "))).toHaveLength(5);
+  });
+});
+
+describe("production writes its diary by reflecting, not inline", () => {
+  it("production offers no diary action and no echo; the feb arm offers the action", () => {
+    const events: AliceEvent[] = [msg(T), said(T + MIN, DM, "嗯")];
+    const { request, prompt } = promptAt(events, DM, T + 2 * MIN, pressureProduction);
+    expect(request.affordances).not.toContain("diary");
+    expect(prompt.system).not.toContain("  diary: {");
+    expect(prompt.user).not.toContain("你最近在这里说过");
+    expect(promptAt(events, DM, T + 2 * MIN).request.affordances).toContain("diary");
+  });
+
+  it("inner monologue is on in every chat", () => {
+    const OTHER = "telegram:4";
+    const events: AliceEvent[] = [msg(T), msg(T, { scope: OTHER })];
+    for (const scope of [DM, OTHER]) {
+      const { request, prompt } = promptAt(events, scope, T + MIN, pressureProduction);
+      expect(request.affordances).toContain("think");
+      expect(prompt.system).toContain("  inner: {");
+    }
   });
 });

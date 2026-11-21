@@ -1,8 +1,7 @@
 [Unit]
 Description=Alice Runtime
-After=network-online.target docker.service
+After=network-online.target
 Wants=network-online.target
-Requires=docker.service
 
 [Service]
 Type=simple
@@ -11,11 +10,7 @@ Group=alice-runtime
 WorkingDirectory=/srv/alice-telegram-bot/runtime
 Environment=NODE_ENV=production
 Environment=ALICE_STATE_DIR=/var/lib/alice-runtime
-Environment=ALICE_HOME=/var/lib/alice-runtime/home
-Environment=ALICE_ENGINE_PORT=3380
 Environment=ALICE_ERROR_LOG_PATH=/var/log/alice-runtime/alice-errors.log
-Environment=ALICE_SANDBOX_RUNTIME=runsc
-Environment=ALICE_CONTAINER_DEFAULT_PROFILE=sandboxed
 EnvironmentFile=-/srv/alice-telegram-bot/runtime/.env
 ExecStart=/usr/bin/node --import tsx --env-file=.env src/index.ts
 ExecReload=/bin/kill -HUP $MAINPID
@@ -45,10 +40,6 @@ RestrictNamespaces=true
 RestrictSUIDSGID=true
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/srv/alice-telegram-bot/runtime/skills/store
-ReadWritePaths=/srv/alice-telegram-bot/runtime/skills/system-bin
-ReadWritePaths=/srv/alice-telegram-bot/runtime/skills/man
-ReadWritePaths=/srv/alice-telegram-bot/runtime/skills/registry.json
 
 [Install]
 WantedBy=multi-user.target

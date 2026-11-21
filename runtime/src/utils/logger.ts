@@ -15,6 +15,12 @@ const root = createConsola({
 // ADR-54: 错误独立文件 — error/warn/fatal → alice-errors.log
 // 测试环境不写文件（避免污染 CI 输出目录）
 let _errorStream: WriteStream | null = null;
+const problemListeners: Array<() => void> = [];
+
+/** 每写一条 warn / error / fatal 就叫一次（自检数错误日志激增，src/ops/watch.ts）。 */
+export function onProblemLogged(listener: () => void): void {
+  problemListeners.push(listener);
+}
 
 if (!process.env.VITEST && process.env.NODE_ENV !== "test") {
   ensureParentDir(ALICE_ERROR_LOG_PATH);
@@ -39,6 +45,7 @@ if (!process.env.VITEST && process.env.NODE_ENV !== "test") {
         }
       }
       _errorStream?.write(`${ts} ${level} ${tag} ${parts.join(" ")}\n`);
+      for (const listener of problemListeners) listener();
     },
   });
 }
@@ -48,4 +55,15 @@ export function createLogger(tag: string) {
   return root.withTag(tag);
 }
 
-export { root as logger };
+/**
+ * 停机时关掉错误日志：等缓冲区里最后几条刷进 alice-errors.log，之后的 warn / error 只走终端。
+ * （不关的话进程退出时那几条就丢了：tail 日志的人正好看不到停机前后的报错。）
+ */
+export function closeLogger(): Promise<void> {
+  const stream = _errorStream;
+  _errorStream = null;
+  if (!stream) return Promise.resolve();
+  const { promise, resolve } = Promise.withResolvers<void>();
+  stream.end(resolve);
+  return promise;
+}
