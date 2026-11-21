@@ -75,6 +75,30 @@ describe("loadConfig", () => {
     process.env.TEST_TELEGRAM_API_ID = "abc";
     expect(() => loadConfig()).toThrow("Telegram API ID must be an integer");
   });
+
+  it("accepts OHMYGPT_API_KEY natively when speech.api_key_env defaults to LLM_API_KEY", () => {
+    const configPath = process.env.ALICE_CONFIG_PATH as string;
+    writeFileSync(
+      configPath,
+      `
+[telegram]
+api_id_env = "TEST_TELEGRAM_API_ID"
+api_hash_env = "TEST_TELEGRAM_HASH"
+phone_env = "TEST_TELEGRAM_PHONE"
+`,
+    );
+    const prevOhmy = process.env.OHMYGPT_API_KEY;
+    const prevLlm = process.env.LLM_API_KEY;
+    delete process.env.LLM_API_KEY;
+    process.env.OHMYGPT_API_KEY = "sk-ohmygpt-native";
+    try {
+      expect(loadConfig().speech.apiKey).toBe("sk-ohmygpt-native");
+    } finally {
+      if (prevOhmy === undefined) delete process.env.OHMYGPT_API_KEY;
+      else process.env.OHMYGPT_API_KEY = prevOhmy;
+      if (prevLlm !== undefined) process.env.LLM_API_KEY = prevLlm;
+    }
+  });
 });
 
 describe("loadRuntimeConfig (what --check validates before she goes live)", () => {

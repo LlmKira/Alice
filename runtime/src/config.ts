@@ -186,11 +186,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = RuntimeConfigSchema.parse(parseToml(readFileSync(path, "utf8")));
   const telegramApiId = Number(secret(env, parsed.telegram.api_id_env));
   if (!Number.isInteger(telegramApiId)) throw new Error("Telegram API ID must be an integer");
+  const speechKey =
+    parsed.speech.api_key_env === "LLM_API_KEY"
+      ? env.OHMYGPT_API_KEY?.trim() ||
+        env.LLM_API_KEY?.trim() ||
+        secret(env, "OHMYGPT_API_KEY (or LLM_API_KEY)")
+      : secret(env, parsed.speech.api_key_env);
   return {
     telegramApiId,
     telegramApiHash: secret(env, parsed.telegram.api_hash_env),
     telegramPhone: secret(env, parsed.telegram.phone_env),
-    speech: { apiKey: secret(env, parsed.speech.api_key_env) },
+    speech: { apiKey: speechKey },
     ignoredSenders: new Set(
       (env.ALICE_IGNORED_SENDERS ?? "")
         .split(",")

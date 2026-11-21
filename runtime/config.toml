@@ -4,5 +4,5 @@ api_hash_env = "TELEGRAM_API_HASH"
 phone_env = "TELEGRAM_PHONE"
 
 [speech]
-# 发言模型（src/llm/speech-model.ts）网关的密钥。
+# OhMyGPT 原生网关密钥环境变量（同时原生兼容 OHMYGPT_API_KEY 与 LLM_API_KEY）。
 api_key_env = "LLM_API_KEY"
