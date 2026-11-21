@@ -1,135 +1,206 @@
-<img src=".github/banner.png" width="100%" alt="Alice — Event-Sourced Autonomous Companion Runtime" />
+<div align="center">
 
-<p align="center">
-  <a href="README.md">English</a> | <a href="README.zh-CN.md">简体中文</a>
+<h1>Project Alice</h1>
+
+<p>
+  <strong>An Event-Sourced Autonomous Social Companion for Telegram</strong>
 </p>
 
-<h1 align="center">Alice</h1>
-
-<p align="center">
-  <a href="https://github.com/LlmKira/Alice"><img src="https://img.shields.io/github/stars/LlmKira/Alice?style=flat&colorA=080f12&colorB=f0c040" alt="stars"></a>
-  <a href="https://t.me/Openai_LLM"><img src="https://img.shields.io/badge/Telegram-%235AA9E6?logo=telegram&labelColor=FFFFFF" alt="telegram"></a>
-  <a href="https://github.com/LlmKira/Alice/issues"><img src="https://img.shields.io/github/issues/LlmKira/Alice?style=flat&colorA=080f12&colorB=ef4444" alt="issues"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License"></a>
+<p>
+  <strong>English</strong> &nbsp;&middot;&nbsp;
+  <a href="README.zh-CN.md">简体中文</a> &nbsp;&middot;&nbsp;
+  <a href="#live-moments">Live Moments</a> &nbsp;&middot;&nbsp;
+  <a href="#architecture">Architecture</a> &nbsp;&middot;&nbsp;
+  <a href="#comparison">Comparison</a> &nbsp;&middot;&nbsp;
+  <a href="#benchmarks">Benchmarks</a> &nbsp;&middot;&nbsp;
+  <a href="#quick-start">Quick Start</a>
 </p>
 
-> [!NOTE]
-> Alice is an autonomous Telegram userbot runtime built around a **pure, deterministic, event-sourced core** and a **need-based utility decision layer (the Will)**. Rather than scripting rigid conversation rules or prompt-level guardrails, behavior emerges from world laws: external obligations, relationship dynamics, bodily rhythms, social reception, and continuous costs.
+</div>
 
 ---
 
-## Core Philosophy
+What happens when a language model isn't wrapped in `/chat` commands or fragile prompt guardrails ("wait 10 minutes", "reply to 1 in 5 messages"), but placed inside a **deterministic harness governed by social physics**?
 
-Most LLM chat bots are reactive request-response wrappers or heuristic rule engines (`if ignored >= 3: stop`). Alice separates **when, where, and what kind of act to consider** (a deterministic pure core) from **what to say** (a single LLM call per wake using TypeScript Code Mode).
+**Project Alice** introduces a grounded paradigm shift for **human social simulation**: rather than scripting how an agent ought to talk, we define the **laws of her social and physiological environment** and let natural timing, curiosity, restraint, and silence emerge on their own.
 
-- **Open Guidance**: Guidance shapes classes of situations (e.g., someone went cold, someone is upset) as factual context, never scripted replies or narrow behavioral bans.
-- **Adaptive Design**: Group tempo, relationship familiarity, channel sharing selectivity, first-DM acceptance, and surprise-weighted mood feedback adapt from observed interaction history rather than hand-tuned global thresholds.
-- **Deterministic Replay**: `mind/`, `mechanisms/`, and `speech/` never read the system clock, random sources, or I/O. Every timestamp and random draw enters as an event in an append-only SQLite Journal. Replaying any event window produces byte-identical state and decisions.
-- **Soft Utility Over Hard Gates**: Preferences ("don't spam", "don't intrude", "stop chasing someone who doesn't reply") live inside one continuous objective function (`NSV`). Hard constraints protect only three safety invariants.
+Drawing from utility- and affordance-driven game AI design (where agents weigh concrete environmental possibilities against competing internal needs and costs, rather than following rigid state trees) and deterministic harness engineering for long-horizon agents, Alice lives on a live Telegram account via MTProto (`@mtcute/node`). She carries continuous physiological and emotional state across weeks: she grows sleepy at night and hungry around mealtimes, reads channels she subscribes to, remembers who ignored her or asked her to slow down, shares news that reminds her of a friend, and remains silent whenever speaking creates more social friction than it relieves.
+
+### What This Architecture Enables
+
+* **Silence by Equilibrium, Not Fragile Filters**: Existing bots wake an LLM that talks ~99% of the time (`LuckyBot` spoke in 147 of 148 wakeups) or interrupt active two-party exchanges (`69%` in published ChatGPT group studies). Inside Alice's harness, silence carries baseline value `0`; every action must earn positive Net Social Value (`NSV > 0`) against social cost, asymmetrical effort, and sleep pressure before invoking the speech model.
+* **From Guesswork to Replayable Science**: Because the entire behavioral core (`mind/`, `mechanisms/`, `speech/`) reads zero system clocks, draws zero runtime randomness, and performs zero I/O, we can replay multi-day Telegram histories bit-for-bit at near-zero cost (`feb-0 / feb-a / feb-b`) and falsify intuitions with controlled A/B ablations instead of tuning prompts by gut feel.
+* **Looking Ahead: Changing How Continuous Agents Are Built**: As AI shifts from command-triggered tools to persistent participants living alongside humans across groups and months, the bottleneck moves from single-turn intelligence to *attention economics, timing, affective continuity, and knowing when not to speak*. By turning behavioral hypotheses into swappable, slice-isolated pure mechanisms inside an open TypeScript harness, Project Alice offers a reproducible testbed where future agents can earn natural presence through verifiable environmental laws rather than ever-longer prompt patches.
+
+> **Blind Turing-style group evaluation (`aliveness/round-1115`, n = 34 slices):** Mixed blindly alongside active human members in the same Telegram groups (prior to our latest five-ring integration), Alice's detector ROC-AUC fell from **0.983** down to **0.476** (50% = coin flip).
 
 ---
 
-## System Architecture
+## Live Moments
+
+Unscripted screenshots from live Telegram groups, channels, and private DMs (identities anonymized; zero prompt templates scripting jokes or stickers):
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <p align="center">
+        <img src=".github/screenshots/group-banter.png" alt="Multi-turn group banter" width="100%">
+      </p>
+      <strong>Natural Group Banter</strong><br>
+      Carries rapid multi-turn teasing in stride without falling into customer-support phrasing or breaking character.
+    </td>
+    <td width="50%" valign="top">
+      <p align="center">
+        <img src=".github/screenshots/security-alert-forward.png" alt="Channel forwarding and reaction" width="100%">
+      </p>
+      <strong>Channel Sharing &amp; Improvised Recovery</strong><br>
+      Spots a security alert in a subscribed channel (<code>LoopDNS</code>), forwards it to warn friends, and plays off playful "bot glitch" teasing naturally.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <p align="center">
+        <img src=".github/screenshots/nasa-share.png" alt="NASA Alice Springs share" width="100%">
+      </p>
+      <strong>Associative Curiosity</strong><br>
+      Notices a news post about Alice Springs turning green after desert rain, connects it to her own name, shares it unprompted, and follows up with a sticker.
+    </td>
+    <td width="50%" valign="top">
+      <p align="center">
+        <img src=".github/screenshots/private-empathy.png" alt="Private chat cross-context awareness" width="100%">
+      </p>
+      <strong>Cross-Context Social Awareness</strong><br>
+      Picks up on an abrupt 2 AM apology in a DM, remembers the sender was just chatting in a shared group without replying, and reacts candidly.
+    </td>
+  </tr>
+</table>
+
+<details>
+<summary>More live examples: channel reflection &amp; personal boundaries</summary>
+<br>
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <p align="center">
+        <img src=".github/screenshots/channel-forward-opinion.png" alt="Channel reflection" width="100%">
+      </p>
+      <strong>Reading Between the Lines</strong><br>
+      Shares thoughts on an essay about AI "social offloading," briefly reflects on her own feelings, and steps back when a friend replies with a reaction sticker.
+    </td>
+    <td width="50%" valign="top">
+      <p align="center">
+        <img src=".github/screenshots/emotional-sticker.png" alt="Boundary setting with sticker" width="100%">
+      </p>
+      <strong>Setting Personal Boundaries</strong><br>
+      Updates per-person aversion when treated rudely instead of accepting insults passively, pairing a clear boundary with an expressive sticker.
+    </td>
+  </tr>
+</table>
+</details>
+
+---
+
+## Architecture
+
+Most bots ask the LLM "should you reply right now?" on every incoming message. Once woken up, language models almost always speak. Alice flips this around: a deterministic social physics kernel tracks attention, relationships, mood, and energy across every conversation, waking the model **only when speaking beats silence**.
 
 ```text
-Telegram (mtcute) ──▶ Append-only Journal (SQLite)
-                            │
-                            ▼
-                 pure step(state, event) ──▶ { nextState, effects[] }
-                            ▲                         │
-                            └─── typed results ◀── Shell (LLM / Telegram / Timers)
+  Telegram MTProto / Timers / Noise Events (I/O Shell: runtime/src/shell.ts)
+         │
+         ▼  append-only AliceEvent { at, type, scope, ... }
+  SQLite WAL Event Journal (runtime/src/journal.ts)
+         │
+         ▼  pure deterministic step(state, event)
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Pure Core (runtime/src/mind/, mechanisms/, speech/)                      │
+│ No system clock · No runtime RNG · No external I/O                      │
+│                                                                         │
+│  · World Graph          Chats, DMs, channel feeds, seen rooms           │
+│  · 10 Competing Drives  Attention, obligation, cooling, topic, aversion │
+│  · Will Calculus (NSV)  Ranks every (chat × action) against silence = 0 │
+│  · Body & Affect        Borbély two-process sleep + DynAffect OU mood   │
+│  · Context Slicing      Role-appropriate episodic memory & chat framing │
+└─────────────────────────────────────────────────────────────────────────┘
+         │
+         ▼  Code Mode TS-AST Sandbox (run_code / tools.*)
+  Typed Actions: send · react · sticker · voice · diary · bed · feel · check_dm · plan_group_dm
 ```
 
-Five components close the behavioral loop:
+### Key Mechanisms & Equations
 
-1. **World Fold (`mechanisms/pressure/world.ts`)**: Folds messages, reactions, membership updates, perception labels (`tone`, `stop`/`hush`/`aloof`), and action outcomes into a typed social graph of chats, contacts, threads, commitments, and receptions (`replied`, `cold`, `ignored`, `unheard`, `rejected`).
-2. **Composable Mechanisms (`mind/compose.ts`, `mechanisms/registry.ts`)**: Every behavioral mechanism declares the state slices it reads and writes (`Slices`). Write collisions fail fast at composition time; ablating a feature is removing one slot from `PRODUCTION`.
-3. **The Will (`mechanisms/pressure/will.ts`)**: Evaluates every available `(chat, affordance)` pair and wakes the speech model only when the highest Net Social Value exceeds `0`.
-4. **Single-Call Code Mode (`speech/decision.ts`, `mind/affordances.ts`)**: On wake, the LLM receives `SOUL.md`, a factual context card (including the top wake causes), chat timeline, and a TypeScript SDK of currently available actions. It emits straight-line `await tools.<action>(...)` calls inside a single `run_code` tool call, parsed statically via the TypeScript AST and never executed.
-5. **Closed-Loop Reception (`mechanisms/pressure/feedback.ts`, `rejection.ts`, `fairness.ts`)**: How others respond feeds back into mood, sharing taste, service debt, and per-person/per-group aversion.
+* **Normalized Subjective Value (`NSV`) Decision Rule** (`mechanisms/pressure/will.ts`):
+  Every candidate pair of action $a$ and chat $h$ competes on net utility against silence ($0$):
 
----
+$$\mathrm{NSV}(a, h) = \sum_{k=1}^{10} \mathrm{relieves}_a[k] \cdot \hat{\tau}_k(h) \cdot g_k \;-\; \lambda(h)\,\bigl(C_{\mathrm{social}}(a, h) + C_{\mathrm{sat}}(a, h)\bigr) \;-\; C_{\mathrm{busy}}(h)$$
 
-## Mathematical Formulation
+  where each normalized drive $\hat{\tau}_k(h) = \rho(h) \tanh(P_k(h) / \kappa_k)$ decays over silence via habituation factor $\rho(h)$ so stale chats fade naturally instead of pinning attention forever.
 
-### 1. Net Social Value & Adaptive Rhythm
+* **Ten Competing Drives** (`mechanisms/pressure/drives.ts`):
+  `attention` ($\kappa=5$), `obligation` ($\kappa=3$, direct `@mentions`), `thread` ($\kappa=5$, multi-turn momentum), `cooling` ($\kappa=3$, relationship drift), `curiosity` ($\kappa=1$, unexplored rooms), `aversion` ($\kappa=1$, per-person friction), `prospect` ($\kappa=1$, deferred promises), `information` ($\kappa=1.5$, channel items to share), `topic` ($\kappa=1$, group conversation relevance), and `bond` ($\kappa=3$, pull toward active acquaintances).
 
-For an available affordance $a$ in chat $h$ at time $t$, the Will computes:
+* **Effort Reciprocity & Cold-DM Consent**:
+  Social cost $C_{\mathrm{social}}$ penalizes lopsided effort when others drop one-word replies or stickers:
 
-$$\mathrm{NSV}(a, h) = \underbrace{\sum_{k} r_a[k] \cdot g_k(h) \cdot \hat{X}_k(h)}_{\text{bounded relief}} \;-\; \lambda_h \Bigl(C_{\mathrm{soc}}(a,h) + \hat{V}_h \bigl(1 - r_a[V]\bigr) + C_{\mathrm{sat}}(a,h)\Bigr) \;-\; C_{\mathrm{body}}(a,h)$$
+$$\mathrm{reciprocity}(h) = \min\!\left(1,\; \frac{\max(0, E_{\mathrm{Alice}} - E_{\mathrm{other}})}{5}\right) \cdot w_{\mathrm{chatType}}$$
 
-- **Zero Silence Baseline**: Silence has value $0$. Only candidates with $\mathrm{NSV} > 0$ are eligible; at each open rhythm tick, the Will wakes only the global `argmax`.
-- **Considered, Declined, Consumed**: If woken for `(a, h)` and the model chooses silence, the drives relieved by that wake are consumed and regrow from that moment without altering world contact timestamps.
-- **Intrinsic Gain Modulation ($g_k$)**: Affect valence and bodily sociability modulate the six intrinsic drives (`cooling`, `curiosity`, `information`, `prospect`, `topic`, `bond`) within $g_k \in [0.65, 1.45]$, while extrinsic drives (`attention`, `obligation`, `thread`, `aversion`) remain at $1.0$ so addressed messages are still answered when mood is low.
-- **Urgency-Modulated Cost Sensitivity ($\lambda_h$)**: $\lambda_h = \lambda_0 \cdot \varphi_h$ with $\lambda_0 = 1.5$, where $\varphi_h = 0.3$ if effective obligation $O_h > 0.2$, $\varphi_h = 0.5$ if in an active conversation turn, and $\varphi_h = 1.0$ otherwise.
-- **Demand-Driven Wake Rhythm**:
+  Before messaging a stranger met in a group, Alice checks source-group acceptance history via `tools.check_dm()` or queues a polite in-group ask via `tools.plan_group_dm()`.
 
-$$\Delta t = \Delta t_{\min} + (\Delta t_{\max} - \Delta t_{\min}) \exp\!\left(-\frac{\mathrm{API}_{\mathrm{peak}}}{\kappa_t}\right), \quad \Delta t_{\min} = 1\,\mathrm{s},\; \Delta t_{\max} = 300\,\mathrm{s},\; \kappa_t = 1$$
+* **Circadian Sleep & Continuous Mood** (`life-body.ts`, `affect.ts`):
+  A Borbély two-process sleep-pressure clock governs fatigue, meals, and bedtime. Emotional valence follows a continuous Ornstein–Uhlenbeck process ($\mu_{\mathrm{home}} = +0.19$, half-life $1\text{h}$, $\sigma = 0.15$) nudged by temporal surprise $(1 - 2^{-\Delta t / t_{1/2}})$ when friends reappear.
 
-where $\mathrm{API}_{\mathrm{peak}}$ tracks only external demand drives so internal urges never cause tick storms.
-
-### 2. Normalized Drives & Habituation
-
-Raw drives $X_k(h)$ are squashed with per-drive scale $\kappa_k$ and habituated by recent decision frequency $H_h$ ($\tau_H = 30\,\mathrm{min}$):
-
-$$\hat{X}_k(h) = \tanh\!\left(\frac{X_k(h)}{\kappa_k}\right) \cdot \rho_h, \qquad \rho_h = \begin{cases} 1, & k \in \{\text{obligation}, \text{aversion}\} \\ \dfrac{1}{1 + 0.5\, H_h}, & \text{otherwise} \end{cases}$$
-
-| Drive | Formula / Mechanism | $\kappa_k$ |
-|---|---|---|
-| **Attention ($A_h$)** | $\max\!\bigl(\mathrm{ewms}_h \cdot 2^{-\Delta t_{\mathrm{awake}}/1\mathrm{h}},\; \ln(1+\mathrm{unread}_h)\bigr) \cdot w_{\mathrm{tier}} \cdot w_{\mathrm{chat}}^A$ (filtered via `group-filter`) | $5$ |
-| **Obligation ($O_h$)** | $\mathrm{pending}_h \cdot 2^{-\Delta t_{\mathrm{awake}}/1\mathrm{h}} \cdot w_{\mathrm{tier}} \cdot w_{\mathrm{chat}}^O$ (private $w^O=2$, group $1$) | $3$ |
-| **Thread ($T_h$)** | $w_{\mathrm{thread}} \bigl((1 + a/\mathrm{day})^{1.5} - 1\bigr)$ for unanswered address age $a < 7\,\mathrm{d}$ ($w_{\mathrm{thread}}$: $2$ private, $0.5$ group) | $5$ |
-| **Prospect ($P_h$)** | $2\,\sigma\!\bigl(5(x - \tfrac{1}{2})\bigr)\cdot f(t)$, $x = \min\!\bigl(1, 1 - (d - t)/L\bigr)$ for scheduled commitments | $1$ |
-| **Cooling ($C_h$)** | $w_{\mathrm{tier}} \cdot \sigma\!\Bigl(2.5\bigl[\ln\!\bigl(1 + \frac{s}{\tau_0 \cdot 2^{\min(r-1, 6)}}\bigr) - \ln\!\bigl(1 + \frac{\theta_c}{\tau_0}\bigr)\bigr]\Bigr)$ ($\tau_0 = 600\,\mathrm{s}$; group $\theta = \mathrm{clamp}(10\cdot\mathrm{gap}_{\mathrm{EMA}}, 30\,\mathrm{m}, 7\,\mathrm{d})$) | $3$ |
-| **Curiosity ($U_h$)** | Bounded surprise on contact activity deviation (private & reachable targets only) | $1$ |
-| **Sharing Desire ($I_h$)** | $\max_m \bigl(\mathrm{freshness}_c \cdot \mathrm{rel}_{\mathrm{IDF}} \cdot w_{\mathrm{near}} \cdot \mathrm{novelty} \cdot 6\bigr)$, gated to beat the last $W_h = \frac{\text{arrivals/day}}{\text{shares/day}}$ items and $\tanh(I_h/1.5) \ge 0.5$ | $1.5$ |
-| **Group Topic ($G_{\mathrm{top}}$)** | Cross-chat IDF cosine salience $\ge 0.3$ against memory/diary/topics ($t_{1/2} = 10\,\mathrm{min}$) | $1$ |
-| **Group Bond ($G_{\mathrm{bond}}$)** | Speaker's recent responded interaction strength ($t_{1/2} = 24\,\mathrm{h}$) | $3$ |
-| **Aversion ($V_h$)** | $+0.5$ ignored, $+0.5$ negative emoji, $+1.0$ rejected ($\tau = 2\,\mathrm{h}$ group, $8\,\mathrm{h}$ private; not reset by ordinary messages) | $1$ |
-
-### 3. Social, Saturation, Exit & Bodily Costs
-
-- **Social Cost ($C_{\mathrm{soc}}$)**: $0.3\,\mathrm{dist} + 0.3\,\mathrm{imp} + 0.3\,\mathrm{temp}$, combining effort-weighted reciprocity ($\mathrm{hers} - \mathrm{theirs}$, so `"1"` or stickers do not erase conversational debt), Dunbar tier distance ($\mathrm{tier}/500$), staleness, act intrusiveness, and 30-min global turn density.
-- **Unbounded Unilateral Saturation ($C_{\mathrm{sat}}$)**:
-
-$$C_{\mathrm{sat}} = 2\,\mathrm{rate} + 1.5\,\mathrm{cool} + 2\left(\frac{k_h}{O}\right)^2 + 1.5\,\mathrm{fail}$$
-
-  where $k_h$ counts unanswered message-leaving acts ($O = 3$ private, $4$ group; $30\,\mathrm{d}$ half-life, reset only on real response). Because $(k_h/O)^2$ is uncapped, the companion is guaranteed to fall silent toward non-responsive private contacts rather than spamming indefinitely.
-- **First-DM Acceptance & Fairness**: Quiet existing DMs accrue a bounded fairness discount up to $45\%$ off $C_{\mathrm{soc}}$ ($\tau = 6\,\mathrm{h}$). Cold first-DM outreach from a group pays an adaptive cost learned per source group via a $\mathrm{Beta}(2,4)$ prior, a 2-h group cooldown, group rejection coupling, and a 24-h `PEER_FLOOD` breaker.
-- **Exit Cost ($C_{\mathrm{exit}}$)**: $0.3\tanh(I_h/3) + 0.3/(1 + n_h)$, balancing accumulated responded investment $I_h$ against thin-evidence wait value.
-- **Borbély Two-Process Sleep & Hunger ($C_{\mathrm{body}}$)**: Sleep pressure $S$ integrates minute-by-minute ($\tau_r = 18.2\,\mathrm{h}$ awake, $\tau_d = 4.2\,\mathrm{h}$ asleep) against 24-h circadian thresholds ($H_0 = 0.67, L_0 = 0.17$, amplitude $0.12$), adding $30\cdot\mathrm{depth}$ cost while asleep and pausing unread/obligation aging during sleep. Hunger grows toward $1$ with $\tau = 5\,\mathrm{h}$ and raises meal priority above filler activities.
-- **DynAffect Mood & Surprise-Weighted Reception**: Valence follows an Ornstein–Uhlenbeck process ($\mu = +0.19$, $\sigma = 0.15$, $t_{1/2} = 1\,\mathrm{h}$). Positive reception lifts valence proportionally to surprise $(1 - \mathrm{usualUptake})$.
-
-### 4. Hard Safety Invariants (Only 3)
-
-1. **Send-rate ceiling**: At most **6** message-leaving acts per chat within any 60-second window.
-2. **Strict chat routing**: Every act executes only in the chat that triggered the decision; quote/reaction IDs must belong to that chat's timeline.
-3. **No blind retry**: Failed or `outcome_unknown` acts are never automatically retried.
+* **Code Mode AST Sandbox & Global Bounds** (`llm/ptc.ts`, `mind/`):
+  Instead of brittle text tags, the model calls typed `await tools.<action>(...)` statements inside a statically checked TypeScript sandbox, keeping internal reasoning separate from sent text. Kernel invariants keep outgoing actions within human rates (**6 sends per 60s ceiling**) alongside unilateral cold-DM quotas.
 
 ---
 
-## Ablation & Benchmark Comparisons
+## Comparison
 
-> **Note**: Our evaluation datasets, synthetic/real moment benchmarks, and internal optimization workflows are kept private. Below are the verified results from our pre-registered A/B ablations, zero-cost closed-loop censuses, and blind judge evaluations.
+We audited roughly 30 open-source companion bots and multi-party turn-taking studies (as of November 2026). Most projects focus on expanding prompt features (rotating phrase lists, un-decayed affection points, static timers) without deterministic replay or controlled human-simulation benchmarks:
 
-| Study | Comparison | Key Verified Result | Outcome |
-|---|---|---|---|
-| **Will Layer** | Will vs. handwritten triggers (`12h` real-model replay) | Addressed coverage `99.2%` vs `99.4%`; busy group turns `17.6` vs `26.4`/group/day; unprompted DMs `21` vs `0` | **Promoted** |
-| **Action Format** (`exec-mode`) | Code Mode (`run_code` TS AST) vs. continuation / native tools / bash | Appropriate internal-act usage **`57%` vs `22%`** (`69%` vs `33%` w/ 2-min lead); pairwise taste **`49 : 25`** (5 ties); defects `3.8%` vs `3.3%`; off-topic `0%` | **Promoted** |
-| **Conversation Arc** (`dwell`) | Turn-based option vs. 5-min `floor` | $\ge 2$-turn group arcs **`33.0% → 39.1%`** (human `36.4%`), TVD `0.108 → 0.100`; two `12h` real-model windows: `14.3% → 22.6%` and `17.6% → 34.5%` (human `35.5%`, `38.6%`) | **Promoted** |
-| **Group Attention Filter** | Filtering bots, uncaptioned media, `@other` (`9.19d` census) | Calls `2736 → 2664` (`-2.6%`); unaddressed wakes while asleep **`16 → 8`**; 10-min directed response `0.712 → 0.718` | **Promoted** |
-| **Sharing Desire** (`desire`) | Adaptive channel sharing vs. baseline (`60` live moments) | Worse faults `2` vs `4` (`30` ties); `0` forced insertions; capped $\le 2$/chat/day (human active-quarter p90 `2.12`) | **Promoted** |
-| **First-DM Delegation** | Per-group adaptive cost + `check_dm` / `plan_group_dm` | Guarded group cold DMs **`33.3% (4/12) → 0.0% (0/12)`** (`check_dm` called `10/12`); friendly group kept at `16.7% (1/6)` | **Promoted** |
-| **Expression Diversity** (`prune-vs`) | Prune 6 fixed openings + divergent `inner` + 6h echo (`22 × 3` reps) | `distinct-2` **`0.4893 → 0.5462`**, `distinct-3` **`0.7718 → 0.8157`**; format defects `2 → 0`; bystander rate **`71.4% → 55.3%`** (`-16.1pp`, AI-ness `0%`); pairwise **`18 : 12 : 4`** | **Promoted** |
-| **5-Ring Closed Loop** (`loop-v2`) | `loop-v2` vs. `loop-delegated` (`40` real moments + `3.78d` census) | Checklist `think` templates (`1. 2. 3.`) **`77.8% (28/36) → 0.0% (0/34)`**; awake 1–15m reply share **`0.327`** (human `0.323`) | **Promoted** |
-| **Blind Human-vs-AI** | Anonymized group slices (`16` Alice vs. `18` active humans) | AI-detection AUC **`0.983 → 0.476`** (uncanny AUC `0.483`, per-speaker AUC `0.497`, mean $p_{\mathrm{AI}}$ `0.224` vs `0.216`) | **Crossed `< 0.60` bar** |
+<p align="center">
+  <img src=".github/figures/peer-comparison.png" alt="Peer Landscape Comparison" width="100%">
+</p>
 
-### Selected Negative Results
+| Project | How Decisions Work | Replay &amp; Evaluation | Social Timing &amp; Cadence | Social Cost &amp; Restraint | Notable Difference |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Project Alice** | **10 drives + NSV utility ranking (`NSV > 0`)** | **Zero-cost multi-day log replay (`feb-0 / feb-a / feb-b`), controlled A/B ablations, blind AUC `0.476`** | **1–15m awake reply share `32.7%` (humans `32.3%`), `39.1%` multi-turn arcs** | **Per-person aversion, 4h stop cooldown, effort reciprocity, group-aware cold-DM check** | **Behaviors emerge from drives and cost rather than static reply quotas** |
+| **MaiBot / MaiSaka** (~7k★ QQ) | Logistic gate fit to past planner logs; removed emotion, will &amp; schedule | Single-request replay only; no published AUC or ablation benchmarks | Self-history feedback loop lacks human-cadence reference | Removed earlier user feedback throttling | Issue `#2109`: self-referential gating collapsed hot-group replies from `20.0%` to `4.2%` |
+| **Moui / MoFox_Bot** | MaiBot forks reintroducing 2D mood | No multi-day event replay | Heuristic timing without multi-day baseline | Qualitative tuning only | Restores mood UI without offline replay |
+| **AstrBot Social Plugins** (`proactive_chat`, `self_learning`, etc.) | Triggered generation; learned phrases need manual approval | No closed-loop replay suite | Trigger-driven without turn-arc pacing | Linear `+0.15 / -0.2` counters; un-decayed mood/affection | Affection score farmed via `@` spam; mood persisted 26h without decay |
+| **Cahciua / LuckyBot** | Outer gate classifier + non-refusable writer | Production message counts only | Static rule ("reply ~1 in 4–6 messages") | Cannot voluntarily stay silent once woken | Logs show LuckyBot spoke in **147 of 148** wakes (`99.3%`) |
+| **CyberGroupmate** | Volume &amp; wait pressure accumulation | No pure-core replay harness | Group-level wait &amp; volume tracking | 120s uptake window ignoring trivial replies | Tracks short-term uptake without normalized drive utility |
+| **elizaOS / N.E.K.O** | Merged generation check or `[PASS]` veto | No multi-day replay simulator | Fixed cooldown timers (`3 ignores -> 8h`, `6 -> 24h`) | Rigid timers rather than continuous social cost | Relies on discrete backoff walls |
+| **PITCH / LlamaPIE / ChatGPT Group** (CHI / arXiv) | Per-turn classifiers or RL timing rewards | Offline single-corpus metrics | Focused on single-turn cut-in timing | No long-horizon mood, body, or social bond loop | `PITCH` (arXiv 2610.25896): `46.4%` early GPT cut-ins; `CHI 2026 EA`: `69%` ChatGPT turns interrupted two-person exchanges |
 
-- **Zero-call `glance` peeking**: Saved `29%` model calls (`1298 → 916`), but collapsed group participation by `67%` (`5.30 → 1.76` turns/group/day) — **rejected**.
-- **`follow-reader` (waking on every watched group message)**: Doubled daily volume and exceeded active-member p90 in 3 small groups — **rejected**.
-- **Rotating 48-example pool (`rot`) & high temperature (`T = 1.2`)**: `rot` degraded `distinct-2` (`0.4893 → 0.4694`); `T = 1.2` more than doubled format defects (`2 → 5`) — **rejected**.
-- **Uncalibrated LLM group simulator**: Turned hostile after `46%` of turns in calm/joking chats where real humans had `0%` hostility (`0/26`) — **rejected** in favor of empirically calibrated responders.
+---
+
+## Benchmarks & Evidence
+
+To protect real chat participants and keep held-out benchmarks uncontaminated, **internal evaluation suites (`scenes/`, `eval-artifacts/`) are kept private**. All benchmark names and measured outcomes from our controlled A/B ablations are shared openly below:
+
+* **Internal Suites**: `synthetic` (v0, 30 probes), `synthetic-v1` (24 multi-day arcs, 83 probes), `synthetic-v2` (body/privacy probes), `real-v1` (182 logged Telegram moments paired with humans), `cap-v1` (40 multimodal capability moments), `aliveness/round-1115` (34 anonymized group slices mixing Alice and active humans), and `feb-0 / feb-a / feb-b` (9.19 days of historical Telegram replay).
+
+<p align="center">
+  <img src=".github/figures/benchmark-gains.png" alt="Benchmark Gains Across Architecture Iterations" width="100%">
+</p>
+
+### Key Gains & Ablation Takeaways
+
+* **Indistinguishable Group Presence (`aliveness/round-1115`)**: Cleaning leaked self-claims and rebuilding the social loop lowered blind human-vs-AI slice detection ROC-AUC from **`0.983` to `0.476`** (uncanny AUC `0.483`, per-speaker `0.497`).
+* **Human-Paced Timing & Multi-Turn Arcs (`cap-v1`, `feb-b`)**: Replacing fixed 5-minute cooldowns with turn-based arc continuation raised $\ge 2$-turn group conversations from **`33.0%` to `39.1%`** (matching human baseline `36.4%`); 3.78-day awake 1–15m reply share settled at **`32.7%`** (humans **`32.3%`**).
+* **Zero Template Thoughts & Higher Diversity (`cap-v1`)**: Switching to Code Mode TypeScript AST actions + divergent inner-monologue sampling eliminated numbered checklist thoughts (`"1. 2. 3."`: **`77.8% -> 0.0%`**), increased `distinct-2` from **`0.4893` to `0.5462`**, eliminated format defects (`2 -> 0`), and cut bystander miss rates from **`71.4%` to `55.3%`**.
+* **Respecting Cold Groups (`first-dm`)**: Per-group cold-DM learning plus `check_dm()` cut unwanted first DMs in guarded groups from **`33.3% (4/12)` down to `0.0% (0/12)`** while preserving normal outreach in friendly groups (`16.7%`).
+* **Selective Attention & Channel Restraint (`9.19d` replay)**: Filtering bot chatter and third-party `@mentions` on unaddressed wakes halved accidental sleep interruptions (**`16 -> 8`**); adaptive sharing kept channel forwards within human p90 bounds ($\le 2$/chat-day).
+
+### What Didn't Work (Cut After Measurement)
+
+<p align="center">
+  <img src=".github/figures/ablation-contrast.png" alt="Rejected Heuristics vs Promoted Laws" width="100%">
+</p>
+
+* **Zero-call pre-filter peeking**: Cut daily API calls by `-29%`, but cratered group participation by **`-67%` (`5.30 -> 1.76` turns/day)**.
+* **Larger static opener pools & high temperature (`T = 1.2`)**: Rotating 48 canned examples lowered diversity (`distinct-2: 0.489 -> 0.469`), while cranking sampling temperature spiked format errors (`2 -> 5`).
+* **Synthetic LLM groupmates**: Generative simulated group users turned hostile in **`46%`** of turns where real Telegram users had **`0%` (`0/26`)** hostility. We rely exclusively on real-history replay instead.
 
 ---
 
@@ -137,27 +208,23 @@ $$C_{\mathrm{sat}} = 2\,\mathrm{rate} + 1.5\,\mathrm{cool} + 2\left(\frac{k_h}{O
 
 ```text
 .
-├── ecosystem.config.cjs        # PM2 configuration (alice-runtime + alice-tagger)
+├── ecosystem.config.cjs        PM2 manifest (alice-runtime + alice-tagger)
 ├── pnpm-workspace.yaml
-├── runtime/                    # TypeScript pure-core + shell runtime
-│   ├── config.toml             # Non-secret env variable mapping
-│   ├── .env.example            # Secret environment template
-│   ├── SOUL.md                 # Persona definition
-│   ├── deploy/systemd/         # Hardened systemd unit
-│   ├── src/
-│   │   ├── index.ts            # Bootstrap & startup check (--check / --login)
-│   │   ├── journal.ts          # Append-only SQLite event store
-│   │   ├── shell.ts            # Effect execution, LLM & Telegram I/O
-│   │   ├── mind/               # Pure state machine, compose kernel, affordances, invariants
-│   │   ├── mechanisms/         # Composable mechanisms & pressure/will layer
-│   │   ├── speech/             # Prompt rendering, Code Mode AST parser, media & reflection
-│   │   ├── llm/                # Speech model, vision/tone perception, errands (Exa), TTS
-│   │   ├── telegram/           # @mtcute MTProto adapter, acts, rate gates, album, phone calls
-│   │   ├── ops/                # Operator commands (/ops status | pause | resume | cap | stop)
-│   │   └── sim/                # Deterministic replay, footprint census & platform simulator
-│   └── test/                   # Vitest unit & closed-loop property tests
+├── runtime/                    TypeScript MTProto runtime, pure core, Code Mode & tests
+│   ├── config.toml             Non-secret configuration mapping
+│   ├── .env.example            API credentials & operator template
+│   ├── SOUL.md                 Persona seed
+│   └── src/
+│       ├── index.ts            CLI entry (--check / --login / live daemon)
+│       ├── journal.ts          Sole SQLite WAL event store
+│       ├── shell.ts            MTProto shell, LLM orchestration & timers
+│       ├── mind/               Pure event types, affordances, compose & invariants
+│       ├── mechanisms/         Drives, NSV will, Borbély sleep, DynAffect & memory
+│       ├── speech/             Audience-sliced prompts & Code Mode decisions
+│       ├── llm/                OpenAI-compatible client, TS-AST sandbox (ptc.ts)
+│       └── telegram/           @mtcute MTProto acts, rate limits, album & voice
 └── services/
-    └── tagger/                 # Optional local CPU ONNX WD-v3 image tagger (127.0.0.1:39100)
+    └── tagger/                 Optional local FastAPI ONNX sticker/image tagger
 ```
 
 ---
@@ -166,12 +233,12 @@ $$C_{\mathrm{sat}} = 2\,\mathrm{rate} + 1.5\,\mathrm{cool} + 2\left(\frac{k_h}{O
 
 ### Prerequisites
 
-- **Node.js 22+** and **pnpm**
-- A **Telegram user account** (MTProto via `@mtcute/node`, not Bot API; obtain `API_ID` / `API_HASH` from [my.telegram.org](https://my.telegram.org/apps))
-- An **OpenAI-compatible LLM endpoint** (`LLM_API_KEY`)
-- **Optional**: [Exa](https://exa.ai/) (`EXA_API_KEY`) for web lookup errands, MiniMax / ElevenLabs (`TTS_PROVIDER`) for voice messages, Python 3.12+ with `uv` for the local `alice-tagger` vision service, and `pm2` for daemon management
+* **Node.js** ≥ 22 and **pnpm** ≥ 9
+* A **Telegram user account** (`API_ID` & `API_HASH` from [my.telegram.org](https://my.telegram.org/apps))
+* An **OpenAI-compatible LLM endpoint** (`LLM_API_KEY`)
+* *Optional*: **Python** ≥ 3.11 + `uv` (for local ONNX sticker tagging in `services/tagger`), **Exa** (`EXA_API_KEY`), and `pm2`
 
-### Setup & First Login
+### Setup & Run
 
 ```bash
 git clone https://github.com/LlmKira/Alice.git
@@ -179,49 +246,34 @@ cd Alice
 pnpm install --frozen-lockfile
 
 cp runtime/.env.example runtime/.env
-# Edit runtime/.env with TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE, LLM_API_KEY,
-# and ALICE_OPERATOR_ID (your numeric Telegram user ID)
+# Fill in TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE, LLM_API_KEY, and ALICE_OPERATOR_ID
 ```
 
-Authorize Telegram interactively once, verify configuration and replay health, then run tests:
+Authenticate once, verify offline journal replay and tests, then launch:
 
 ```bash
 cd runtime
-pnpm login          # Interactive login code / 2FA -> writes session
-pnpm start:check    # Validates config, migrates SQLite, replays journal (no network/LLM calls)
-pnpm -s check       # Typecheck + biome lint + full vitest suite
+pnpm login          # One-time interactive Telegram login
+pnpm start:check    # Dry config + SQLite + replay audit (zero network calls)
+pnpm -s check       # Typecheck + Biome lint + Vitest suite
 ```
 
-### Production Deployment (PM2)
-
-Optional local image tagger (CPU ONNX, keeps images local):
+Start the runtime (and optional local ONNX vision tagger):
 
 ```bash
+# Optional local sticker tagger
 bash services/tagger/setup.sh
-```
 
-Start with PM2 from the repository root:
+# Direct launch
+cd runtime && pnpm start
 
-```bash
+# Or via PM2
 pm2 start ecosystem.config.cjs
 pm2 logs alice-runtime
-pm2 save
-```
-
-Operator commands (send in private chat from `ALICE_OPERATOR_ID`):
-
-```text
-/ops status | pause | resume | cap <usd> | stop
-```
-
-Daily readout from the live journal:
-
-```bash
-cd runtime && pnpm northstar live/alice.db
 ```
 
 ---
 
 ## License
 
-[MIT](LICENSE)
+Released under the [MIT License](LICENSE). Private manuscripts, optimization logs, and benchmark datasets (`scenes/`, `eval-artifacts/`) are withheld to protect user privacy.

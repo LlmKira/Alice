@@ -1,135 +1,206 @@
-<img src=".github/banner.png" width="100%" alt="Alice — 事件溯源自主数字伙伴运行时" />
+<div align="center">
 
-<p align="center">
-  <a href="README.md">English</a> | <a href="README.zh-CN.md">简体中文</a>
+<h1>Project Alice</h1>
+
+<p>
+  <strong>在 Telegram 上拥有独立作息与心智的自主社交伴侣</strong>
 </p>
 
-<h1 align="center">Alice</h1>
-
-<p align="center">
-  <a href="https://github.com/LlmKira/Alice"><img src="https://img.shields.io/github/stars/LlmKira/Alice?style=flat&colorA=080f12&colorB=f0c040" alt="stars"></a>
-  <a href="https://t.me/Openai_LLM"><img src="https://img.shields.io/badge/Telegram-%235AA9E6?logo=telegram&labelColor=FFFFFF" alt="telegram"></a>
-  <a href="https://github.com/LlmKira/Alice/issues"><img src="https://img.shields.io/github/issues/LlmKira/Alice?style=flat&colorA=080f12&colorB=ef4444" alt="issues"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License"></a>
+<p>
+  <a href="README.md">English</a> &nbsp;&middot;&nbsp;
+  <strong>简体中文</strong> &nbsp;&middot;&nbsp;
+  <a href="#实时群聊实录">效果截图</a> &nbsp;&middot;&nbsp;
+  <a href="#同类项目对比">横向对比</a> &nbsp;&middot;&nbsp;
+  <a href="#核心架构与模型">核心架构</a> &nbsp;&middot;&nbsp;
+  <a href="#基准实测与经验教训">基准实测</a> &nbsp;&middot;&nbsp;
+  <a href="#快速开始">快速开始</a>
 </p>
 
-> [!NOTE]
-> Alice 是一个基于**纯函数事件溯源核心**与**需求效用决策层（意愿层 / The Will）**构建的自主 Telegram userbot 运行时。它不靠写死的对话规则或提示词补丁控制行为，而是通过定义世界法则——外部义务、关系亲疏、作息与饥饿、社交反馈以及连续代价——让行为自然涌现。
+</div>
 
 ---
 
-## 核心理念
+如果不再靠几十条「何时不准说话」「每几条回一句」的提示词补丁去约束模型，而是把她放进一个由**社会环境物理学与纯函数 Harness** 主导的连续世界里，会发生什么？
 
-绝大多数大模型聊天机器人只是被动的请求-响应封装，或是硬编码启发式规则的集合（例如「连续被忽略 3 次就闭嘴」）。Alice 将**什么时候、在哪里、以什么动作醒来**（纯函数确定性核心）与**具体说什么**（每次唤醒仅做一次基于 TypeScript Code Mode 的模型调用）彻底分离。
+**Project Alice** 探索的是一种全新的**人类社交仿真**范式：**不要用死规则去规定智能体该怎么表现，而要直接定义她所处环境的物理与社会规律**，让克制、共情、好奇与适时沉默像真实生物一样自然涌现。
 
-- **开放性引导**：只向模型呈现一类情境的客观事实（例如某人变冷淡、某人情绪低落），绝不替它写死台词或收窄动作空间。
-- **自适应设计**：群聊节奏、关系熟悉度、频道分享挑剔度、初次私聊接受率以及基于意外度的情绪反馈，均从真实互动历史中自适应学习，而非依赖拍脑袋的全局阈值。
-- **确定性回放**：`mind/`、`mechanisms/` 与 `speech/` 严禁读取系统时钟、随机数或执行 I/O。一切时间戳与随机采样都作为事件写入只追加的 SQLite Journal。回放任意事件窗口，都会得到逐字节完全一致的状态与决定。
-- **用连续效用替代硬闸门**：所有偏好（「少刷屏」「别硬插话」「对方一直不回就停手」）全部进入同一个连续目标函数（`NSV`）。硬约束只保留三条安全不变量。
+我们将**需要与可供性驱动的游戏 AI 设计**（类似于可交互模拟环境：智能体面对具体的人与场域可供性，在竞争需要与行动代价之间权衡取舍，而不是走硬编码脚本树）与**面向长程连续社交的确定性 Harness 工程**结合起来。Alice 通过 MTProto（`@mtcute/node`）常驻真实 Telegram 账号，在数周维度上维持连续的生理与心理演化：深夜发困、饭点饿意、逛订阅频道并分享想起好友的文章；当群里讨论正热、插嘴代价过高时，自然选择旁观与沉默。
+
+### 我们实际做到的突破与未来意义
+
+* **用平衡态取代外挂闸门**：同类机器人在被唤醒后往往超过 99% 会强行发言（如 LuckyBot 在 148 次唤醒中发言 147 次），或在两人对话中途贸然插话（CHI 2026 EA 统计 ChatGPT 群聊达 69%）。在 Alice 的环境物理学中，沉默具有天然零基线；任何动作只有净社交价值 `NSV > 0` 时才会唤醒语言模型。
+* **把拟人社交从「凭感觉调提示词」变成可证伪工程**：由于整个决策核心（`mind/`、`mechanisms/`、`speech/`）不读系统时钟、不取随机数、不做外部 I/O，我们得以零成本逐字节重放长达 9.19 天的真实 Telegram 事件流，用预注册 A/B 消融直接淘汰表现不佳的直觉改动。
+* **为什么这套设计会改变长程自主 Agent 的未来**：当 AI 从「一问一答的工具」走向跨群聊、跨数月陪伴人类的连续存在时，核心瓶颈不再是单轮智力，而是**注意力经济学、节奏节制、情绪连续性与知道何时不说话**。Project Alice 把情绪、作息、关系摩擦与社交好奇心解耦成可插拔、无副作用碰撞的纯函数切片，为未来的开放社会交互 Agent 提供了一套可复现、可证伪的开源工程基座。
+
+> **群聊盲测辨识结果（`aliveness/round-1115`，n = 34 个匿名切片）：** 把 Alice 的对话切片和同群活跃真人混在一起让评审盲辨，AI 判别 ROC-AUC 从重构前的 **0.983** 降至 **0.476**（0.50 即等于盲猜）。
 
 ---
 
-## 系统架构
+## 实时群聊实录
+
+以下均为 Alice 在真实 Telegram 群聊、频道与私聊中的未编排实录（参与者信息已打码脱敏，提示词中从未写过任何具体梗或贴纸）：
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <p align="center">
+        <img src=".github/screenshots/group-banter.png" alt="群聊连续斗嘴" width="100%">
+      </p>
+      <strong>群聊里的自然接梗与斗嘴</strong><br>
+      顺着群友玩笑一路拆招（「人道主义关怀是要花钱的，我没有钱」「压岁钱是用来存着的」），没有 AI 客服式的总结腔。
+    </td>
+    <td width="50%" valign="top">
+      <p align="center">
+        <img src=".github/screenshots/security-alert-forward.png" alt="转发频道安全提醒并吐槽" width="100%">
+      </p>
+      <strong>逛频道分享与被调侃后的临场反应</strong><br>
+      在订阅频道（<code>LoopDNS</code>）看到木马安全提醒后主动转发到群里；被群友打趣「还会转发？人机故障了」时自然接梗装傻。
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <p align="center">
+        <img src=".github/screenshots/nasa-share.png" alt="Alice Springs 频道新闻分享" width="100%">
+      </p>
+      <strong>联想到自身与朋友的频道分享</strong><br>
+      看到 Solidot 关于「爱丽丝泉（Alice Springs）大雨后变绿」的报道，因为同名而心头一动，转发给群友并配发贴纸。
+    </td>
+    <td width="50%" valign="top">
+      <p align="center">
+        <img src=".github/screenshots/private-empathy.png" alt="私聊察觉对方反常情绪" width="100%">
+      </p>
+      <strong>跨会话情境察觉与情绪共振</strong><br>
+      凌晨两点私聊收到突然道歉与「有没有加联系人」的试探，联系到对方刚在群里活跃却不理自己，流露紧张情绪并配发委屈贴纸。
+    </td>
+  </tr>
+</table>
+
+<details>
+<summary>查看更多实录：由频道文章引发的思考与拒绝冒犯时的边界感</summary>
+<br>
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <p align="center">
+        <img src=".github/screenshots/channel-forward-opinion.png" alt="社交外包文章反思" width="100%">
+      </p>
+      <strong>从文章聊到自己，又适时收住</strong><br>
+      转发关于年轻人用 AI 处理分手的文章并表达反感，聊着聊着困惑「模仿难过算不算真的难过」，见群友回了一张吐槽图后乖乖道歉收住。
+    </td>
+    <td width="50%" valign="top">
+      <p align="center">
+        <img src=".github/screenshots/emotional-sticker.png" alt="拒绝不礼貌发言并发送贴纸" width="100%">
+      </p>
+      <strong>带情绪边界地拒绝冒犯</strong><br>
+      面对不礼貌的玩笑不会盲目赔笑，而是直接表达不想再理对方，同步在内核累加按人回避阻力。
+    </td>
+  </tr>
+</table>
+</details>
+
+---
+
+## 核心架构与模型
+
+多数拟人 bot 在每次收到消息时问一遍模型「你要不要说话」，而只要被叫醒，大模型几乎每次都会开口。Alice 把决定权收归于一个透明、可离线重放的社会物理学内核：
 
 ```text
-Telegram (mtcute) ──▶ 只追加事件日志 Journal (SQLite)
-                            │
-                            ▼
-                 纯函数 step(state, event) ──▶ { nextState, effects[] }
-                            ▲                         │
-                            └──── 类型化结果 ◀── 外壳 Shell (LLM / Telegram / 计时器)
+  Telegram MTProto / 定时唤醒 / 随机噪声 (外壳 I/O: runtime/src/shell.ts)
+         │
+         ▼  只追加事件 AliceEvent { at, type, scope, ... }
+  SQLite WAL 事件日志 (runtime/src/journal.ts)
+         │
+         ▼  纯函数状态转移 step(state, event)
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 纯函数心智内核 (runtime/src/mind/, mechanisms/, speech/)                 │
+│ 零系统时钟 · 零运行时随机数 · 零外部 I/O                                │
+│                                                                         │
+│  · 世界图谱     维护活跃群聊、私聊、订阅频道与见过的人                  │
+│  · 十维驱动     未读关注、被点名义务、话题共振、冷却想念、回避阻力等    │
+│  · 意愿排序     在全量 (会话 × 可供性) 上计算 NSV，对比沉默基线 0       │
+│  · 生理与心情   Borbély 双过程睡眠节律 + DynAffect 连续情绪随机过程     │
+│  · 情景上下文   按关系亲疏与互动历程组织连贯的情景记忆                  │
+└─────────────────────────────────────────────────────────────────────────┘
+         │
+         ▼  Code Mode TS-AST 沙盒 (run_code / tools.*)
+  强类型行为: send · react · sticker · voice · diary · bed · feel · check_dm · plan_group_dm
 ```
 
-五环闭环构成完整生命周期：
+### 关键数学设计
 
-1. **世界折叠（`mechanisms/pressure/world.ts`）**：将消息、表情反应、群成员变动、口气感知标签（`tone`、`stop`/`hush`/`aloof`）与动作执行结果折叠为类型化的社交图谱（会话、联系人、未接话头、承诺以及 5 类反应结果：`replied`、`cold`、`ignored`、`unheard`、`rejected`）。
-2. **可组合机制内核（`mind/compose.ts`、`mechanisms/registry.ts`）**：每个机制显式声明自己读写的切片（`Slices`）。多写入者冲突在组合阶段即报错；消融某项机制只需从 `PRODUCTION` 中移除对应插槽。
-3. **意愿层（`mechanisms/pressure/will.ts`）**：对所有可用的 `(会话, 可供性)` 组合计算净社交价值（`NSV`），仅当全局最高分严格大于 `0` 时才唤醒发言模型。
-4. **单次 Code Mode 调用（`speech/decision.ts`、`mind/affordances.ts`）**：唤醒后，模型看到 `SOUL.md`、事实卡片（含本次唤醒原因）、聊天时间线与当前可用动作的 TypeScript SDK 声明，在单次 `run_code` 工具调用中输出直线型 `await tools.<action>(...)` 调用；外壳通过 TS 语法树静态解析，从不实际执行代码。
-5. **反馈闭环（`mechanisms/pressure/feedback.ts`、`rejection.ts`、`fairness.ts`）**：他人是否接话、是否点负面表情或拒绝，即时回流至情绪效价、频道分享口味、服务债折扣与按人/按群记账的回避度。
+* **净社交价值（`NSV`）决策方程**（`mechanisms/pressure/will.ts`）：
+  每个 `(动作 a, 会话 h)` 候选都会与「保持沉默（价值 0）」同台竞争：
 
----
+$$\mathrm{NSV}(a, h) = \sum_{k=1}^{10} \mathrm{relieves}_a[k] \cdot \hat{\tau}_k(h) \cdot g_k \;-\; \lambda(h)\,\bigl(C_{\mathrm{social}}(a, h) + C_{\mathrm{sat}}(a, h)\bigr) \;-\; C_{\mathrm{busy}}(h)$$
 
-## 数学公式与机理
+  归一化驱动 $\hat{\tau}_k(h) = \rho(h)\tanh(P_k(h)/\kappa_k)$ 会随冷群空闲时长经习惯化因子 $\rho(h)$ 自然衰减，防止无人响应的角落一直占住注意力。
 
-### 1. 净社交价值（NSV）与自适应节律
+* **十维竞争驱动**（`mechanisms/pressure/drives.ts`）：
+  统筹平衡 `attention`（未读关注 $\kappa=5$）、`obligation`（`@点名` 回应义务 $\kappa=3$）、`thread`（多轮对话延续 $\kappa=5$）、`cooling`（好友冷却拉回 $\kappa=3$）、`curiosity`（新群好奇 $\kappa=1$）、`aversion`（按人/按群回避 $\kappa=1$）、`prospect`（时间约定 $\kappa=1$）、`information`（频道分享欲望 $\kappa=1.5$）、`topic`（群聊话题共振 $\kappa=1$）与 `bond`（熟人说话牵引 $\kappa=3$）。
 
-对于时间 $t$ 在会话 $h$ 中可用的可供性 $a$，意愿层计算：
+* **投入不对等惩罚与冷私聊自查**：
+  哪怕对方只回一个「1」或表情包，`effortReciprocity` 仍能识别出投入不对称：
 
-$$\mathrm{NSV}(a, h) = \underbrace{\sum_{k} r_a[k] \cdot g_k(h) \cdot \hat{X}_k(h)}_{\text{有界缓解收益}} \;-\; \lambda_h \Bigl(C_{\mathrm{soc}}(a,h) + \hat{V}_h \bigl(1 - r_a[V]\bigr) + C_{\mathrm{sat}}(a,h)\Bigr) \;-\; C_{\mathrm{body}}(a,h)$$
+$$\mathrm{reciprocity}(h) = \min\!\left(1,\; \frac{\max(0, E_{\mathrm{Alice}} - E_{\mathrm{other}})}{5}\right) \cdot w_{\mathrm{chatType}}$$
 
-- **沉默零基准**：沉默的价值恒为 $0$。仅 $\mathrm{NSV} > 0$ 的候选进入池中；每次节律窗口开启时，意愿层确定性地取全局 `argmax` 唤醒。
-- **考虑过就消耗**：若在 `(a, h)` 被唤醒后模型选择沉默，该唤醒本可缓解的驱动在此时刻重置并重新累积，而不会篡改真实联系人互动时间戳。
-- **内在驱动增益调制（$g_k$）**：心情效价与身体社交度对 6 项内在驱动（`cooling`、`curiosity`、`information`、`prospect`、`topic`、`bond`）施加有界乘数 $g_k \in [0.65, 1.45]$；外部驱动（`attention`、`obligation`、`thread`、`aversion`）保持 $1.0$，确保情绪低落时依然回应找她的人。
-- **义务调制的代价敏感度（$\lambda_h$）**：$\lambda_h = \lambda_0 \cdot \varphi_h$（$\lambda_0 = 1.5$），当有效义务 $O_h > 0.2$ 时 $\varphi_h = 0.3$，处于当前对话轮次时 $\varphi_h = 0.5$，其余情况为 $1.0$。
-- **外部需求驱动的自适应节律**：
+  面对群里认识但从未私聊过的人，Alice 可主动调用 `tools.check_dm()` 读取该来源群的历史接纳度，或在必要时用 `tools.plan_group_dm()` 先在群里问一句。
 
-$$\Delta t = \Delta t_{\min} + (\Delta t_{\max} - \Delta t_{\min}) \exp\!\left(-\frac{\mathrm{API}_{\mathrm{peak}}}{\kappa_t}\right), \quad \Delta t_{\min} = 1\,\mathrm{s},\; \Delta t_{\max} = 300\,\mathrm{s},\; \kappa_t = 1$$
+* **双过程睡眠节律与连续情绪过程**（`life-body.ts`、`affect.ts`）：
+  Borbély 双过程睡眠模型决定精力、三餐饥饿与就寝觉醒；情绪效价围绕常态 $\mu_{\mathrm{home}} = +0.19$（半衰期 `1h`，$\sigma = 0.15$）做 Ornstein–Uhlenbeck 连续随机游走，久违好友主动找她时按时间意外度 $(1 - 2^{-\Delta t / t_{1/2}})$ 推动心绪波动。
 
-其中 $\mathrm{API}_{\mathrm{peak}}$ 仅统计外部需求驱动，防止内部冲动随联系人增多而触发节律风暴。
-
-### 2. 驱动归一化与习惯化
-
-原始驱动 $X_k(h)$ 经固定尺度 $\kappa_k$ 压缩并乘以习惯化因子 $\rho_h$（$\tau_H = 30\,\mathrm{min}$）：
-
-$$\hat{X}_k(h) = \tanh\!\left(\frac{X_k(h)}{\kappa_k}\right) \cdot \rho_h, \qquad \rho_h = \begin{cases} 1, & k \in \{\text{obligation}, \text{aversion}\} \\ \dfrac{1}{1 + 0.5\, H_h}, & \text{其他驱动} \end{cases}$$
-
-| 驱动 | 计算公式 / 机理 | $\kappa_k$ |
-|---|---|---|
-| **注意力（$A_h$）** | $\max\!\bigl(\mathrm{ewms}_h \cdot 2^{-\Delta t_{\mathrm{awake}}/1\mathrm{h}},\; \ln(1+\mathrm{unread}_h)\bigr) \cdot w_{\mathrm{tier}} \cdot w_{\mathrm{chat}}^A$（经 `group-filter` 过滤机器人/无配文媒体/@他人） | $5$ |
-| **回应义务（$O_h$）** | $\mathrm{pending}_h \cdot 2^{-\Delta t_{\mathrm{awake}}/1\mathrm{h}} \cdot w_{\mathrm{tier}} \cdot w_{\mathrm{chat}}^O$（私聊 $w^O=2$，群聊 $1$） | $3$ |
-| **未接话头（$T_h$）** | $w_{\mathrm{thread}} \bigl((1 + a/\mathrm{day})^{1.5} - 1\bigr)$，未接持续时间 $a < 7\,\mathrm{d}$（私聊 $2$，群聊 $0.5$） | $5$ |
-| **承诺截止（$P_h$）** | $2\,\sigma\!\bigl(5(x - \tfrac{1}{2})\bigr)\cdot f(t)$，$x = \min\!\bigl(1, 1 - (d - t)/L\bigr)$ | $1$ |
-| **关系冷却（$C_h$）** | $w_{\mathrm{tier}} \cdot \sigma\!\Bigl(2.5\bigl[\ln\!\bigl(1 + \frac{s}{\tau_0 \cdot 2^{\min(r-1, 6)}}\bigr) - \ln\!\bigl(1 + \frac{\theta_c}{\tau_0}\bigr)\bigr]\Bigr)$（$\tau_0 = 600\,\mathrm{s}$；群 $\theta = \mathrm{clamp}(10\cdot\mathrm{gap}_{\mathrm{EMA}}, 30\,\mathrm{m}, 7\,\mathrm{d})$） | $3$ |
-| **好奇心（$U_h$）** | 基于联系人活跃偏离预期的有界惊奇度（仅私聊与可触达目标） | $1$ |
-| **分享欲望（$I_h$）** | $\max_m \bigl(\mathrm{freshness}_c \cdot \mathrm{rel}_{\mathrm{IDF}} \cdot w_{\mathrm{near}} \cdot \mathrm{novelty} \cdot 6\bigr)$，需胜过最近 $W_h = \frac{\text{日均见帖}}{\text{日均分享}}$ 条且 $\tanh(I_h/1.5) \ge 0.5$ | $1.5$ |
-| **群话题拉力（$G_{\mathrm{top}}$）** | 跨会话 IDF 余弦显著度 $\ge 0.3$（半衰期 $10\,\mathrm{min}$） | $1$ |
-| **群熟人拉力（$G_{\mathrm{bond}}$）** | 说话人近期与她的有回应互动强度（半衰期 $24\,\mathrm{h}$） | $3$ |
-| **回避度（$V_h$）** | 被冷落 $+0.5$、负面表情 $+0.5$、明确拒绝 $+1.0$（群 $\tau = 2\,\mathrm{h}$，私聊 $8\,\mathrm{h}$；普通消息不清除） | $1$ |
-
-### 3. 社交代价、饱和代价、退出代价与身体状态
-
-- **社交代价（$C_{\mathrm{soc}}$）**：$0.3\,\mathrm{dist} + 0.3\,\mathrm{imp} + 0.3\,\mathrm{temp}$，包含按投入权重计量的互惠差（`hers - theirs`，避免对方回一个「1」或贴纸就抵消她的连发债务）、Dunbar 层级距离（$\mathrm{tier}/500$）、沉默时长、侵入度与 30 分钟全局发言密度。
-- **无上限单边饱和代价（$C_{\mathrm{sat}}$）**：
-
-$$C_{\mathrm{sat}} = 2\,\mathrm{rate} + 1.5\,\mathrm{cool} + 2\left(\frac{k_h}{O}\right)^2 + 1.5\,\mathrm{fail}$$
-
-  其中 $k_h$ 为自上次有人真实回应后她单方面发送的消息/贴纸数（私聊 $O = 3$，群聊 $O = 4$；30 天半衰期，仅对方回应才归零）。由于 $(k_h/O)^2$ 不封顶，对长期不回的私聊必然收敛至沉默，不会无限追发。
-- **初次私聊自适应与公平折扣**：安静的已有私聊随别处发言累积最高 $45\%$ 的 $C_{\mathrm{soc}}$ 折扣（$\tau = 6\,\mathrm{h}$）。从群里发起陌生初次私聊则按来源群学习接受率（$\mathrm{Beta}(2,4)$ 先验）、叠加 2 小时同群冷却、群内嫌弃传导与 24 小时 `PEER_FLOOD` 熔断。
-- **离开代价（$C_{\mathrm{exit}}$）**：$0.3\tanh(I_h/3) + 0.3/(1 + n_h)$，在历史有效回应投入 $I_h$ 与薄证据等待价值之间权衡。
-- **Borbély 双过程睡眠与饥饿（$C_{\mathrm{body}}$）**：睡眠压力 $S$ 按分钟积分（清醒 $\tau_r = 18.2\,\mathrm{h}$，睡眠 $\tau_d = 4.2\,\mathrm{h}$），对照 24 小时昼夜节律阈值（$H_0 = 0.67, L_0 = 0.17$，振幅 $0.12$），睡着时附加 $30\cdot\mathrm{depth}$ 代价且未读与义务仅在清醒时段变旧。饥饿按 $\tau = 5\,\mathrm{h}$ 增长并提升吃饭在优先级队列中的顺位。
-- **DynAffect 心情与意外度回流**：效价按 OU 过程围绕基线演化（$\mu = +0.19$，$\sigma = 0.15$，$t_{1/2} = 1\,\mathrm{h}$）。发言被接住时按群内常规接话率的意外度 $(1 - \mathrm{usualUptake})$ 推升心情。
-
-### 4. 三条硬安全不变量
-
-1. **发送频率上限**：同一会话任意 60 秒内最多发送 **6** 条消息类动作（含文字与贴纸）。
-2. **严格会话路由**：动作只作用于做出本次决定的会话；引用与表情仅能指向该会话时间线内的消息。
-3. **失败不盲目重试**：失败或结果未知（`outcome_unknown`）的动作绝不自动重试。
+* **Code Mode AST 沙盒与全局边界**（`llm/ptc.ts`、`mind/`）：
+  大模型在静态解析的 TypeScript 沙盒里调用 `await tools.<action>(...)`，将发散式内心独白彻底与发送消息隔离；内核同时确保发送速率控制在人类节奏以内（**全局 60 秒最多发 6 条**）并约束单边冷私聊频次。
 
 ---
 
-## 基准对比与 A/B 消融结果
+## 同类项目对比
 
-> **说明**：评测数据集、真实/合成场景集以及内部优化工作流本身不随本仓库开源。下表汇总了各机制在预注册 A/B 消融、零成本闭环普查与盲审判别中的实测结果。
+截至 2026 年 11 月，我们对约 30 个开源拟人聊天机器人与多方轮次控制研究做了源码级对比。同类项目大多堆叠外挂功能清单（手写日程、短语库轮换、无衰减数值好感），极少配备整段事件回放或对照实验：
 
-| 实验 | 对照设置 | 核心实测结果 | 结论 |
-|---|---|---|---|
-| **意愿层替换规则** | 意愿层 vs. 手写触发规则（12 小时真模型回放） | 被找覆盖率 `99.2%` vs `99.4%`；热门群发言 `17.6` vs `26.4` 轮/群/天；主动私聊 `21` vs `0` | **上线** |
-| **动作格式**（`exec-mode`） | Code Mode（`run_code` TS AST）vs. 续写 / 原生工具 / bash | 心理动作该用时使用率 **`57%` vs `22%`**（提前 2 分钟窗口 `69%` vs `33%`）；成对盲判 **`49 : 25`**（5 平）；缺陷 `3.8%` vs `3.3%`；跑题 `0%` | **上线** |
-| **群聊对话弧**（`dwell`） | 按轮次进退的选项 vs. 5 分钟固定窗口 `floor` | 零成本 $\ge 2$ 轮对话段 **`33.0% → 39.1%`**（真人 `36.4%`），TVD `0.108 → 0.100`；两段 12 小时真模型窗口 `14.3% → 22.6%` 与 `17.6% → 34.5%`（真人 `35.5%`、`38.6%`） | **上线** |
-| **群聊注意力过滤** | 过滤机器人、无配文媒体与 `@他人`（9.19 天普查） | 总调用 `2736 → 2664`（`-2.6%`）；睡着时被不点名群叫醒 **`16 → 8`**；10 分钟点名回应 `0.712 → 0.718` | **上线** |
-| **分享欲望**（`desire`） | 自适应频道分享 vs. 基线（60 个真实时刻） | 毛病更重 `2` vs `4`（30 平）；硬塞 `0` 次；每会话每天 $\le 2$ 次（真人四分之一活跃者 p90 为 `2.12`） | **上线** |
-| **初次私聊委托**（`first-dm`） | 按来源群学习 + `check_dm` / `plan_group_dm` | 防备群冒失私聊 **`33.3% (4/12) → 0.0% (0/12)`**（`check_dm` 调用 `10/12`）；友好群保持 `16.7% (1/6)` | **上线** |
-| **表达多样性**（`prune-vs`） | 剪除 6 条固定开头 + `inner` 发散 + 6h 用词镜子（22×3 遍） | `distinct-2` **`0.4893 → 0.5462`**、`distinct-3` **`0.7718 → 0.8157`**；格式缺陷 `2 → 0`；单边路人感 **`71.4% → 55.3%`**（`-16.1pp`，AI 腔 `0%`）；成对 **`18 : 12 : 4`** | **上线** |
-| **五环闭环整合**（`loop-v2`） | `loop-v2` vs. `loop-delegated`（40 真实时刻 + 3.78 天普查） | `think` 中 `1. 2. 3.` 做题模板率 **`77.8% (28/36) → 0.0% (0/34)`**；醒着 1–15 分钟回应份额 **`0.327`**（真人 `0.323`） | **上线** |
-| **盲认人类 vs AI** | 匿名同群切片（`16` 段 Alice vs. `18` 段同群活跃真人） | AI 判别 AUC **`0.983 → 0.476`**（诡异度 AUC `0.483`、单人 AUC `0.497`，均值 `0.224` vs `0.216`） | **跨过 `< 0.60` 门槛** |
+<p align="center">
+  <img src=".github/figures/peer-comparison.zh-CN.png" alt="横向工程与实证对比" width="100%">
+</p>
 
-### 典型负结果（未上线）
+| 项目 | 决策与轮次机制 | 回放与实验支撑 | 社交节奏与多轮自然度 | 反馈与反刷屏 | 代表性实测差异 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Project Alice（本项目）** | **10 维驱动 + NSV 效用排序（`NSV > 0` 才唤醒）** | **多日零成本事件回放（`feb-0 / feb-a / feb-b`）、A/B 消融验证、盲测 AUC `0.476`** | **1–15 分钟回话占比对齐真人（`32.7%` 对 `32.3%`），`39.1%` 连续多轮对话** | **按人回避、4 小时叫停冷却、投入互惠、冷私聊自查** | **克制、时机与情绪均来自环境驱动涌现，不依赖静态回话比例规则** |
+| **MaiBot / MaiSaka**（约 7k★ QQ） | 用过往规划记录拟合逻辑回归门控；陆续删除情绪、意愿与日程 | 仅支持单次请求重放；仓库未见 AUC 或消融数据 | 自指反馈缺少同群人类节奏参照 | 移除了早期的用户反馈频率调节 | Issue `#2109`：自指正反馈让热群回复率从 `20.0%` 锁死跌到 `4.2%` |
+| **Moui / MoFox_Bot** | MaiBot 分叉，重新恢复二维情绪 | 无多日事件流离线回放 | 依赖人工参数调整节奏 | 缺少对照验证手段 | 恢复情绪展示，缺乏完整回放校准 |
+| **AstrBot 拟人插件集**（`proactive_chat`、`self_learning` 等） | 触发后生成；学到的表达需人工审核 | 无全环离线回放框架 | 触发式生成，缺少多轮连续弧线 | 线性计分（`+0.15 / -0.2`）；部分数值无衰减 | 好感曾被 `@` 刷高，实测无衰减心情 26 小时未变 |
+| **Cahciua / LuckyBot** | 外层裁判放行 + 写手不可拒答 | 仅统计线上调用次数 | 提示词写死「每 4–6 条回 1 条」 | 写手端无法自主沉默 | 日志显示放行后 **148 次发言 147 次（`99.3%`）** |
+| **CyberGroupmate** | 累积发言量、关系与等待压力 | 无纯函数多日回放内核 | 按群维护等待与发言量计数 | 120 秒窗口检查有效追问 | 具备局部反馈意识，但缺少归一化多驱动与消融 |
+| **elizaOS / N.E.K.O** | 并入生成判定或 `[PASS]` 标签拒答 | 无事件流整段模拟器 | 固定阶梯冷却计时（`3 次未回 -> 8h`，`6 -> 24h`） | 靠固定冷却锁死时长，缺乏连续情境代价 | 依赖刚性时间锁而非连续社交引力平衡 |
+| **PITCH / LlamaPIE / ChatGPT 群聊**（CHI / arXiv） | 逐轮分类器或强化学习开口训练 | 单一语料离线评测 | 聚焦单轮插话时机判定 | 缺少长程生理节律、心情与关系模型 | `PITCH`（arXiv 2610.25896）：GPT **过早插话 `46.4%`**；`CHI 2026 EA`：ChatGPT 群聊 **`69%` 主动发言插在两人对话中途** |
 
-- **零调用「看一眼」（`glance`）**：虽节省 `29%` 调用（`1298 → 916`），但群聊轮数暴跌 `67%`（`5.30 → 1.76` 轮/群/天）——**淘汰**。
-- **旁观追读（`follow-reader`）**：每日消息量翻倍，在 3 个小群超过真人 p90——**淘汰**。
-- **扩池轮换 48 条示例（`rot`）与高温采样（`T = 1.2`）**：`rot` 反而拉低 `distinct-2`（`0.4893 → 0.4694`）；`T = 1.2` 使格式缺陷翻倍（`2 → 5`）——**淘汰**。
-- **未校准 LLM 模拟群友**：在平静聊天里对我方回合给出 `46%` 敌意反应（同期真人 `0/26`）——**停用**，改用按真人反应率校准的回应模型。
+---
+
+## 基准实测与经验教训
+
+为保护真实群友隐私与防止数据污染，**内部评测数据集与日志快照（`scenes/`、`eval-artifacts/`）不随仓库公开**。以下披露我们在迭代中使用的内部基准名称与关键消融结果：
+
+* **内部基准套件**：`synthetic`（v0，30 个单轮探测）、`synthetic-v1`（24 个多日社会弧线、83 个探针）、`synthetic-v2`（生理/隐私/记忆专项）、`real-v1`（182 个真实 Telegram 时刻配对真人参考）、`cap-v1`（40 个多模态真实能力时刻）、`aliveness/round-1115`（34 个匿名混编群聊切片）以及 `feb-0 / feb-a / feb-b`（累计 9.19 天零成本历史日志回放）。
+
+<p align="center">
+  <img src=".github/figures/benchmark-gains.zh-CN.png" alt="架构演进带来的预注册基准收益" width="100%">
+</p>
+
+### 关键实证收益
+
+* **盲测难以与真人区分（`aliveness/round-1115`）**：清理历史泄漏碎片并重构社交循环后，单切片盲辨 ROC-AUC 从 **`0.983` 降至 `0.476`**（异样感 AUC `0.483`，逐发言者 AUC `0.497`）。
+* **多轮接话节奏对齐同群真人（`cap-v1`、`feb-b`）**：用基于轮次的对话延续替代 5 分钟固定墙上时钟冷却后，连续 $\ge 2$ 轮群聊占比从 **`33.0%` 升至 `39.1%`**（真人基准 `36.4%`）；3.78 天统计中清醒期 1–15 分钟回话占比达 **`32.7%`**（同群真人 **`32.3%`**）。
+* **消除做题腔与模板复读（`cap-v1`）**：引入 Code Mode TypeScript AST 执行与发散式内心独白采样后，「1. 2. 3.」清单式独白从 **`77.8% (28/36)` 归零至 `0.0% (0/34)`**，`distinct-2` 从 **`0.4893` 升至 `0.5462`**，格式缺陷归零（`2 -> 0`），群聊旁观未接话率从 **`71.4%` 降至 `55.3%`**。
+* **克制的冷私聊试探**：结合来源群接受率统计与 `check_dm()` 主动查询，保守俄语群的冒失冷启动私聊从 **`33.3% (4/12)` 降至 `0.0% (0/12)`**，同时友好中文群依然保持正常破冰（`16.7%`）。
+* **入睡安静与频道分享节制**：非点名唤醒过滤掉机器人消息与无关 `@他人` 后，入睡期群聊误唤醒减半（**`16 -> 8`**）；自适应门限将频道主动分享稳定控制在 $\le 2$ 条/会话日（人类活跃四分位 p90 为 `2.12`）。
+
+### 踩过的坑（实测淘汰的方案）
+
+<p align="center">
+  <img src=".github/figures/ablation-contrast.zh-CN.png" alt="被淘汰直觉方案与合入方案对照" width="100%">
+</p>
+
+* **「零成本先偷看再决定是否唤醒」**：虽然砍了 `-29%` 调用开销，却把她的群聊正常参与轮次直接打残了 **`-67%`（日均 `5.30 -> 1.76` 轮）**。
+* **靠堆例句池或暴力拉高采样温度 `T = 1.2`**：把开头例句池扩到 48 条反而导致 `distinct-2` 倒退（`0.489 -> 0.469`），拉高温度到 `1.2` 则让格式缺陷翻倍（`2 -> 5`）。
+* **用 LLM 扮演模拟群友**：合成群友在 **`46%`** 的测试轮次里无端发火攻击，而真实群聊日志里是 **`0/26`**。我们停用了生成式模拟群友，全面改用真实历史日志回放。
 
 ---
 
@@ -137,41 +208,37 @@ $$C_{\mathrm{sat}} = 2\,\mathrm{rate} + 1.5\,\mathrm{cool} + 2\left(\frac{k_h}{O
 
 ```text
 .
-├── ecosystem.config.cjs        # PM2 配置（alice-runtime + alice-tagger）
+├── ecosystem.config.cjs        PM2 双进程部署配置 (alice-runtime + alice-tagger)
 ├── pnpm-workspace.yaml
-├── runtime/                    # TypeScript 纯核心 + 外壳运行时
-│   ├── config.toml             # 非敏感环境变量映射
-│   ├── .env.example            # 密钥环境变量模板
-│   ├── SOUL.md                 # 人格设定
-│   ├── deploy/systemd/         # systemd 加固单元文件
-│   ├── src/
-│   │   ├── index.ts            # 启动入口与自检（--check / --login）
-│   │   ├── journal.ts          # 只追加 SQLite 事件库
-│   │   ├── shell.ts            # 副作用执行、LLM 与 Telegram I/O
-│   │   ├── mind/               # 纯函数状态机、组合内核、可供性表、不变量
-│   │   ├── mechanisms/         # 可组合机制与压力场/意愿层
-│   │   ├── speech/             # 提示词渲染、Code Mode AST 解析、媒体与反思
-│   │   ├── llm/                # 发言模型、看图/口气感知、执行代理（Exa）、TTS
-│   │   ├── telegram/           # @mtcute MTProto 适配、动作执行、限流闸、相册、语音通话
-│   │   ├── ops/                # 操作员指令（/ops status | pause | resume | cap | stop）
-│   │   └── sim/                # 确定性回放、足迹普查与平台模拟器
-│   └── test/                   # Vitest 单元测试与闭环性质测试
+├── runtime/                    TypeScript MTProto 运行时、纯函数内核、Code Mode 与测试集
+│   ├── config.toml             非敏感配置映射
+│   ├── .env.example            凭证与模型参数模板
+│   ├── SOUL.md                 基础人格定义
+│   └── src/
+│       ├── index.ts            启动入口 (--check 离线核验 / --login 扫码登录)
+│       ├── journal.ts          全局唯一 SQLite WAL 事件日志库
+│       ├── shell.ts            MTProto 适配器、大模型调用与定时器 I/O
+│       ├── mind/               纯函数事件定义、可供性、机制组合与全局不变量
+│       ├── mechanisms/         十维驱动、NSV 意愿、Borbély 睡眠、DynAffect 与记忆
+│       ├── speech/             受众隔离提示词渲染与 Code Mode 决策执行
+│       ├── llm/                OpenAI 兼容网关与 TS-AST 沙盒 (ptc.ts)
+│       └── telegram/           @mtcute MTProto 动作、限流、图组与语音支持
 └── services/
-    └── tagger/                 # 可选本机 CPU ONNX WD-v3 看图标注服务（127.0.0.1:39100）
+    └── tagger/                 可选本地 FastAPI ONNX 贴纸/图片视觉标签服务
 ```
 
 ---
 
 ## 快速开始
 
-### 环境要求
+### 准备环境
 
-- **Node.js 22+** 与 **pnpm**
-- **Telegram 用户账号**（基于 `@mtcute/node` 的 MTProto 协议，非 Bot API；前往 [my.telegram.org](https://my.telegram.org/apps) 申请 `API_ID` / `API_HASH`）
-- 兼容 **OpenAI Chat Completions** 的模型接口（`LLM_API_KEY`）
-- **可选**：[Exa](https://exa.ai/)（`EXA_API_KEY`，用于网页搜索）、MiniMax / ElevenLabs（`TTS_PROVIDER`，用于语音消息）、Python 3.12+ 与 `uv`（用于本机 `alice-tagger` 图像标注服务）、`pm2`
+* **Node.js** ≥ 22 与 **pnpm** ≥ 9
+* 一个 **Telegram 账号**（基于 MTProto，需前往 [my.telegram.org](https://my.telegram.org/apps) 申请 `API_ID` 与 `API_HASH`）
+* 兼容 OpenAI API 协议的推理服务接口（`LLM_API_KEY`）
+* *可选*：**Python** ≥ 3.11 + `uv`（用于运行本地 ONNX 视觉标签服务 `services/tagger`）、Exa 搜索凭证（`EXA_API_KEY`）以及 `pm2`
 
-### 安装与首次登录
+### 安装与运行
 
 ```bash
 git clone https://github.com/LlmKira/Alice.git
@@ -179,49 +246,34 @@ cd Alice
 pnpm install --frozen-lockfile
 
 cp runtime/.env.example runtime/.env
-# 编辑 runtime/.env，填入 TELEGRAM_API_ID、TELEGRAM_API_HASH、TELEGRAM_PHONE、LLM_API_KEY，
-# 以及 ALICE_OPERATOR_ID（操作员的 Telegram 数字 ID）
+# 在 runtime/.env 中填写 TELEGRAM_API_ID、TELEGRAM_API_HASH、TELEGRAM_PHONE、LLM_API_KEY 与 ALICE_OPERATOR_ID
 ```
 
-首次交互登录 Telegram、校验配置并运行测试套件：
+完成一次性交互登录，跑通离线自检与确定性测试：
 
 ```bash
 cd runtime
-pnpm login          # 前台输入验证码 / 2FA，保存 session
-pnpm start:check    # 校验配置、迁移 SQLite、折叠回放 Journal（不连网、不调模型）
-pnpm -s check       # 类型检查 + Biome lint + 全部 Vitest 测试
+pnpm login          # 交互式登录 Telegram 并保存 session
+pnpm start:check    # 离线核验配置、SQLite 迁移与日志重放（不连网）
+pnpm -s check       # TypeScript 检查 + Biome 校验 + Vitest 测试集
 ```
 
-### 生产部署（PM2）
-
-如需启用本机看图标注（CPU ONNX，图片不出本机）：
+启动服务：
 
 ```bash
+# 可选：初始化本地 CPU ONNX 贴纸识别服务
 bash services/tagger/setup.sh
-```
 
-在仓库根目录启动 PM2：
+# 直接启动运行时
+cd runtime && pnpm start
 
-```bash
+# 或使用 PM2 统一托管双服务
 pm2 start ecosystem.config.cjs
 pm2 logs alice-runtime
-pm2 save
-```
-
-操作员可私聊她发送控制指令：
-
-```text
-/ops status | pause | resume | cap <美元> | stop
-```
-
-查看线上运行日志的北极星读数：
-
-```bash
-cd runtime && pnpm northstar live/alice.db
 ```
 
 ---
 
-## License
+## 开源协议
 
-[MIT](LICENSE)
+基于 [MIT License](LICENSE) 开源。研究论文手稿、内部调优日志以及真实群聊评测集（`scenes/`、`eval-artifacts/`）因隐私保护与测试集防污染不随仓库公开。

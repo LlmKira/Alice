@@ -1,5 +1,8 @@
 # Runtime data
 /data/
+runtime/live/
+runtime/eval-artifacts/
+runtime/scenes/
 
 # Prompt snapshot logs (ALICE_PROMPT_LOG=true)
 runtime/prompt-logs/
@@ -19,9 +22,6 @@ runtime/eval-dump-*/
 runtime/eval-ablation-*/
 runtime/.eval-cache.json
 
-# Test data (real Telegram exports — personal data, never commit)
-simulation/testdata/
-
 # Environment
 .env
 .env.*
@@ -31,31 +31,19 @@ simulation/testdata/
 node_modules/
 dist/
 
-# Bun
+# SQLite & sessions
 *.session*
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
-bun.lock
 
 # Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
-
-# LaTeX build artifacts
-*.aux
-*.bbl
-*.blg
-*.log
-*.out
-*.toc
-*.fls
-*.fdb_latexmk
-*.synctex.gz
-texput.log
+services/tagger/models/
 
 # IDE
 .idea/
@@ -63,22 +51,11 @@ texput.log
 *.swp
 *.swo
 
-# Claude Code
-.claude/
-
 # Error logs
 *.log
-!simulation/**/*.log
 
 # Database backups (运行时产物)
 runtime/*.db.bak-*
-
-# Simulation output (生成的图表，不入 git)
-simulation/output/
-simulation/experiments/figures/
-
-# Conversation exports
-conversation-*.txt
 
 # OS
 .DS_Store
