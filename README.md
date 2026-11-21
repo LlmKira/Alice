@@ -276,4 +276,4 @@ pm2 logs alice-runtime
 
 ## License
 
-Released under the [MIT License](LICENSE). Private manuscripts, optimization logs, and benchmark datasets (`scenes/`, `eval-artifacts/`) are withheld to protect user privacy.
+Released for academic research, experimentation, and personal non-commercial use under the [PolyForm Noncommercial License 1.0.0](LICENSE) (`Copyright (c) 2026 LLM Kira`). Commercial usage is not permitted without a separate license. Research manuscripts, optimization logs, and benchmark datasets (`scenes/`, `eval-artifacts/`) are withheld to protect user privacy.

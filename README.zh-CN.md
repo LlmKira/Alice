@@ -276,4 +276,4 @@ pm2 logs alice-runtime
 
 ## 开源协议
 
-基于 [MIT License](LICENSE) 开源。研究论文手稿、内部调优日志以及真实群聊评测集（`scenes/`、`eval-artifacts/`）因隐私保护与测试集防污染不随仓库公开。
+本项目基于 [PolyForm Noncommercial License 1.0.0](LICENSE) 发布（`Copyright (c) 2026 LLM Kira`），允许用于学术研究、个人学习与非商业用途，未经授权禁止任何商业使用。研究论文手稿、内部调优日志以及真实群聊评测集（`scenes/`、`eval-artifacts/`）因隐私保护与测试集防污染不随仓库公开。
