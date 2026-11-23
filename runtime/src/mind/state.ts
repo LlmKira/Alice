@@ -16,7 +16,7 @@ export const DROPPED_KEPT = 3;
  * 她刚才想发、因为一分钟连发上限没发出去的一条：failures 机制在提示词里说给她听。
  * 以前它只活在发言结果的丢弃里，她不知道自己想说的话没出去（PLAN #38）。
  */
-export interface DroppedSend {
+interface DroppedSend {
   at: number;
   act: Act;
 }
@@ -25,7 +25,7 @@ export interface TimelineEntry {
   at: number;
   messageId: string;
   /** Alice 自己为 null。 */
-  /** isBot：Telegram 标着的机器人账号（群管、签到）；它们不是在跟她说话的人。 */
+  /** isBot：平台标着的机器人账号（群管、签到）；它们不是在跟她说话的人。 */
   sender: { id: string; name: string; isBot?: true } | null;
   text: string | null;
   contentType: string;
@@ -46,7 +46,7 @@ export const PATIENCE_CAP_MS = 60_000;
  * waking：叫醒她、还没轮到她想的那条消息。等完（或这次想完）真正开始想时，拿它再问一次各机制，
  * 这中间她的处境可能变了（比如她刚去睡了）。她自己办的事的结果叫醒她时是 null。
  */
-export type Mind =
+type Mind =
   | { mode: "idle" }
   | {
       mode: "waiting";
@@ -104,7 +104,7 @@ export function onTimeline(chat: Pick<ChatState, "timeline">, at: number): boole
   return first !== undefined && at >= first.at;
 }
 
-/** 一个还什么都没有的会话（状态从 Journal 折叠，不持久化，所以没有"旧数据缺字段"的情况）。 */
+/** 一个还什么都没有的会话（状态从 Journal fold，不持久化，所以没有"旧数据缺字段"的情况）。 */
 export function emptyChat(scope: string, chatType: ChatType, member: boolean): ChatState {
   return {
     scope,
@@ -163,7 +163,7 @@ export interface AliceState {
   arms?: Readonly<Record<string, ArmState>>;
 }
 
-export interface ArmState {
+interface ArmState {
   arm: ArmName;
   candidate: string;
   since: number;

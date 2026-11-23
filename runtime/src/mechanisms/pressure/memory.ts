@@ -1,7 +1,7 @@
 /**
  * 她自己记下的东西，作为世界图的一部分（论文 §2 的 fact 节点与 knows 边、§3 带截止时间的线程）：
  * 关于某人的事实、她答应或打算做的事、她自己跟着的事（心情在 affect.ts）。全部只从事件（反思的结果、她写下的
- * 打算）确定性地折叠，时间只来自事件，所以删掉派生状态后能从 Journal 原样重建。
+ * 打算）确定性地 fold，时间只来自事件，所以删掉派生状态后能从 Journal 原样重建。
  *
  * 取自 2 月（tag archive/feb-2026-02）的写法与修正：
  * - 事实（relationships remember）：同一件事再记一次是强化（稳定性 ×1.2），每人有上限、淘汰可检索性最低的。
@@ -66,7 +66,7 @@ export interface FactOrigin {
   private?: true;
 }
 
-export type Outcome = "done" | "renewed" | "expired";
+type Outcome = "done" | "renewed" | "expired";
 
 /** 她自己答应或打算做的一件事。 */
 export interface Commitment {
@@ -110,7 +110,7 @@ export function keyOf(text: string): string {
 // ── 事实 ─────────────────────────────────────────────────────────
 
 /** 可检索性 R = (1 + 天数/(9S))^d（2 月 retrievability，FSRS 形式）。 */
-export function retrievability(fact: Fact, now: number): number {
+function retrievability(fact: Fact, now: number): number {
   const days = Math.max(0, now - fact.lastAt) / DAY;
   return (1 + days / (9 * fact.stability)) ** FACT_DECAY_D;
 }
@@ -169,8 +169,7 @@ export function rememberFact(
 /** 群本身作为事实的主体（"这个群在准备考研"）。 */
 export const chatSubject = (scope: string) => `chat:${scope}`;
 
-// ── 承诺与打算 ───────────────────────────────────────────────────
-
+/** ── 承诺与打算 ─────────────────────────────────────────────────── */
 export function makeCommitment(
   act: { what: string; when: string | null },
   at: number,
@@ -320,7 +319,7 @@ export function consider(state: Commitments, at: number): Commitments {
 
 /**
  * 说了钟点的事到点了，像她给自己定的闹钟（2 月 schedule_task 的定时；"十分钟后提醒你关火"这种，压力慢慢涨
- * 赶不上：她刚说过话，再开口的饱和代价让意愿层晚了 6–11 分钟才叫醒她，eval-artifacts/expression）。
+ * 赶不上：她刚说过话，再开口的 saturation cost 让意愿层晚了 6–11 分钟才叫醒她，eval-artifacts/expression）。
  * 只响一次：响过之后她在这里想过一次（决定了或调用失败）就算响过；PROSPECT_ALARM 之内没机会响就不再响。
  * 叫醒之后做不做、怎么说由她定。
  */

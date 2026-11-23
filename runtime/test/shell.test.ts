@@ -7,6 +7,7 @@ import type { MessageReceived } from "../src/mind/events.js";
 import { Failed } from "../src/mind/failure.js";
 import type { Mechanism } from "../src/mind/mechanism.js";
 import { createFold, type Folded, Shell, type ShellPorts } from "../src/shell.js";
+import type { SpeechFormat } from "../src/speech/decision.js";
 import type { SpeechPrompt } from "../src/speech/prompt.js";
 import { TelegramActionError } from "../src/telegram/errors.js";
 import { modelReply, says } from "./model-reply.js";
@@ -38,6 +39,7 @@ function harness(options: {
   folded?: Folded;
   query?: ShellPorts["query"];
   mechanisms?: readonly Mechanism[];
+  speechOptions?: { format?: SpeechFormat; concisePeople?: boolean };
 }) {
   const active = options.mechanisms ?? mechanisms;
   let now = T0;
@@ -95,6 +97,9 @@ function harness(options: {
     active,
     "你是 Alice。",
     options.folded ?? createFold(active).result(),
+    10_000,
+    null,
+    options.speechOptions,
   );
   return {
     shell,
@@ -308,7 +313,7 @@ describe("shell", () => {
   });
 
   it("records what she notes to herself without Telegram, and remembers it after a restart", async () => {
-    const rest = byName(["closeness", "examples", "patience"]);
+    const rest = byName(["patience"]);
     const withMemory = [createPressure(affordances, { memory }), ...rest];
     const h = harness({
       mechanisms: withMemory,
@@ -334,7 +339,7 @@ describe("shell", () => {
       "message.sent",
     ]);
 
-    // 重启：从日志折叠出同样的世界，下一次开口时她还记得。
+    // 重启：从日志 fold 出同样的世界，下一次开口时她还记得。
     const fold = createFold(withMemory);
     for (const event of h.journal) fold.feed(event);
     expect(fold.result().state).toEqual(h.shell.current);
@@ -449,6 +454,37 @@ describe("shell", () => {
     });
     h.shell.start();
     expect(h.journal.map((e) => e.type)).toEqual(["ponder.failed"]);
+    expect(h.shell.current.pondering).toBeNull();
+    await h.shell.stop();
+  });
+
+  it("dispatches ponder.failed when a live ponder call fails, so pondering never deadlocks", async () => {
+    const group = "telegram:-7";
+    const h = harness({
+      model: async (prompt) => {
+        if (prompt.responseFormat) throw new Error("network: ECONNRESET");
+        return modelReply([]);
+      },
+    });
+    const named = (i: number): MessageReceived => ({
+      type: "message.received",
+      at: T0 + i * 1_000,
+      scope: group,
+      chatType: "group",
+      messageId: `f${i}`,
+      senderId: "7",
+      senderName: "莉莉丝",
+      text: "Alice 你看你的日志",
+      contentType: "text",
+      replyToMessageId: null,
+      directed: true,
+    });
+    for (let i = 0; i < 4; i++) h.shell.dispatch(named(i));
+    await settle();
+    h.advance(10 * 60_000);
+    h.shell.dispatch({ type: "clock.tick", at: T0 + 10 * 60_000 });
+    await settle();
+    expect(h.journal.some((e) => e.type === "ponder.failed")).toBe(true);
     expect(h.shell.current.pondering).toBeNull();
     await h.shell.stop();
   });
@@ -686,5 +722,22 @@ describe("shell", () => {
       h.journal.filter((e) => e.type === "act.done" && e.act.kind === "delegate"),
     ).toHaveLength(1);
     expect(h.sends.map((s) => s.text)).toEqual(["下一句是你来过，年华被传说"]);
+  });
+
+  it("forwards concisePeople into native mode initial prompts", async () => {
+    const h = harness({
+      speechOptions: { format: "native", concisePeople: true },
+      model: async () =>
+        JSON.stringify({
+          content: "",
+          calls: [{ name: "say", arguments: JSON.stringify({ text: "在呢" }) }],
+        }),
+    });
+    h.shell.dispatch(message());
+    h.fireTimer();
+    await settle();
+    expect(h.prompts).toHaveLength(1);
+    expect(h.prompts[0]?.user).not.toContain("手头没记着以前的具体往事");
+    expect(h.sends.map((s) => s.text)).toEqual(["在呢"]);
   });
 });

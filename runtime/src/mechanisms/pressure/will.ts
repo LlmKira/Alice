@@ -1,13 +1,14 @@
 /**
- * 意愿层：在所有（目标会话 × 可供性）上按软效用排序（论文 §4 Eq nsv），节律到点时取 NSV 最高的那个。
+ * 意愿层：在所有（目标会话 × affordance）上按软效用排序（论文 §4 Eq nsv），节律到点时取 NSV 最高的那个。
  * 不做 Boltzmann 抽样：纯函数核心里没有随机数，取最高分让回放确定；多样性来自环境（考虑过就消耗）。
  *   NSV(a, h) = Σ_k relieves_a[k]·τ̂_k(h) − λ(h)·(C_social(a, h) + C_sat(a, h))
  * NSV ≤ 0 的候选不进池，全都 ≤ 0 时什么都不做（论文 Axiom V）；所以没有任何事后闸门，
- * 约束都在目标函数里（ADR-136 anti-windup）。这里只读可供性的声明，不为具体动作写分支。
+ * 约束都在目标函数里（ADR-136 anti-windup）。这里只读 affordance 的声明，不为具体动作写分支。
  * 声部（论文 §4.1–4.4）不决定动作，只说明此刻是哪种需要在驱动：它是人格面向的输入，也是诊断。
  */
 import { type ActKind, memberAfter, offers } from "../../mind/affordances.js";
 import type { ChatType } from "../../mind/events.js";
+import { platformOf } from "../../mind/platform.js";
 import { withheldBy } from "../scene-facts.js";
 import type { ChatView, WillAffordance } from "./affordances.js";
 import {
@@ -72,8 +73,6 @@ import {
   type World,
 } from "./world.js";
 
-export { VOICES, type Voice } from "./drives.js";
-
 /** 驱动主要属于哪个声部：驱动表里权重最大的那个（P5 同时算社交，权重小一些）。 */
 function voiceOf(k: DriveKey): Voice {
   const w = DRIVE_SPEC[k].voice;
@@ -109,7 +108,7 @@ export interface Intention {
   voice: Voice;
   relief: number;
   socialCost: number;
-  /** socialCost 里对别人的打扰那一部分（C_social：互惠、关系距离、侵入度、她手上多忙），不含睡眠、回避这些她自己的状态。 */
+  /** socialCost 里对别人的打扰那一部分（C_social：互惠、关系距离、intrusiveness、她手上多忙），不含睡眠、回避这些她自己的状态。 */
   imposition: number;
   saturation: SaturationCost;
   lambda: number;
@@ -117,7 +116,7 @@ export interface Intention {
 }
 
 /** 离开的机会成本（params.ts EXIT）：走了会丢掉的回应与承诺，加上证据薄时等待的价值。 */
-export function exitCost(chat: ChatNode, now: number, on: DriveTerms = ALL_TERMS): number {
+function exitCost(chat: ChatNode, now: number, on: DriveTerms = ALL_TERMS): number {
   const answered = chat.receptions
     .filter((r) => r.kind === "replied" || r.kind === "taken")
     .reduce((a, r) => a + 2 ** (-(now - r.at) / EXIT.halfLife), 0);
@@ -131,7 +130,7 @@ export interface ChatReading {
   chatType: ChatType;
   tier: Tier;
   raw: Drives;
-  /** τ̂_k，已乘习惯化（义务豁免）。 */
+  /** τ̂_k，已乘 habituation（义务豁免）。 */
   normalized: Drives;
   /** 1 − ρ_H。 */
   habituation: number;
@@ -175,7 +174,7 @@ function weighted(v: Voice, n: Drives, extra = 0, extraWeight = 0): number {
  * 声部相关度 R_v（ADR-181）：勤勉、好奇、社交是驱动表里各自驱动的加权平均（好奇另加全局好奇心），
  * 和 Intention.voice（贡献最大的驱动的声部）用同一张表。
  */
-export function voiceRelevance(
+function voiceRelevance(
   n: Drives,
   raw: Drives,
   curiosity: number,
@@ -197,28 +196,28 @@ export function voiceRelevance(
 }
 
 /** 声部 softmax，自适应温度（论文 Eq softmax、adaptive-tau）。不加噪声：纯函数里没有随机数。 */
-export function voiceSoftmax(relevance: Record<Voice, number>): Record<Voice, number> {
+function voiceSoftmax(relevance: Record<Voice, number>): Record<Voice, number> {
   const loud = VOICES.map((v) => PERSONALITY[v] * relevance[v]);
   const tau = VOICE_TAU_MIN + (VOICE_TAU_MAX - VOICE_TAU_MIN) / (1 + VOICE_TAU_C * std(loud));
   const probs = softmax(loud, tau);
   return Object.fromEntries(VOICES.map((v, i) => [v, probs[i] as number])) as Record<Voice, number>;
 }
 
-export function argmaxVoice(p: Record<Voice, number>): Voice {
+function argmaxVoice(p: Record<Voice, number>): Voice {
   return VOICES.reduce((best, v) => (p[v] > p[best] ? v : best), VOICES[0] as Voice);
 }
 
 /** C_sat（论文 Def saturation-cost，ADR-136 方案 A）：执行约束作为连续代价进入目标函数。 */
-export function saturation(
+function saturation(
   chat: ChatNode,
   tier: Tier,
   obliged: boolean,
   burst: boolean,
   now: number,
-  /** 她还在这段对话里（turn.ts inFloor）：接着说不是新开话头，不收主动开口的冷却。 */
+  /** 她还在这段对话里（turn.ts inDwell）：接着说不是新开话头，不收主动开口的冷却。 */
   continuing = false,
 ): SaturationCost {
-  // 四项都只对算作消息的可供性（burst）收：频率、冷却、连发计的是她发消息的节奏；失败（沉默、发不出去、
+  // 四项都只对算作消息的 affordance（burst）收：频率、冷却、连发计的是她发消息的节奏；失败（沉默、发不出去、
   // 被拉黑）罚的是再发一条，不罚离开——总被拒正是离开的理由（L2，pressure-properties）。反复为同一件事
   // 醒来由"考虑过就消耗"管（consideredAt、stayedAt）。
   const cap = obliged ? SAT.rateCapObliged : SAT.rateCap;
@@ -318,7 +317,7 @@ export function readChat(
   };
 }
 
-/** 这个动作对每个驱动的期望缓解（乘折扣之前）：relieves_a[k]·τ̂_k，回避按离开的冲动重新长起的程度打折。 */
+/** 这个动作对每个驱动的期望缓解（乘折扣之前）：relieves_a[k]·τ̂_k，回避按离开的冲动重新长起的程度折算。 */
 export function reliefTerms(
   chat: ChatNode,
   reading: ChatReading,
@@ -337,7 +336,7 @@ export function reliefTerms(
   );
 }
 
-/** 一个 (会话, 可供性) 候选的净社交价值。 */
+/** 一个 (会话, affordance) 候选的净社交价值。 */
 export function intention(
   world: World,
   reading: ChatReading,
@@ -358,8 +357,8 @@ export function intention(
   // λ = λ0·φ(Ω, ψ)：被点名时对代价不那么敏感，轮到她时次之（论文 Eq lambda-modulation、phi-obligation）。
   const obliged = reading.obligation > OBLIGATION_THETA;
   const continuing = policy.continuing(chat, now);
-  const lambda =
-    policy.lambda0 * (obliged ? PHI_DIRECTED : isTurn(chat) || continuing ? PHI_TURN : 1);
+  const baseLambda = policy.platformLambda?.[platformOf(reading.scope)] ?? policy.lambda0;
+  const lambda = baseLambda * (obliged ? PHI_DIRECTED : isTurn(chat) || continuing ? PHI_TURN : 1);
   const intrusive =
     affordance.intrusiveness[chat.chatType][reading.solicited ? "solicited" : "unsolicited"];
   const sat = saturation(chat, reading.tier, obliged, Boolean(affordance.posts), now, continuing);
@@ -398,10 +397,10 @@ export function intention(
 }
 
 /**
- * 世界图里一个会话给可供性的视图（和核心状态的 chatView 同一个契约）。世界图不记她看过什么、交出去的事、
+ * 世界图里一个会话给 affordance 的视图（和核心状态的 chatView 同一个契约）。世界图不记她看过什么、交出去的事、
  * 时间线上的消息，这几项给空：靠它们才可用的行（发图、改消息、复读、群里发语音）在意愿层里不可用。
  */
-export function chatViewOf(c: ChatNode): ChatView {
+function chatViewOf(c: ChatNode): ChatView {
   return {
     chatType: c.chatType,
     member: c.member,
@@ -414,6 +413,8 @@ export function chatViewOf(c: ChatNode): ChatView {
   };
 }
 
+export { platformOf };
+
 /**
  * 意愿层的全部可变项：压力场的各样东西（feature.ts WillTerms）组合出来的，加上 λ0 和层级来源。
  * 意愿层只读它，不认识任何一样具体的东西。
@@ -421,17 +422,21 @@ export function chatViewOf(c: ChatNode): ChatView {
 export interface WillPolicy extends WillTerms {
   /** 社交代价敏感度 λ0（敏感度扫描时覆盖；生产用 params.ts 的 LAMBDA0）。 */
   lambda0: number;
+  /** 可选按平台覆盖 λ0（如 { qq: 0.85 }），未列平台沿用 lambda0。 */
+  platformLambda?: Readonly<Record<string, number>>;
   tiers?: TierLookup;
   /**
    * 这个会话里有机制提供的能力（登记表 gated 的行只有这时才算她能做）：和发言提示里给她的是同一个判断，
    * 意愿层不为她做不了的事叫醒她。只知道压力场自己提供的那几样：别的机制提供的 gated 行（语音、改消息、
    * 查一下）现在都不缓解任何驱动，不进意愿层。
    */
-  provided(scope: string, world: World, now: number): ReadonlySet<ActKind>;
-  /** 读压力场某一样的块的驱动项算不算（drives.ts DRIVE_TERMS，由组合解析出来）。 */
+  provided: (scope: string, world: World, now: number) => ReadonlySet<ActKind>;
+  /** 读压力场某一样的块的 drive term 算不算（drives.ts DRIVE_TERMS，由组合解析出来）。 */
   drives: DriveTerms;
   /** 互惠按双方投入算，不按轮数（world.ts effort）；不设时按轮数。 */
   effortReciprocity?: boolean;
+  /** 平台能力声明：这个会话所属的平台支不支持某个对外动作；不设时默认全支持。 */
+  supports?: (scope: string, kind: ActKind, chatType: ChatType) => boolean;
 }
 
 /** 什么都没加的意愿层：墙上时间，没有额外代价、折扣和对话延续。 */
@@ -466,12 +471,14 @@ export function intentionsFor(
   const provided = policy.provided(scope, world, now);
   // 群里禁发的动作，发言提示里不给，意愿层也不为它排分（ADR-276；scene-facts.ts withheldBy 是同一份）。
   const banned = chat.chatType === "group" ? new Set(withheldBy(world.bans?.[scope])) : null;
+  const supports = policy.supports;
   return affordances
     .filter(
       (a) =>
         offers(a, view, now, provided) &&
         (a.wakes?.(view) ?? true) &&
-        !(banned?.has(a.kind as ActKind) ?? false),
+        !(banned?.has(a.kind) ?? false) &&
+        (supports === undefined || supports(scope, a.kind, chat.chatType)),
     )
     .map((a) => intention(world, reading, a, now, policy, waker));
 }
@@ -514,8 +521,13 @@ export function globalReading(
   tiers?: TierLookup,
   age?: Age,
   on?: DriveTerms,
+  platform?: string,
 ): GlobalReading {
-  const readings = Object.keys(world.chats)
+  const scopes =
+    platform === undefined
+      ? Object.keys(world.chats)
+      : Object.keys(world.chats).filter((s) => platformOf(s) === platform);
+  const readings = scopes
     .map((s) => readChat(world, s, now, tiers, age, on))
     .filter((r): r is ChatReading => r !== null);
   const totals = driveRecord(() => 0);

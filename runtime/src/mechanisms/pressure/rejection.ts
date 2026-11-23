@@ -27,7 +27,7 @@ const GAIN = { stop: AVERSION_GAIN.rejected, cold: AVERSION_GAIN.cold } as const
  * 先验。rate：找她的话里不欢迎信号的比例，线上 11-12、11-13 群里判过的 127 条里 9 条冷淡、0 次叫停、0 个负面表情，
  * 约 0.07；lines：先验算几条话（手设，10 条以后一半按这个群自己）。recoveries：恢复时间先验算几次（手设）。
  */
-export const REJECTION_PRIOR = { rate: 0.07, lines: 10, recoveries: 3 } as const;
+const REJECTION_PRIOR = { rate: 0.07, lines: 10, recoveries: 3 } as const;
 
 /** 这个群平时找她的话里不欢迎信号的比例（先验加这个群自己的）。 */
 export function usualCold(r: Rejection): number {
@@ -68,7 +68,7 @@ export function signalOf(p: {
   return p.tone === "friendly" || p.tone === "neutral" ? "warm" : null;
 }
 
-/** 一个人对她的一次反馈折进记录。增量按这一条之前的常态算，再把这一条算进常态。 */
+/** 一个人对她的一次反馈 fold 进记录。增量按这一条之前的常态算，再把这一条算进常态。 */
 export function feedback(r: Rejection, who: string, at: number, s: Signal): Rejection {
   const heard = r.heard + 1;
   if (s === "heard") return { ...r, heard };

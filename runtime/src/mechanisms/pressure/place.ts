@@ -22,8 +22,8 @@ function nameIn(where: string): string {
   return bare(
     where
       .trim()
-      .replace(/^(去|到|在|和|跟|给|找)+/u, "")
-      .replace(/(的)?(私聊|群聊|群|那边|那里|这边|这里|里)+$/u, ""),
+      .replace(/^[去到在和跟给找]+/u, "")
+      .replace(/的?(?:私聊|群聊|群|那边|那里|这边|这里|里)+$/u, ""),
   );
 }
 
@@ -49,7 +49,7 @@ export function placeNamed(
     scopes.sort((a, b) => (world.chats[b]?.lastAnyAt ?? 0) - (world.chats[a]?.lastAnyAt ?? 0))[0];
   const entries = Object.entries(world.chats).filter(([, c]) => c.member);
   const groups = entries
-    .filter(([, c]) => c.chatType === "group" && c.title && named(bare(c.title), q))
+    .filter(([, c]) => c.chatType === "group" && c.title !== undefined && named(bare(c.title), q))
     .map(([s]) => s);
   const people = entries
     .filter(([, c]) => c.chatType === "private" && named(bare(nameOf(world, c.partner) ?? ""), q))

@@ -10,7 +10,7 @@ import type { ShellPorts } from "../shell.js";
 export interface Pause {
   readonly paused: boolean;
   /** 从运行变成暂停时调用。 */
-  onPause(listener: () => void): void;
+  onPause: (listener: () => void) => void;
 }
 
 const pausedError = () => new Failed({ reason: "paused" }, "paused by the operator");
@@ -34,10 +34,16 @@ export function gated(ports: ShellPorts, pause: Pause): ShellPorts {
   return {
     ...ports,
     paused: () => pause.paused,
-    callModel: whenRunning(pause, ports.callModel),
-    act: whenRunning(pause, ports.act),
-    ...(ports.perceiveTone ? { perceiveTone: whenRunning(pause, ports.perceiveTone) } : {}),
-    ...(ports.perceiveMood ? { perceiveMood: whenRunning(pause, ports.perceiveMood) } : {}),
+    callModel: whenRunning(pause, async (prompt, call, signal) =>
+      ports.callModel(prompt, call, signal),
+    ),
+    act: whenRunning(pause, async (scope, act, signal) => ports.act(scope, act, signal)),
+    ...(ports.perceiveTone
+      ? { perceiveTone: whenRunning(pause, ports.perceiveTone.bind(ports)) }
+      : {}),
+    ...(ports.perceiveMood
+      ? { perceiveMood: whenRunning(pause, ports.perceiveMood.bind(ports)) }
+      : {}),
     // 后台的事办得久：暂停那一刻还在办的也中止（不再花钱），和外壳停机的中止合在一起。
     background: whenRunning(pause, async (scope, act, context, signal) => {
       const job = new AbortController();
@@ -51,7 +57,7 @@ export function gated(ports: ShellPorts, pause: Pause): ShellPorts {
     ...(ports.query
       ? {
           query: whenRunning(pause, async (scope, kind, act, prompt, signal) => {
-            const queryPort = ports.query;
+            const queryPort = ports.query?.bind(ports);
             if (!queryPort) throw pausedError();
             const job = new AbortController();
             running.add(job);

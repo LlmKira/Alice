@@ -59,6 +59,20 @@ describe("isGroupAttentionWorthy: which group messages are worth her attention",
     expect(isGroupAttentionWorthy(msg({ text: "#今天也很困" }))).toBe(true);
   });
 
+  it("drops a message the platform marked as @ someone else, even when the name is not a username", () => {
+    // QQ 的 at 段：名字是中文，文字里的 @ 认不出来，适配器标了 mentionsOther。
+    expect(isGroupAttentionWorthy(msg({ text: "@小李 明天几点", mentionsOther: true }))).toBe(
+      false,
+    );
+    expect(isGroupAttentionWorthy(msg({ text: "@小李 明天几点" }))).toBe(true);
+    // 冲着她的照旧算（点了她也点了别人）。
+    expect(
+      isGroupAttentionWorthy(
+        msg({ text: "@小李 @Alice 你们", mentionsOther: true, directed: true }),
+      ),
+    ).toBe(true);
+  });
+
   it("keeps a text message with no text (nothing to filter on)", () => {
     expect(isGroupAttentionWorthy(msg({ text: null }))).toBe(true);
   });

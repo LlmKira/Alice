@@ -15,13 +15,14 @@ import {
 } from "../src/telegram/catch-up.js";
 import { Gates, Telegram } from "../src/telegram/gates.js";
 import { bindTelegramWorldAdapter } from "../src/telegram/world-adapter.js";
+import { mtcuteFake } from "./mtcute-fake.js";
 
 const GROUP = -1001234;
 const T0 = 1_771_000_000_000;
 
 /** 群里的一条消息（只有入站适配读的那几个字段）。 */
 function groupMessage(id: number, at: number): Message {
-  return {
+  return mtcuteFake<Message>({
     id,
     date: new Date(at),
     chat: { id: GROUP, chatType: "supergroup", title: "胶片日常" },
@@ -30,7 +31,7 @@ function groupMessage(id: number, at: number): Message {
     entities: [],
     media: null,
     replyToMessage: null,
-  } as unknown as Message;
+  });
 }
 
 interface HistoryParams {
@@ -60,7 +61,7 @@ function history(messages: readonly Message[], params: HistoryParams, requests: 
 /** 一个从不推送的群：消息只能从对话列表和历史里看到。 */
 function silentGroup(messages: Message[]) {
   const requests: string[] = [];
-  const client = {
+  const client = mtcuteFake<TelegramClient>({
     async *iterDialogs() {
       requests.push("iterDialogs");
       yield { peer: { id: GROUP }, lastMessage: messages.at(-1) ?? null };
@@ -68,16 +69,16 @@ function silentGroup(messages: Message[]) {
     async getHistory(_peer: unknown, params: HistoryParams) {
       return history(messages, params, requests);
     },
-  } as unknown as TelegramClient;
+  });
   return { client, requests };
 }
 
 function adapterInto(events: AliceEvent[], inbox: Inbox) {
-  const dispatcher = {
+  const dispatcher = mtcuteFake<Dispatcher>({
     onNewMessage: () => {},
     onRawUpdate: () => {},
     onChatMemberUpdate: () => {},
-  } as unknown as Dispatcher;
+  });
   return bindTelegramWorldAdapter(dispatcher, {
     selfId: "42",
     now: () => T0 + 10 * 60_000,
@@ -200,7 +201,7 @@ describe("catching up on chats Telegram never pushed", () => {
     // 对话列表里置顶的排在最前、不按时间；上线第一轮被一个很久没动的置顶会话挡住，dialogs: 0。
     const PINNED = -100999;
     const fresh = groupMessage(5, T0 + 60_000);
-    const client = {
+    const client = mtcuteFake<TelegramClient>({
       async *iterDialogs() {
         yield {
           peer: { id: PINNED },
@@ -212,7 +213,7 @@ describe("catching up on chats Telegram never pushed", () => {
       async getHistory() {
         return [fresh];
       },
-    } as unknown as TelegramClient;
+    });
     const inbox = new Inbox();
     const journal: AliceEvent[] = [];
     const adapter = adapterInto(journal, inbox);
@@ -232,7 +233,7 @@ describe("a backlog longer than one page", () => {
   /** 几个从不推送的群（id → 消息）。 */
   function silentGroups(chats: ReadonlyMap<number, Message[]>) {
     const requests: string[] = [];
-    const client = {
+    const client = mtcuteFake<TelegramClient>({
       async *iterDialogs() {
         for (const [id, messages] of chats)
           yield { peer: { id }, lastMessage: messages.at(-1) ?? null };
@@ -240,7 +241,7 @@ describe("a backlog longer than one page", () => {
       async getHistory(peer: { id: number }, params: HistoryParams) {
         return history(chats.get(peer.id) ?? [], params, requests);
       },
-    } as unknown as TelegramClient;
+    });
     return { client, requests };
   }
 

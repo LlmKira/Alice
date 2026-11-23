@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { presence } from "../src/mechanisms/presence.js";
-import { mechanisms } from "../src/mechanisms/registry.js";
 import type { ChatType } from "../src/mind/events.js";
 import { type ChatState, emptyChat, type TimelineEntry } from "../src/mind/state.js";
-import { arms } from "../src/sim/will-arms.js";
 
 let n = 0;
 const line = (who: string | null, contentType = "text"): TimelineEntry => ({
@@ -53,13 +51,5 @@ describe("how many of the last lines are hers, stated as a fact", () => {
   it("says the same in a private chat as in a group (February extended it to private chats)", () => {
     const timeline = [line("小周"), her(), her()];
     expect(fact(timeline, "private")).toEqual(fact(timeline, "group"));
-  });
-
-  it("is in production and has an ablation arm without it", () => {
-    expect(mechanisms).toContain(presence);
-    const all = arms({});
-    expect(all.production).toContain(presence);
-    expect(all["no-presence"]).not.toContain(presence);
-    expect(all["no-presence"]).toHaveLength(mechanisms.length - 1);
   });
 });

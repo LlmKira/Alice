@@ -16,7 +16,7 @@ import { awakeBetween } from "./pressure/sleep.js";
 const MIN = 60_000;
 const H = 60 * MIN;
 /** 2 月：静默超过 3600 秒。 */
-export const MISSED_SILENCE_MS = H;
+const MISSED_SILENCE_MS = H;
 /** 2 月：一共不超过这么多条、又没人找她，就不说。 */
 const MISSED_QUIET = 5;
 
@@ -35,44 +35,31 @@ export interface MissedState {
   since: Readonly<Record<string, Missed>>;
 }
 
-export const initialMissed: MissedState = { activeAt: null, since: {} };
+const initialMissed: MissedState = { activeAt: null, since: {} };
 
 function hours(ms: number): string {
   const h = Math.round(ms / H);
   return h < 48 ? `${h} 小时` : `${Math.round(h / 24)} 天`;
 }
 
-/** 没有可说的就是 null。after：接在作息那句（刚睡醒、被吵醒）后面说，不再从"我"说起。 */
-export function missedText(
-  state: MissedState,
-  here: string,
-  now: number,
-  after = false,
-): string | null {
-  if (state.activeAt === null) return null;
-  const gap = now - state.activeAt;
-  const slept = awakeBetween(state.activeAt, now) < gap;
-  if (gap <= MISSED_SILENCE_MS && !slept) return null;
-  const others = Object.entries(state.since)
-    .filter(([scope]) => scope !== here)
-    .map(([, m]) => m);
-  const total = others.reduce((s, m) => s + m.total, 0);
-  const directed = others.reduce((s, m) => s + m.directed, 0);
-  if (total <= MISSED_QUIET && directed === 0) return null;
+const sum = (list: Missed[], key: "total" | "directed") => list.reduce((s, m) => s + m[key], 0);
 
-  const sum = (list: Missed[], key: "total" | "directed") => list.reduce((s, m) => s + m[key], 0);
+// 谁私聊、哪个群（PLAN 第 33 件：名字不再藏；名字都知道时才列）。
+const names = (list: Missed[], wrap: (n: string) => string) =>
+  list.every((m) => m.name) ? list.map((m) => wrap(m.name as string)).join("、") : null;
+
+function groupsWhere(list: Missed[]): string {
+  const titles = names(list, (n) => `「${n}」`);
+  if (list.length === 1) return titles ? `${titles}群` : "一个群";
+  return `${list.length} 个群${titles ? `（${titles}）` : ""}`;
+}
+
+/** 别的会话来的消息，按私聊、点名她的群、没点名的群各说一段。 */
+function missedParts(others: Missed[]): string[] {
   const privates = others.filter((m) => m.chatType === "private" && m.total > 0);
   const groups = others.filter((m) => m.chatType === "group");
   const called = groups.filter((m) => m.directed > 0);
   const quiet = groups.filter((m) => m.directed === 0 && m.total > 0);
-  // 谁私聊、哪个群（PLAN 第 33 件：名字不再藏；名字都知道时才列）。
-  const names = (list: Missed[], wrap: (n: string) => string) =>
-    list.every((m) => m.name) ? list.map((m) => wrap(m.name as string)).join("、") : null;
-  const groupsWhere = (list: Missed[]) => {
-    const titles = names(list, (n) => `「${n}」`);
-    if (list.length === 1) return titles ? `${titles}群` : "一个群";
-    return `${list.length} 个群${titles ? `（${titles}）` : ""}`;
-  };
   const parts: string[] = [];
   if (privates.length === 1) {
     parts.push(`${privates[0]?.name ?? "有人"}私聊我（${sum(privates, "total")} 条）`);
@@ -92,20 +79,31 @@ export function missedText(
       `${called.length > 0 ? "另外" : ""}${groupsWhere(quiet)}里聊了 ${sum(quiet, "total")} 条`,
     );
   }
+  return parts;
+}
+
+/** 没有可说的就是 null。after：接在作息那句（刚睡醒、被吵醒）后面说，不再从"我"说起。 */
+function missedText(state: MissedState, here: string, now: number, after = false): string | null {
+  if (state.activeAt === null) return null;
+  const gap = now - state.activeAt;
+  const slept = awakeBetween(state.activeAt, now) < gap;
+  if (gap <= MISSED_SILENCE_MS && !slept) return null;
+  const others = Object.entries(state.since)
+    .filter(([scope]) => scope !== here)
+    .map(([, m]) => m);
+  const total = sum(others, "total");
+  const directed = sum(others, "directed");
+  if (total <= MISSED_QUIET && directed === 0) return null;
+
   const me = after ? "" : "我";
   const lead = slept ? `${me}睡着的时候` : `${me}有 ${hours(gap)}没看消息，`;
   // 只写中性的事实，不写"你都还没回"：她在这里动不了别处，愧疚帧会让她把群当成待清的收件箱
   // （2 月 ADR-194 生产原话"赶紧处理完去找……"；谁找了她，前半句已经说了）。
-  return `${lead}别的聊天里来了 ${total} 条：${parts.join("，")}。`;
+  return `${lead}别的聊天里来了 ${total} 条：${missedParts(others).join("，")}。`;
 }
 
-export function reduceMissed(state: MissedState, event: AliceEvent): MissedState {
-  // 看了一眼也是在看消息（候选 glance）：之后再说"你有几小时没看消息"就不对了。
-  if (
-    event.type === "speech.decided" ||
-    event.type === "message.sent" ||
-    event.type === "chat.glanced"
-  ) {
+function reduceMissed(state: MissedState, event: AliceEvent): MissedState {
+  if (event.type === "speech.decided" || event.type === "message.sent") {
     return { activeAt: Math.max(state.activeAt ?? event.at, event.at), since: {} };
   }
   if (event.type !== "message.received") return state;
@@ -135,7 +133,7 @@ export const missed = defineMechanism<MissedState>({
 /**
  * 生产：作息那一格带上错过了什么。刚睡醒、被吵醒和睡着时别处来了多少是同一件事，并成一句
  * （"我刚睡醒，睡着的时候别的聊天里来了 23 条：……"）；分开写时线上 10 次里 10 次两句都说一遍"睡着了"
- * （eval-artifacts/ablation-live/results.md）。作息那句没有时（醒了很久），照旧单独一句。状态折进世界（World.missed）。
+ * （eval-artifacts/ablation-live/results.md）。作息那句没有时（醒了很久），照旧单独一句。状态 fold 进世界（World.missed）。
  */
 export function withMissed(sleep: PressureFeature): PressureFeature {
   return {

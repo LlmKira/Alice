@@ -14,11 +14,13 @@
  *    - 亲近：私聊是对方的层级；群里是此刻在场的人里和她最亲近的那个。层级本身从互动里学（world.ts tierOf）。
  * 写进提示词的是她手里的那一件（why.ts 的"想分享"那句），不写分数。纯函数，时间只来自事件。
  */
+import type { ActKind } from "../../mind/affordances.js";
 import type { AliceEvent } from "../../mind/events.js";
+import { decayedAttachment } from "./attachment.js";
 import { causeLine } from "./cause-lines.js";
 import { feature, type PressureFeature, type View } from "./feature.js";
 import { type ReceptionFeedbackState, shareTaste } from "./feedback.js";
-import { TIER_WEIGHT, type Tier, TURN_WINDOW } from "./params.js";
+import { TIER_WEIGHT, TURN_WINDOW } from "./params.js";
 import { itemId } from "./reach.js";
 import { tokens } from "./turn.js";
 import { type ChatNode, isSolicited, tierOf, voicesAt, type World } from "./world.js";
@@ -64,9 +66,9 @@ const PRESENT = 10;
  * 想分享的劲（未归一）乘的尺度；κ 是 information 的（1.5）。按预注册的规则在 1.5、3、6 里选（满足频率判定的最大那个）：
  * 第六遍普查里三档都满足，取 6（docs/research/desire-2026-11-13.md）。
  */
-export const SHARE_SCALE = 6;
+const SHARE_SCALE = 6;
 /** 劲头到这个（归一后 tanh(raw/κ) ≥ 0.5，劲头的一半）才算摆在她面前：写进提示词，她想过了就用掉。 */
-export const SHOWN_AT = 0.5;
+const SHOWN_AT = 0.5;
 const KAPPA = 1.5;
 
 /** 她在频道里看到的一件。 */
@@ -148,7 +150,7 @@ function cnyDayStart(dateText: string): number | null {
 }
 
 /** 链接和 @ 账号不是能聊的内容：去掉再取标题、正文和词（普查里只有一条链接的帖子被当成了一件，修订 1）。 */
-const NOT_CONTENT = /https?:\/\/\S+|\bt\.me\/\S+|@[\w_]+/g;
+const NOT_CONTENT = /https?:\/\/\S+|\bt\.me\/\S+|@\w+/g;
 const content = (text: string) => text.replace(NOT_CONTENT, " ");
 /** 标题去掉链接后少于这么多字的，没有可说的内容，不算一件。 */
 const TITLE_MIN = 4;
@@ -195,7 +197,7 @@ const bump = (r: Rate | undefined, at: number): Rate => ({
 });
 
 /** 每天几次（指数加权，刚开始数时按已经数了多久折算）。 */
-export function perDay(r: Rate | undefined, now: number): number {
+function perDay(r: Rate | undefined, now: number): number {
   if (!r) return 0;
   const n = r.n * Math.exp(-(now - r.at) / DAY);
   const span = DAY * (1 - Math.exp(-Math.max(0, now - r.from) / DAY));
@@ -203,7 +205,7 @@ export function perDay(r: Rate | undefined, now: number): number {
 }
 
 /** 这里一个说话的人每天分享几条（先验向实测收缩）。 */
-export function sharesHere(talk: Talk | undefined, chat: ChatNode, now: number): number {
+function sharesHere(talk: Talk | undefined, chat: ChatNode, now: number): number {
   const people = Object.values(voicesAt(chat, now).by).filter((v) => v >= ACTIVE_VOICE).length;
   return (perDay(talk?.links, now) + SHARE_PRIOR * SHARE_PRIOR_N) / (people + SHARE_PRIOR_N);
 }
@@ -214,12 +216,7 @@ export function sharesHere(talk: Talk | undefined, chat: ChatNode, now: number):
  * 记下的那些只算赢了一部分（记下的件数 / window：修订 3，第三遍普查里刚开始的五个小时她在一个群里分享了六次）。
  * 不设分位门槛：挑剔到什么程度由这两个数定。
  */
-export function picked(
-  item: PostItem,
-  rel: number,
-  talk: Talk | undefined,
-  window: number,
-): number {
+function picked(item: PostItem, rel: number, talk: Talk | undefined, window: number): number {
   if (!talk || rel <= 0 || window <= 0) return 0;
   const k = talk.rels.findIndex((e) => e.id === item.id);
   const before = (k < 0 ? talk.rels : talk.rels.slice(0, k)).slice(-Math.ceil(window));
@@ -228,16 +225,16 @@ export function picked(
 }
 
 /** 和这个会话里的人亲近不亲近（0–1）：私聊是对方，群里是在场的人里最亲近的。 */
-export function closenessIn(world: Seen, chat: ChatNode, now: number): number {
+function closenessIn(world: Seen, chat: ChatNode, now: number): number {
   const weight = (id: string | null) =>
-    TIER_WEIGHT[tierOf(world as World, id, now) as Tier] / TIER_WEIGHT[5];
+    TIER_WEIGHT[tierOf(world as World, id, now)] / TIER_WEIGHT[5];
   if (chat.chatType === "private") return weight(chat.partner);
   const present = [...new Set(chat.recentFrom.slice(-PRESENT))];
   return present.reduce((best, id) => Math.max(best, weight(id)), weight(null));
 }
 
 /** 一件里有分量的词，有多少在另一件里也有（按 idf 加权，∈ [0, 1]）：同一个消息几个频道各发一遍时接近 1。 */
-export function overlap(item: PostItem, other: PostItem): number {
+function overlap(item: PostItem, other: PostItem): number {
   let all = 0;
   let hit = 0;
   for (const [t, w] of Object.entries(item.idf)) {
@@ -259,8 +256,20 @@ function novelty(posts: PostsState, item: PostItem, scope: string): number {
   return 1 - most;
 }
 
+function personalCloseness(world: Seen, chat: ChatNode, isPersonal: boolean, now: number): number {
+  const base = closenessIn(world, chat, now);
+  if (!isPersonal || chat.chatType !== "private" || !chat.partner || !("attachment" in world)) {
+    return base;
+  }
+  const att = (world as Partial<World>).attachment;
+  if (!att) return base;
+  const p = decayedAttachment(att.people[chat.partner], now);
+  if (p.bond <= 0.25 || p.scar >= 0.15 || p.proactiveMissed >= 1.5) return base;
+  return Math.max(base, 0.35 + 0.65 * p.bond * (1 - p.scar));
+}
+
 /** 这一件在这个会话里有多想说（未乘尺度）：在这里想过了就是 0，在别处想过一次淡一半。 */
-export function urge(world: Seen, item: PostItem, scope: string, now: number): number {
+function urge(world: Seen, item: PostItem, scope: string, now: number): number {
   const chat = world.chats[scope];
   if (!chat || item.offered.includes(scope) || item.at > now) return 0;
   const posts = postsOf(world);
@@ -268,7 +277,7 @@ export function urge(world: Seen, item: PostItem, scope: string, now: number): n
   const seen = perDay(posts.arrivals, now);
   const window = seen / Math.max(1e-9, sharesHere(talk, chat, now));
   // 量跟着反响走（修订 4）：她上一件在这里说出口以后，还没有别人在这里说过话，就先不想下一件。
-  if ((talk?.sharedAt ?? 0) >= chat.lastIncomingAt && talk?.sharedAt) return 0;
+  if ((talk?.sharedAt ?? 0) >= chat.lastIncomingAt && Boolean(talk?.sharedAt)) return 0;
   const isPersonal = posts.personalUrge === true && item.scope === "self:dream";
   // 群里正在热烈聊别的事、和这条个人小事毫不搭边时，先留着它，不在忙乱里白白想过消耗掉；
   // 等群静下来或者有人说到相关话题时再拿出来。
@@ -290,14 +299,8 @@ export function urge(world: Seen, item: PostItem, scope: string, now: number): n
   const fb =
     "feedback" in world ? (world.feedback as ReceptionFeedbackState | undefined) : undefined;
   const taste = fb ? shareTaste(fb, scope, item.channel) : 1;
-  return (
-    fresh *
-    r *
-    novelty(posts, item, scope) *
-    closenessIn(world, chat, now) *
-    taste *
-    2 ** -item.offered.length
-  );
+  const closeness = personalCloseness(world, chat, isPersonal, now);
+  return fresh * r * novelty(posts, item, scope) * closeness * taste * 2 ** -item.offered.length;
 }
 
 /** 她手里此刻最想在这个会话里说的那一件和它的劲（未归一）。 */
@@ -316,7 +319,7 @@ export function topShare(
 
 /** 驱动 information 的这一份（drives.ts）：她手里最想在这里说的那一件。 */
 export function sharePressure(world: World, scope: string, now: number): number {
-  if (!world.posts?.items.length) return 0;
+  if ((world.posts?.items.length ?? 0) === 0) return 0;
   // 劲只来自摆在她面前的那一件（修订 5）：没摆出来的劲也在叫醒她，醒来却看不到是为了什么（第五遍普查里，只摆出
   // 3 件的那一档没人找时的叫醒也多了一成）。叫醒她的和她看到的是同一件。
   const shown = shownShare(world, scope, now);
@@ -451,6 +454,54 @@ function onConsidered<W extends Seen>(world: W, scope: string, at: number, spoke
   return { ...world, posts: { ...posts, items, talk } };
 }
 
+/**
+ * 一次生活反思：她自己刚想到的事（curiosities）当成一条帖子进来；personalUrge 开着时，她这一天经历的事也是，
+ * 时刻取那件事发生的钟点（不早于反思本身）。
+ */
+function onLife(
+  posts: PostsState,
+  event: Extract<AliceEvent, { type: "ponder.done" }>,
+  personalUrge: boolean,
+): PostsState {
+  if (event.ponder.kind !== "life") return posts;
+  let next = posts;
+  for (const [idx, c] of (event.ponder.curiosities ?? []).entries()) {
+    const synth: Extract<AliceEvent, { type: "post.received" }> = {
+      type: "post.received",
+      at: event.at,
+      scope: "self:dream",
+      messageId: `${event.ponder.date}:${idx}`,
+      title: "自己刚想到的",
+      text: `${c.topic}\n${c.hook}`,
+    };
+    next = onPost(next, synth, itemId(synth.scope, synth.messageId));
+  }
+  if (!personalUrge || event.ponder.moments.length === 0) return next;
+  const day0 = cnyDayStart(event.ponder.date);
+  for (const [idx, m] of event.ponder.moments.entries()) {
+    const at = day0 !== null ? Math.max(event.at, day0 + m.hour * H) : event.at;
+    const synth: Extract<AliceEvent, { type: "post.received" }> = {
+      type: "post.received",
+      at,
+      scope: "self:dream",
+      messageId: `${event.ponder.date}:m:${idx}`,
+      title: "自己刚经历的",
+      text: m.text,
+    };
+    next = onPost(next, synth, itemId(synth.scope, synth.messageId));
+  }
+  return next;
+}
+
+/** 会话里别人说了一句：记进在聊的东西；带链接时再记一次这里有人贴链接。 */
+function onHeard(posts: PostsState, scope: string, at: number, text: string): PostsState {
+  const talked = onTalk(posts, scope, text);
+  if (!LINK.test(text)) return talked;
+  const t = talked.talk[scope] ?? { terms: {}, rels: [] };
+  const links = bump(t.links, at);
+  return { ...talked, talk: { ...talked.talk, [scope]: { ...t, links } } };
+}
+
 export function reducePosts<W extends Seen>(
   before: W,
   after: W,
@@ -464,47 +515,13 @@ export function reducePosts<W extends Seen>(
     case "post.received":
       return { ...after, posts: onPost(posts, event, itemId(event.scope, event.messageId)) };
     case "ponder.done": {
-      if (event.ponder.kind !== "life") return after;
-      let next = posts;
-      for (const [idx, c] of (event.ponder.curiosities ?? []).entries()) {
-        const synth: Extract<AliceEvent, { type: "post.received" }> = {
-          type: "post.received",
-          at: event.at,
-          scope: "self:dream",
-          messageId: `${event.ponder.date}:${idx}`,
-          title: "自己刚想到的",
-          text: `${c.topic}\n${c.hook}`,
-        };
-        next = onPost(next, synth, itemId(synth.scope, synth.messageId));
-      }
-      if (personalUrge && event.ponder.moments.length > 0) {
-        const day0 = cnyDayStart(event.ponder.date);
-        for (const [idx, m] of event.ponder.moments.entries()) {
-          const at = day0 !== null ? Math.max(event.at, day0 + m.hour * H) : event.at;
-          const synth: Extract<AliceEvent, { type: "post.received" }> = {
-            type: "post.received",
-            at,
-            scope: "self:dream",
-            messageId: `${event.ponder.date}:m:${idx}`,
-            title: "自己刚经历的",
-            text: m.text,
-          };
-          next = onPost(next, synth, itemId(synth.scope, synth.messageId));
-        }
-      }
+      const next = onLife(posts, event, personalUrge);
       return next === posts ? after : { ...after, posts: next };
     }
-    case "message.received": {
-      if (event.isBot || !event.text) return after;
-      const talked = onTalk(posts, event.scope, event.text);
-      if (!LINK.test(event.text)) return { ...after, posts: talked };
-      const t = talked.talk[event.scope] ?? { terms: {}, rels: [] };
-      const links = bump(t.links, event.at);
-      return {
-        ...after,
-        posts: { ...talked, talk: { ...talked.talk, [event.scope]: { ...t, links } } },
-      };
-    }
+    case "message.received":
+      return event.isBot || !event.text
+        ? after
+        : { ...after, posts: onHeard(posts, event.scope, event.at, event.text) };
     case "message.sent":
       // 她自己的话不算这里在聊的东西：算进去，她说一件就让下一件更对得上，自己喂自己（ADR-195 的正反馈，修订 4）。
       return after;
@@ -521,22 +538,45 @@ export function reducePosts<W extends Seen>(
             event.type === "speech.decided" && event.decision.acts.some((a) => SPOKEN.has(a.kind)),
           ),
         ),
-      } as W;
+      };
     default:
       return after;
   }
 }
 
 export function createDesire(
-  o: { scale?: number; dreamFeed?: boolean; personalUrge?: boolean } = {},
+  o: {
+    scale?: number;
+    dreamFeed?: boolean;
+    personalUrge?: boolean;
+    shareId?: boolean;
+    groupForward?: boolean;
+  } = {},
 ): PressureFeature {
   const scale = o.scale ?? SHARE_SCALE;
   const dreamFeed = o.dreamFeed ?? false;
   const personalUrge = o.personalUrge ?? false;
+  const shareId = o.shareId ?? false;
   return feature({
     name: dreamFeed ? (personalUrge ? "desire-personal" : "desire-dream") : "desire",
     provides: ["posts"],
     requires: ["chats", "relations"],
+    uses: ["attachment"],
+    ...(o.groupForward
+      ? {
+          offers: (
+            kind: ActKind,
+            scope: string,
+            world: View<"chats" | "posts" | "relations">,
+            now: number,
+          ) => {
+            if (kind !== "forward") return true;
+            if (world.chats[scope]?.partner) return true;
+            const item = shownShare(world, scope, now);
+            return item !== null && item.scope !== "self:dream";
+          },
+        }
+      : {}),
     reduce: (before, after, event) => {
       if (!dreamFeed && event.type === "ponder.done") return after;
       return reducePosts(before, after, event, scale, personalUrge);
@@ -546,13 +586,7 @@ export function createDesire(
       (causes ?? []).map((c) => ({
         mechanism: `pressure-desire-${c.kind}`,
         kind: "state" as const,
-        text: causeLine(c),
+        text: causeLine(c, shareId),
       })),
   });
 }
-
-/**
- * 候选 desire 的世界那一半：频道新帖进世界，想分享的劲进意愿层（drives.ts drive.share）。提示词里的那一句由
- * why.ts 写（叫醒她的原因里的"想分享"，附上那一件）。
- */
-export const desire: PressureFeature = createDesire();

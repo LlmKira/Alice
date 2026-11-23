@@ -61,7 +61,7 @@ function silencePcm(ms: number): Buffer {
 }
 
 /** 测试里单独跑一次 WAV → OGG，证明 pcm48kToWav 的头 ffmpeg 认。 */
-function wavToOgg(wav: Buffer): Promise<Buffer> {
+async function wavToOgg(wav: Buffer): Promise<Buffer> {
   const { promise, resolve, reject } = Promise.withResolvers<Buffer>();
   const ff = spawn(
     "ffmpeg",
@@ -402,7 +402,7 @@ describe("phone call signaling: incoming", () => {
     expect(Array.isArray(exchange?.dh.p)).toBe(true);
     expect(Array.isArray(exchange?.dh.random)).toBe(true);
     expect(Array.isArray(exchange?.gaHash)).toBe(true);
-    expect(Buffer.from(exchange?.gaHash as unknown as number[])).toEqual(gAHash);
+    expect(Buffer.from(exchange?.gaHash ?? [])).toEqual(gAHash);
 
     const accept = client.rpc("phone.acceptCall");
     expect(accept.peer).toEqual({ _: "inputPhoneCall", id: 11n, accessHash: 22n });
@@ -555,7 +555,7 @@ describe("phone call signaling: incoming", () => {
 
     await calls.hangup(777);
     expect(client.rpc("phone.discardCall")).toMatchObject({
-      duration: expect.any(Number),
+      duration: expect.any(Number) as number,
       reason: { _: "phoneCallDiscardReasonHangup" },
       connectionId: 0n,
     });
@@ -750,17 +750,11 @@ describe("audio helpers", () => {
     expect(Math.abs(viaWav.length - pcm.length)).toBeLessThan(pcm.length * 0.2);
   });
 
-  it("reads the hangup marker in both reply shapes", () => {
+  it("reads the hangup marker the call prompt asks for, in both reply shapes", () => {
+    expect(CALL_TONE).toContain("[hangup]");
     expect(readReply("好，就这样。[hangup]")).toEqual({ text: "好，就这样。", end: true });
     expect(readReply({ text: "晚安", end: true })).toEqual({ text: "晚安", end: true });
     expect(readReply("嗯")).toEqual({ text: "嗯", end: false });
-  });
-
-  it("keeps the call prompt multilingual and format-free", () => {
-    expect(CALL_TONE).toContain("对方说什么语言就用什么语言回");
-    expect(CALL_TONE).toContain("俄语");
-    expect(CALL_TONE).toContain("[hangup]");
-    expect(CALL_TONE).toContain("不用 Markdown");
   });
 });
 

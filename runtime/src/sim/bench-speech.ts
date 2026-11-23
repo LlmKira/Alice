@@ -1,5 +1,5 @@
 /**
- * 发言层基准：在 bench-l2 的 243 个真实时刻上，用核心 step() 按时间顺序折叠数据集，
+ * 发言层基准：在 bench-l2 的 243 个真实时刻上，用核心 step() 按时间顺序 fold 数据集，
  * 取每个时刻的状态（会话时间线 + 各机制状态），走生产发言层（带缓存），写出结果供打分。
  *
  * 用法：tsx --env-file=.env src/sim/bench-speech.ts <输出目录> [--arm 名字] [--mechanisms a,b,c]
@@ -42,7 +42,7 @@ export interface Moment {
   at: number;
 }
 
-/** 按时间顺序折叠一次事件流，在每个时刻取出会话状态和发言请求。 */
+/** 按时间顺序 fold 一次事件流，在每个时刻取出会话状态和发言请求。 */
 export function momentsIn(
   events: readonly AliceEvent[],
   moments: readonly Moment[],
@@ -147,7 +147,7 @@ async function main(): Promise<void> {
   }
 
   const gids = contexts.map((c) => c.gid);
-  const rows: string[] = new Array(gids.length);
+  const rows = Array.from<string>({ length: gids.length }).fill("");
   let next = 0;
   await Promise.all(
     Array.from({ length: CONCURRENCY }, async () => {

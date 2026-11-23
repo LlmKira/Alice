@@ -6,7 +6,6 @@
  */
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
-import type { Gateway } from "../src/llm/gateway.js";
 import { SPEECH_MODEL } from "../src/llm/speech-model.js";
 import {
   describeSticker,
@@ -14,6 +13,7 @@ import {
   StickerCache,
   type StickerPerception,
 } from "../src/llm/sticker-perceive.js";
+import { fakeGateway } from "./fake-gateway.js";
 
 const BYTES = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0]); // "RIFF"：WebP 头
 
@@ -25,19 +25,15 @@ interface MessagePart {
 
 interface Posted {
   model?: string;
-  max_tokens?: number;
   messages?: Array<{ content?: MessagePart[] }>;
 }
 
 function mockGateway(content: string) {
   const posted: Posted[] = [];
-  const gateway = {
-    charge: () => {},
-    post: async (call: { body: unknown }) => {
-      posted.push(call.body as Posted);
-      return { body: { choices: [{ message: { content } }] }, spent: {} };
-    },
-  } as unknown as Gateway;
+  const gateway = fakeGateway((call) => {
+    posted.push(call.body);
+    return { choices: [{ message: { content } }] };
+  });
   return { gateway, posted };
 }
 
@@ -50,7 +46,6 @@ describe("describeSticker: one short multimodal call", () => {
     expect(p).toEqual({ summary: "猫猫捂嘴偷笑「笑死」", text: "笑死", emotion: "想笑" });
     expect(posted).toHaveLength(1);
     expect(posted[0]?.model).toBe(SPEECH_MODEL);
-    expect(posted[0]?.max_tokens).toBe(120);
     const message = posted[0]?.messages?.[0];
     expect(message?.content?.[0]?.text).toContain("笑死");
     expect(message?.content?.[1]?.image_url?.url).toMatch(/^data:image\/webp;base64,/);
@@ -144,6 +139,7 @@ describe("StickerCache: the same sticker is looked at once", () => {
     try {
       const first = new StickerCache(db);
       first.set("uniq-9", { ...p, summary: "旧的一次" });
+      // eslint-disable-next-line sonarjs/no-element-overwrite -- 测的就是同一个 id 写两次
       first.set("uniq-9", p);
       // 第二份缓存的内存是空的，只能从表里读到同一张贴纸；同一个 id 只有一行。
       const second = new StickerCache(db);

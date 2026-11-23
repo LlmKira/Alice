@@ -28,7 +28,7 @@ const said = (
   directed,
 });
 
-/** 折叠事件，读最后那一刻、这个会话里的关系事实（时间线是这个会话里的全部消息）。 */
+/** fold 事件，读最后那一刻、这个会话里的关系事实（时间线是这个会话里的全部消息）。 */
 function factAt(events: AliceEvent[], scope = GROUP, mechanism = familiar): string {
   const state = events.reduce(
     (s, e) => mechanism.reduce?.(s, e) as FamiliarState,

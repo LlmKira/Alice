@@ -29,7 +29,7 @@ const SAMPLE_BYTES = 2;
 /** 一帧 20 ms = 960 个采样 = 1920 字节。 */
 const DEFAULT_FRAME_MS = 20;
 
-export type LongLike = bigint | number | string | { toString(): string };
+export type LongLike = bigint | number | string | { toString: () => string };
 export type DiscardReason =
   | "phoneCallDiscardReasonHangup"
   | "phoneCallDiscardReasonBusy"
@@ -43,16 +43,16 @@ export interface PhoneCallRpc {
   [key: string]: unknown;
 }
 
-export interface InputUserRef {
+interface InputUserRef {
   userId: number;
   accessHash: LongLike;
 }
 
 /** 信令客户端：mtcute 的 TelegramClient 由 createMtcuteCallClient 包一层即可。 */
 export interface PhoneCallSignalingClient {
-  call(request: PhoneCallRpc): Promise<Record<string, unknown>>;
+  call: (request: PhoneCallRpc) => Promise<Record<string, unknown>>;
   /** 用户 id → inputUser（带 accessHash），phone.requestCall 要用。 */
-  resolveUser(userId: number): Promise<InputUserRef>;
+  resolveUser: (userId: number) => Promise<InputUserRef>;
 }
 
 /** 包一层 mtcute 的 TelegramClient：原始 RPC 直接透传，用户引用按 id 解析。 */
@@ -61,6 +61,7 @@ export function createMtcuteCallClient(client: TelegramClient): PhoneCallSignali
     async call(request) {
       // mtcute 的方法表里还没有 phone.*（写 Schema 时不支持通话），运行时缺构造器会明确抛错；
       // 类型上仍按 RpcMethod 传，等它补上就能直接用。
+      // eslint-disable-next-line slop/no-chained-type-assertions -- mtcute 的类型表里还没有 phone.* 方法
       return (await client.call(request as unknown as tl.RpcMethod)) as Record<string, unknown>;
     },
     async resolveUser(userId) {
@@ -161,34 +162,34 @@ export type PhoneCallUpdate =
   | PhoneCallAcceptedUpdate
   | PhoneCallConnectedUpdate
   | PhoneCallDiscardedUpdate
-  | { _: "phoneCallWaiting" | "phoneCallEmpty"; id?: LongLike; [key: string]: unknown };
+  | { _: "phoneCallWaiting" | "phoneCallEmpty"; id?: LongLike };
 
 /** 只列这个文件真正用到的 ntgcalls 方法：测试可以注入假的传输层。 */
 export interface CallTransport {
-  createP2pCall(userId: bigint): Promise<void>;
-  setStreamSources(userId: bigint, mode: StreamMode, media: MediaDescription): Promise<void>;
+  createP2pCall: (userId: bigint) => Promise<void>;
+  setStreamSources: (userId: bigint, mode: StreamMode, media: MediaDescription) => Promise<void>;
   /** 发出去时 gaHash 传 null：返回 SHA-256(gA)；来电时传对方给的 gAHash，返回 gB。 */
-  initExchange(userId: bigint, dhConfig: DhConfig, gaHash: Buffer | null): Promise<Buffer>;
-  exchangeKeys(userId: bigint, gAOrB: Buffer, fingerprint: bigint): Promise<AuthParams>;
-  connectP2p(
+  initExchange: (userId: bigint, dhConfig: DhConfig, gaHash: Buffer | null) => Promise<Buffer>;
+  exchangeKeys: (userId: bigint, gAOrB: Buffer, fingerprint: bigint) => Promise<AuthParams>;
+  connectP2p: (
     userId: bigint,
     servers: RTCServer[],
     versions: string[],
     p2pAllowed: boolean,
     customParameters: string,
-  ): Promise<void>;
-  stop(userId: bigint): Promise<void>;
-  sendSignalingData(userId: bigint, data: Buffer): Promise<void>;
-  sendExternalFrame(
+  ) => Promise<void>;
+  stop: (userId: bigint) => Promise<void>;
+  sendSignalingData: (userId: bigint, data: Buffer) => Promise<void>;
+  sendExternalFrame: (
     userId: bigint,
     device: StreamDevice,
     data: Buffer,
     frameData: FrameData,
-  ): Promise<void>;
-  onSignalingData(callback: (userId: bigint, data: Buffer) => void): void;
-  onFrames(
+  ) => Promise<void>;
+  onSignalingData: (callback: (userId: bigint, data: Buffer) => void) => void;
+  onFrames: (
     callback: (userId: bigint, mode: StreamMode, device: StreamDevice, frames: Frame[]) => void,
-  ): void;
+  ) => void;
 }
 
 export interface PhoneCallsOptions {
@@ -228,6 +229,7 @@ const SAMPLE_BYTES_PER_MS = (CALL_SAMPLE_RATE * SAMPLE_BYTES) / 1000;
 
 /** 原生绑定只收普通数组，这里统一转一次。 */
 function nativeBytes(bytes: Uint8Array): Buffer {
+  // eslint-disable-next-line slop/no-chained-type-assertions -- ntgcalls 的 .d.ts 写 Buffer，原生绑定实际只收数字数组
   return Array.from(bytes) as unknown as Buffer;
 }
 
@@ -236,7 +238,7 @@ function bufferOf(bytes: Uint8Array | readonly number[]): Buffer {
 }
 
 /** Long、bigint、数字、字符串都收。 */
-export function bigintOf(value: LongLike): bigint {
+function bigintOf(value: LongLike): bigint {
   if (typeof value === "bigint") return value;
   if (typeof value === "number") return BigInt(Math.trunc(value));
   return BigInt(String(value));
@@ -322,6 +324,7 @@ export class TelegramPhoneCalls {
     this.options = options;
     this.client = options.client;
     // 原生绑定的字节参数要数字数组、gaHash 要 null，和 .d.ts 不完全一致，所以这里断言一次。
+    // eslint-disable-next-line slop/no-chained-type-assertions -- ntgcalls 的 .d.ts 和原生绑定实际收的参数不一致，见上一行
     this.transport = options.transport ?? (new NTgCalls() as unknown as CallTransport);
     this.allowUser = options.allowUser;
     this.frameMs = options.frameMs ?? DEFAULT_FRAME_MS;
@@ -333,7 +336,7 @@ export class TelegramPhoneCalls {
 
   /** 正在通话的用户 id。 */
   get active(): number[] {
-    return [...this.byPeer.values()].map((call) => Number(call.userId));
+    return Array.from(this.byPeer.values(), (call) => Number(call.userId));
   }
 
   /** 本地主动打给某人。 */
@@ -647,8 +650,8 @@ export class TelegramPhoneCalls {
     const version = Number(reply.version ?? this.dhVersion);
     if (Number.isFinite(version)) this.dhVersion = version;
     // 版本没变时 Telegram 只回 random（messages.dhConfigNotModified）：复用上次的素数和 g。
-    if (reply.p) {
-      this.dhPrime = { g: Number(reply.g ?? 3), p: bufferOf(reply.p as Uint8Array) };
+    if (reply.p instanceof Uint8Array) {
+      this.dhPrime = { g: Number(reply.g ?? 3), p: bufferOf(reply.p) };
     }
     if (!this.dhPrime) throw new Error("getDhConfig: no prime");
     return {

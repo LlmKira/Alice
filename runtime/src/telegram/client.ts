@@ -5,7 +5,9 @@ import type { Config } from "../config.js";
 let clientInstance: TelegramClient | null = null;
 let dispatcherInstance: Dispatcher | null = null;
 
-export function createClient(config: Config): TelegramClient {
+export function createClient(
+  config: Pick<Config, "telegramApiId" | "telegramApiHash">,
+): TelegramClient {
   if (clientInstance) return clientInstance;
   clientInstance = new TelegramClient({
     apiId: config.telegramApiId,

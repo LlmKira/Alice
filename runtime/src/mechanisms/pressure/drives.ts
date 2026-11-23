@@ -75,7 +75,7 @@ export const VOICES = ["diligence", "curiosity", "sociability", "caution"] as co
 export type Voice = (typeof VOICES)[number];
 
 /**
- * 驱动表：每个驱动的归一化、全局 κ、声部、习惯化和是不是外部需求只写在这里，其余都从它派生。次序就是驱动的次序。
+ * 驱动表：每个驱动的归一化、全局 κ、声部、habituation 和是不是外部需求只写在这里，其余都从它派生。次序就是驱动的次序。
  * 声部权重：ADR-181（P5 同时算社交，双路由；线程 0.7）；2 月 τ_P 属于勤勉（iaus-scorer 的 U_prospect 由 π_D 调制）；
  * P2 信息压力属于好奇（ADR-181）；Inner Thoughts 的 relevance 是想说的冲动（好奇），想接某个人的话是社交。
  */
@@ -141,7 +141,7 @@ export const DRIVE_SPEC = driveTable({
     demand: false,
   },
   /**
-   * 群里别人的话对上她心里的东西（候选 groupturn，turn.ts）：一条显著度 0.3–1 的话 → τ̂ ≈ 0.29–0.76，和群里几条未读的
+   * 群里别人的话对上她心里的东西（group-pull.ts）：一条 salience 0.3–1 的话 → τ̂ ≈ 0.29–0.76，和群里几条未读的
    * 注意力同量级；全局和单个会话的 κ 相同（拉力只看最强的那个群）。手设。
    */
   topic: {
@@ -151,7 +151,7 @@ export const DRIVE_SPEC = driveTable({
     habituates: true,
     demand: true,
   },
-  /** 说话的人最近和她有来往（候选 groupturn）：一条 → τ̂ ≈ 0.32，三条 ≈ 0.76。手设。 */
+  /** 说话的人最近和她有来往（group-pull.ts）：一条 → τ̂ ≈ 0.32，三条 ≈ 0.76。手设。 */
   bond: {
     kappa: 3,
     globalKappa: 3,
@@ -168,7 +168,7 @@ export const DRIVES = Object.keys(DRIVE_SPEC) as readonly DriveKey[];
 /**
  * 意愿层里读压力场某一样的块的几项（mind/compose.ts 的部分）：那一块没有提供者时这一项不算（为 0），
  * 组合结果把它列为不激活。commitments：prospect 和离开时丢掉的承诺（memory）；information：P2（reach）；
- * place：看过预览的群的好奇心（reach）；topic、bond：群里的拉力（候选 groupturn）。
+ * place：看过预览的群的好奇心（reach）；topic、bond：群里的拉力（group-pull.ts）。
  */
 export const DRIVE_TERMS = [
   { name: "drive.commitments", term: "commitments", requires: ["chats.commitments"] },
@@ -192,7 +192,7 @@ export const ALL_TERMS: DriveTerms = {
 export const DEMAND_DRIVES = DRIVES.filter((k) => DRIVE_SPEC[k].demand);
 
 /** 对数时间域 sigmoid（论文 Eq P3-raw，ADR-111）。 */
-export function logSigmoid(silence: number, theta: number): number {
+function logSigmoid(silence: number, theta: number): number {
   const x = Math.log(1 + Math.max(0, silence) / P3_TAU0) - Math.log(1 + theta / P3_TAU0);
   return 1 / (1 + Math.exp(-P3_BETA * x));
 }
@@ -205,7 +205,7 @@ export type Age = (from: number, to: number) => number;
 export const wallClock: Age = (from, to) => to - from;
 
 /** 有效未读 EU = max(phasic, tonic)（论文 Eq P1-phasic/tonic，ADR-150/176）。 */
-export function effectiveUnread(chat: ChatNode, now: number, age: Age = wallClock): number {
+function effectiveUnread(chat: ChatNode, now: number, age: Age = wallClock): number {
   if (chat.unread <= 0) return 0;
   const phasic = halfLife(chat.ewms, age(chat.ewmsAt, now), UNREAD_HALF_LIFE);
   return Math.max(phasic, KAPPA_TONIC * Math.log(1 + chat.unread));
@@ -229,7 +229,7 @@ export { groupTheta };
  * 关系冷却（论文 Eq P3-raw）：从上一次"有回应的互动"（对方来找她、点名她、回应了她）算起的沉默。
  * 她主动找了对方但对方没理，冷却不缓解（研究员 2026-11-11）；会不会再找一次由 σ_out 与回避决定。
  */
-export function contactCooling(person: RelationView, tier: Tier, now: number): number {
+function contactCooling(person: RelationView, tier: Tier, now: number): number {
   if (person.lastBondAt <= 0) return 0;
   const since = Math.max(person.lastBondAt, person.consideredAt);
   return TIER_WEIGHT[tier] * logSigmoid((now - since) / declineBackoff(person), TIER_THETA[tier]);
@@ -254,7 +254,7 @@ function declineBackoff(
  * 从上一次有人回应她（没有就从她上次说话）到别人最近一条：群没人说话时缺席感不增长
  * （替代 2 月 S3 对偶的硬跳过）；她插话被冷落，缺席感不缓解。
  */
-export function groupAbsence(chat: ChatNode): number {
+function groupAbsence(chat: ChatNode): number {
   if (chat.chatType !== "group" || chat.lastAliceAt <= 0) return 0;
   const since = Math.max(
     chat.lastBondAt,
@@ -265,7 +265,7 @@ export function groupAbsence(chat: ChatNode): number {
 }
 
 /** 没接的话的代价（论文 Def P4 retrospective 项）：w·((1+age/天)^β − 1)，过了寿命不再计。 */
-export function threadPressure(chat: ChatNode, now: number): number {
+function threadPressure(chat: ChatNode, now: number): number {
   const t = chat.thread;
   if (!t) return 0;
   const age = now - t.openedAt;
@@ -274,7 +274,7 @@ export function threadPressure(chat: ChatNode, now: number): number {
 }
 
 /** 这个人的行为偏离预期多少（论文 Remark per-contact surprise），∈ [0, 1)。 */
-export function contactSurprise(
+function contactSurprise(
   person: RelationView,
   tier: Tier,
   graphAgeDays: number,
@@ -308,9 +308,9 @@ export function curiosityDeficit(world: World, now: number): number {
 /**
  * 一个她看过预览、还没加入的群（A18）：好奇心 = 她此刻有多缺新鲜事（全局 P6 缺口 / η，∈ [0, 1]）
  * × 预览还新不新（PLACE_FRESH 衰减）× 想过、没加之后重新长起（考虑过就消耗；PLACE_REGROW）。
- * 外面热闹时她不缺新鲜事，就不会想去新群。刚看到预览时不打折：看了就是想过一次的开始。
+ * 外面热闹时她不缺新鲜事，就不会想去新群。刚看到预览时不衰减：看了就是想过一次的开始。
  */
-export function placeCuriosity(world: World, chat: ChatNode, seenAt: number, now: number): number {
+function placeCuriosity(world: World, chat: ChatNode, seenAt: number, now: number): number {
   const bored = curiosityDeficit(world, now) / CURIOSITY_ETA;
   const fresh = Math.exp(-Math.max(0, now - seenAt) / PLACE_FRESH);
   const regrown =
@@ -318,7 +318,26 @@ export function placeCuriosity(world: World, chat: ChatNode, seenAt: number, now
   return bored * fresh * regrown;
 }
 
-/** 一个会话此刻的原始驱动（未归一化，未习惯化）。 */
+/** 好奇：还没加入的群看它新不新，私聊看对方有多久没让她意外；其余会话没有。 */
+function curiosityOf(
+  world: World,
+  chat: ChatNode,
+  partner: RelationView | undefined,
+  tier: Tier,
+  graphAgeDays: number,
+  now: number,
+  place: boolean,
+): number {
+  if (place && chat.place && !chat.member) {
+    return placeCuriosity(world, chat, chat.place.seenAt, now);
+  }
+  if (chat.chatType === "private" && partner) {
+    return contactSurprise(partner, tier, graphAgeDays, now);
+  }
+  return 0;
+}
+
+/** 一个会话此刻的原始驱动（未归一化，未 habituation）。 */
 export function rawDrives(
   world: World,
   chat: ChatNode,
@@ -344,12 +363,7 @@ export function rawDrives(
         : partner
           ? contactCooling(partner, tier, now)
           : 0,
-    curiosity:
-      on.place && chat.place && !chat.member
-        ? placeCuriosity(world, chat, chat.place.seenAt, now)
-        : chat.chatType === "private" && partner
-          ? contactSurprise(partner, tier, graphAgeDays, now)
-          : 0,
+    curiosity: curiosityOf(world, chat, partner, tier, graphAgeDays, now, on.place),
     aversion: aversionAt(chat, now),
     prospect: on.commitments ? prospectPressure(chat.commitments.open, now) : 0,
     information:
@@ -362,7 +376,7 @@ export function rawDrives(
 
 /**
  * τ̂_k = tanh(τ_k/κ_k)，固定 κ（AdaptiveKappa 会把持续压力钉在 tanh(1)，被排除）。
- * 内在驱动乘习惯化 ρ_H；义务与回避是外部信号，不随她的厌倦减弱（论文 Eq habituation-application）。
+ * 内在驱动乘 habituation ρ_H；义务与回避是外部信号，不随她的厌倦减弱（论文 Eq habituation-application）。
  */
 export function normalizeDrives(raw: Drives, rho: number): Drives {
   return driveRecord((k) => {

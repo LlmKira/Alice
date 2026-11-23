@@ -1,6 +1,6 @@
 /**
  * 普查：在一个或几个窗口上零成本回放生产（她的发言用替身 surrogate.ts，别人的回应用 responders.ts），
- * 按 footprints.ts 的表读出每个生产机制的足迹：应有的足迹、期望、实测、在不在预期内。不调 LLM。
+ * 按 footprints.ts 的表读出每个生产机制的 footprint：应有的 footprint、期望、实测、在不在预期内。不调 LLM。
  *
  * 用法：pnpm census <events.jsonl> <开始ms> <结束ms> [<开始ms> <结束ms>]... [<另一个 events.jsonl> <开始ms> <结束ms>]...
  *        --surrogate <model.json> [--responders <model.json>] [--arm production] [--out <目录>]
@@ -107,15 +107,32 @@ const unitOf = (f: Footprint) =>
         ? " 分钟"
         : "";
 
+const fmt = (v: number | undefined | null) =>
+  v === undefined || v === null ? "–" : Number.isInteger(v) ? String(v) : v.toFixed(3);
+
+/** 期望那一栏：≥ 下限，≤ 上限，带单位。 */
+function expectation(f: Footprint): string {
+  const { min, max } = f.expect;
+  const low = min === undefined ? "" : `≥ ${fmt(min)}`;
+  const both = min !== undefined && max !== undefined ? "，" : "";
+  const high = max === undefined ? "" : `≤ ${fmt(max)}`;
+  return `${low}${both}${high}${unitOf(f)}`;
+}
+
+function verdict(f: Footprint, ok: boolean | null): string {
+  if (f.reportOnly) return "只报";
+  if (ok === null) return "无样本";
+  return ok ? "是" : "否";
+}
+
 export function render(rows: readonly CensusRow[]): string {
-  const fmt = (v: number | undefined | null) =>
-    v === undefined || v === null ? "–" : Number.isInteger(v) ? String(v) : v.toFixed(3);
-  const lines = ["| 机制 | 足迹 | 期望 | 实测 | 在预期内 | 来源 |", "|---|---|---|---|---|---|"];
+  const lines = [
+    "| 机制 | footprint | 期望 | 实测 | 在预期内 | 来源 |",
+    "|---|---|---|---|---|---|",
+  ];
   for (const { footprint: f, value, ok } of rows) {
-    const { min, max } = f.expect;
-    const want = `${min === undefined ? "" : `≥ ${fmt(min)}`}${min !== undefined && max !== undefined ? "，" : ""}${max === undefined ? "" : `≤ ${fmt(max)}`}${unitOf(f)}`;
     lines.push(
-      `| ${f.mechanism} | ${f.footprint} | ${want} | ${fmt(value)}${unitOf(f)} | ${f.reportOnly ? "只报" : ok === null ? "无样本" : ok ? "是" : "否"} | ${f.source} |`,
+      `| ${f.mechanism} | ${f.footprint} | ${expectation(f)} | ${fmt(value)}${unitOf(f)} | ${verdict(f, ok)} | ${f.source} |`,
     );
   }
   return lines.join("\n");
@@ -123,7 +140,7 @@ export function render(rows: readonly CensusRow[]): string {
 
 /**
  * 位置参数里的窗口：一个数据集后面跟一对或几对 <开始ms> <结束ms>，可以接着写下一个数据集和它的窗口
- * （几个数据集合在一起读，样本少的足迹靠它攒够样本）。格式不对就是空的。
+ * （几个数据集合在一起读，样本少的 footprint 靠它攒够样本）。格式不对就是空的。
  */
 export function windowsOf(
   args: readonly string[],

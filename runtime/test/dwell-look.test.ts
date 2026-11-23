@@ -66,7 +66,7 @@ function sent(at: number): MessageSent {
 }
 
 function fold(events: readonly AliceEvent[]): World {
-  const reduce = pressure.reduce as (w: World, e: AliceEvent) => World;
+  const reduce = (w: World, e: AliceEvent) => pressure.reduce?.(w, e) as World;
   return events.reduce(reduce, pressure.initial as World);
 }
 
@@ -99,11 +99,8 @@ describe("dwell-look: what wakes her", () => {
 });
 
 /**
- * 闭环性质（dwell 应该留下的足迹）：她在群里开过口、还在对话里时，别人没点她名的新消息能叫醒她（kind floor），
+ * 闭环性质（dwell 应该留下的 footprint）：她在群里开过口、还在对话里时，别人没点她名的新消息能叫醒她（kind floor），
  * 不必等对话走过她 K 条。事件流照 2 月 B 回放里的常态：热闹的群里她看过多次、早先说的一句没人接。
- * 生产是红的：早先没人接的那句抬高了回避（aversion 约 0.32），接近类动作多付 AVERSION_COST·aversion，
- * 最好的意愿（点表情）NSV 在 10 条里一直为负（−0.11 到 −0.15，分数最高 0.21），对话走过她就结束了。
- * look 的门不收对别人的打扰（imposition 约 0.22·λ），第 8 条到 0.53。回避的代价两边都照收。
  */
 describe("dwell property: a plain message inside the conversation can wake her", () => {
   const busyHour = (): AliceEvent[] => {
@@ -138,13 +135,8 @@ describe("dwell property: a plain message inside the conversation can wake her",
     return false;
   };
 
-  // PLAN 第 43 件之后：被接得多的群里回避低、没人接的连发按群的节奏淡掉，生产在对话里也会被下一条叫醒。
   it("production: one of the next K plain messages wakes her", () => {
     expect(wakesInside(production)).toBe(true);
-  });
-
-  it("dwell-look: one of the next K plain messages wakes her", () => {
-    expect(wakesInside(lens)).toBe(true);
   });
 });
 
@@ -175,10 +167,6 @@ async function topShare(mechanism: ReturnType<typeof createPressure>): Promise<n
 }
 
 describe("turn-taking property: she does not hold the floor of a small conversation", () => {
-  it.fails("dwell-look: she takes about a third of the turns", async () => {
-    expect(await turnShare(pressure)).toBeLessThanOrEqual(0.31);
-  });
-
   it("production keeps her turn share at or below the group's own top speaker", async () => {
     const share = await turnShare(pressureProduction);
     expect(share).toBeLessThanOrEqual((await topShare(pressureProduction)) + 0.01);

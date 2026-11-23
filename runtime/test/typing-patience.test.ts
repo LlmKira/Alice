@@ -178,11 +178,14 @@ describe("typing-patience (P06)", () => {
       unreadCount: 0,
     });
 
-    expect(
-      events.filter((e) => e.type === "typing.received").map((e) => (e as TypingReceived).status),
-    ).toEqual(["typing", "typing", "cancel"]);
-    expect(
-      events.filter((e) => e.type === "history.read").map((e) => (e as HistoryRead).maxReadId),
-    ).toEqual(["10", "11"]);
+    expect(events.filter((e) => e.type === "typing.received").map((e) => e.status)).toEqual([
+      "typing",
+      "typing",
+      "cancel",
+    ]);
+    expect(events.filter((e) => e.type === "history.read").map((e) => e.maxReadId)).toEqual([
+      "10",
+      "11",
+    ]);
   });
 });

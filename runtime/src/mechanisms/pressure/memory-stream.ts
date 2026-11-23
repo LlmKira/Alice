@@ -3,18 +3,19 @@
  * 当天生活，都是同一条流里的记录。受众规则（reaches）、两字片段的重合（similarity）和检索打分（relevance、
  * scoreMemory）只在这里有一份；日记、内心独白、对人的了解都从这里取，不再各自复制。
  *
- * 纯函数：时间只来自事件折叠出的 at 和传进来的 now。
+ * 纯函数：时间只来自事件 fold 出的 at 和传进来的 now。
  */
 import type { ChatState } from "../../mind/state.js";
 import { onTimeline } from "../../mind/state.js";
 import type { View } from "./feature.js";
 import type { LifeBodyState } from "./life-body.js";
+import type { Fact } from "./memory.js";
 import { DIARY_RANK } from "./params.js";
 import { SELF_SUBJECT } from "./people.js";
 import { presentIn } from "./world.js";
 
 /** 一条记忆是什么（日记的摘要、事实、她自己的事、想过的立场、答应的事、跟着的事、当天生活）。 */
-export type MemoryKind = "summary" | "fact" | "self" | "stance" | "commitment" | "topic" | "life";
+type MemoryKind = "summary" | "fact" | "self" | "stance" | "commitment" | "topic" | "life";
 
 /** 这条记忆是从哪里来的：哪个会话、是不是群、写下时在场的人、她标没标私密。 */
 export interface MemorySource {
@@ -118,7 +119,7 @@ export function memoryRelevance(
 }
 
 /** GA 的检索打分：近因（0.995^(小时)）+ 重要性（1–10 归一）+ 相关性。 */
-export function scoreMemory(record: MemoryRecord, here: MemoryAudience, now: number): number {
+function scoreMemory(record: MemoryRecord, here: MemoryAudience, now: number): number {
   return (
     DIARY_RANK.decayPerHour ** ((now - record.at) / 3_600_000) +
     (record.importance ?? DIARY_RANK.importance) / 10 +
@@ -157,29 +158,41 @@ function factRecords(
   here: MemoryAudience,
   now: number,
 ): MemoryRecord[] {
+  return Object.entries(world.facts).flatMap(([subject, facts]) =>
+    subject === SELF_SUBJECT || world.relations.people[subject]
+      ? subjectRecords(world, subject, facts, here, now)
+      : [],
+  );
+}
+
+/** 关于一个人（或她自己，SELF_SUBJECT）记下的事里，此刻这个会话看得见的那些。 */
+function subjectRecords(
+  world: View<"chats">,
+  subject: string,
+  facts: readonly Fact[],
+  here: MemoryAudience,
+  now: number,
+): MemoryRecord[] {
+  const self = subject === SELF_SUBJECT;
   const out: MemoryRecord[] = [];
-  for (const [subject, facts] of Object.entries(world.facts)) {
-    const self = subject === SELF_SUBJECT;
-    if (!self && !world.relations.people[subject]) continue;
-    for (const f of facts) {
-      if (f.lastAt > now) continue;
-      const source: MemorySource = {
-        scope: f.scope,
-        group: world.chats[f.scope]?.chatType === "group",
-        present: f.origin.present,
-        ...(f.origin.private ? { private: true } : {}),
-      };
-      if (!memoryReaches(source, here)) continue;
-      out.push({
-        kind: self ? "self" : "fact",
-        text: f.text,
-        about: self ? null : subject,
-        source,
-        at: f.lastAt,
-        importance: null,
-        count: f.count,
-      });
-    }
+  for (const f of facts) {
+    if (f.lastAt > now) continue;
+    const source: MemorySource = {
+      scope: f.scope,
+      group: world.chats[f.scope]?.chatType === "group",
+      present: f.origin.present,
+      ...(f.origin.private ? { private: true } : {}),
+    };
+    if (!memoryReaches(source, here)) continue;
+    out.push({
+      kind: self ? "self" : "fact",
+      text: f.text,
+      about: self ? null : subject,
+      source,
+      at: f.lastAt,
+      importance: null,
+      count: f.count,
+    });
   }
   return out;
 }
@@ -229,8 +242,7 @@ function chatRecords(world: View<"chats">, scope: string, local: MemorySource): 
 }
 
 function lifeRecords(world: View<"life">, local: MemorySource, now: number): MemoryRecord[] {
-  const life = world.life as unknown as LifeBodyState | undefined;
-  const day = life?.day;
+  const day = (world.life as Partial<LifeBodyState> | undefined)?.day;
   if (!day) return [];
   const lifeAt = world.life.at > 0 ? world.life.at : now;
   const push = (text: string, at = lifeAt): MemoryRecord => ({
@@ -249,7 +261,7 @@ function lifeRecords(world: View<"life">, local: MemorySource, now: number): Mem
   ];
 }
 
-/** 她从事件折叠出的世界投影成一条记忆流（此刻这个会话看得见的那些），按检索打分从高到低。 */
+/** 她从事件 fold 出的世界投影成一条记忆流（此刻这个会话看得见的那些），按检索打分从高到低。 */
 export function projectMemoryStream(
   world: View<"diary" | "facts" | "thoughts" | "chats" | "relations" | "life">,
   chat: ChatState,

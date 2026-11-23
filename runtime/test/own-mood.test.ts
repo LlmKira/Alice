@@ -1,19 +1,17 @@
 /**
  * 心情用她自己的词（PLAN 第 34 件）：她写什么词就是什么词，不再从 14 个词里选；效价由外壳问判口气的模型
- * （llm/tone.ts perceiveMood），写在那条心情的事件上；判不出效价的心情只记下词，不折进她的心情。
+ * （llm/tone.ts perceiveMood），写在那条心情的事件上；判不出效价的心情只记下词，不 fold 进她的心情。
  */
 import { describe, expect, it } from "vitest";
 import { decodeEvent } from "../src/journal.js";
-import type { Gateway } from "../src/llm/gateway.js";
 import { perceiveMood, valenceOfScore } from "../src/llm/tone.js";
 import { initialAffect, moodOf, reduceAffect } from "../src/mechanisms/pressure/affect.js";
 import { mechanisms } from "../src/mechanisms/registry.js";
-import { affordances } from "../src/mind/affordances.js";
 import { buildAct } from "../src/mind/args.js";
 import type { AliceEvent } from "../src/mind/events.js";
 import { createFold, Shell, type ShellPorts } from "../src/shell.js";
-import { codeMode } from "../src/speech/decision.js";
 import { parseReflect } from "../src/speech/reflect.js";
+import { fakeGateway } from "./fake-gateway.js";
 import { modelReply } from "./model-reply.js";
 
 const T0 = Date.parse("2026-11-10T14:00:00+08:00");
@@ -61,20 +59,21 @@ describe("she writes her own mood word", () => {
       parseReflect(`{"entries":[],"mood":{"word":"${word}","why":null}}`, request as never).mood
         ?.word;
     expect(said("有点心疼。")).toBe("有点心疼");
-    expect(said("今天发生了好多事情让我心里很乱很乱")).toBeUndefined();
+    expect(
+      said(
+        "今天发生了好多事情让我心里很乱很乱，而且一时半会儿也理不清楚到底是怎么回事、该从哪说起才好呢，真的好烦躁",
+      ),
+    ).toBeUndefined();
     expect(parseReflect('{"entries":[],"mood":null}', request as never).mood).toBeUndefined();
   });
 
-  it("[心情] takes her own word too, and the instructions no longer list fourteen words", () => {
+  it("[心情] takes her own word too", () => {
     const ctx = { timeline: [], now: T0 };
     expect(buildAct("feel", { mood: "想念", why: null }, ctx)).toEqual({
       kind: "feel",
       mood: "想念",
       why: null,
     });
-    const sdk = codeMode.rules(affordances.filter((a) => a.kind === "feel"));
-    expect(sdk).toContain("心情用你自己的词");
-    expect(sdk).not.toContain('"开心" | "兴奋"');
   });
 
   it("her own word is on her card once a valence is perceived; without one it is only written down", () => {
@@ -110,13 +109,10 @@ describe("the valence comes from the tone judge, not a table", () => {
 
   it("asks one score question about her word and reason", async () => {
     const bodies: unknown[] = [];
-    const gateway = {
-      charge: () => {},
-      post: async (call: { body: unknown }) => {
-        bodies.push(call.body);
-        return { body: { answers: { v: { score: 3.92 } } }, spent: {} };
-      },
-    } as unknown as Gateway;
+    const gateway = fakeGateway((call) => {
+      bodies.push(call.body);
+      return { answers: { v: { score: 3.92 } } };
+    });
     expect(await perceiveMood(gateway, { word: "心动", why: "他说想我" })).toBeCloseTo(0.96);
     expect(JSON.stringify(bodies[0])).toContain("心动（因为他说想我）");
     expect(JSON.stringify(bodies[0])).toContain('"type":"score"');

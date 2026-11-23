@@ -3,7 +3,7 @@
  * 的核心情感效价——围绕一个常态（home base）波动，被回归力（attractor strength）拉回常态，波动来自她察觉不到
  * 来由的内外因素（OU 过程，随机数由外壳抽、写成 noise.drawn 事件，键 "mood"）；她对经历的评价（反思写下的心情、
  * 她自己写的 [心情]）把效价推到那个词的位置，带着原因。词是她自己写的，效价由外壳问判口气的模型
- * （llm/tone.ts perceiveMood，记在事件上）；判不出效价的心情不折进来。
+ * （llm/tone.ts perceiveMood，记在事件上）；判不出效价的心情不 fold 进来。
  *
  * 她只有这一份心情：发言提示词里的那一行、反思时"你此刻的心情"、[心情] 这项能力都读写它（压力场的一样，
  * world.affect）。以前压力场的记忆还另折一份（半衰期 1 小时、按词的效价），发言提示只显示这一份，反思却读那一份，
@@ -48,7 +48,7 @@ import type { AliceEvent, ChatType } from "../../mind/events.js";
 import type { Contribution } from "../../mind/mechanism.js";
 import { ou, ouStep } from "../../mind/noise.js";
 import { elapsed } from "../../mind/when.js";
-import { feature, type PressureFeature } from "./feature.js";
+import { feature, type PressureFeature, type View, type WillTerms } from "./feature.js";
 import type { LifeBodyState } from "./life-body.js";
 import { MOOD_RESET, MOOD_VISIBLE, REFLECT } from "./params.js";
 import { placeOf } from "./place.js";
@@ -73,14 +73,14 @@ export const AFFECT = ou({ mu: 0.05, sd: AFFECT_SD, halfLife: HALF_LIFE_H });
  * 量出来的常态：Kuppens, Oravecz & Tuerlinckx 2010 研究 1（N = 79）表 2，效价常态的总体均值 5.95，
  * 量表 0.1–9.9、中点 5；换到 [−1, 1]：(5.95 − 5) / 4.9 ≈ 0.19（研究 2 是 5.82，≈ 0.17）。
  */
-export const HOME_MEASURED = 0.19;
+const HOME_MEASURED = 0.19;
 /**
  * 认识的人来找她时，评价推向的词和效价。0.6 是以前心情词表里"开心"的数（手设）；判口气的模型给"开心"0.70
  * （探针 2026-11-13），沿用旧数，免得被人找这条闭环跟着变。
  */
 const BID = { word: "开心", valence: 0.6 } as const;
 /** 醒着的这么久里没有人找她，就写一句。手设：醒着的一天约 16 小时，四分之一。 */
-export const LONELY_AWAKE = 4 * H;
+const LONELY_AWAKE = 4 * H;
 /** 群里"当时在场"的人：最近说过话的这么多条消息的发言人（和日记的受众规则同一口径）。 */
 const PRESENT_LINES = 30;
 /** tone：每个会话记最近几条找她的消息是谁发的（口气晚到时认人）。口气在一次叫醒里判完，几条足够。手设。 */
@@ -159,8 +159,9 @@ const dynamics = (state: AffectState) => ({ ...AFFECT, mu: state.home });
 /** 没有新的波动时，效价按回归力回到常态（OU 的期望）。 */
 export function valenceAt(state: AffectState, now: number): number {
   const base = ouStep(state.valence, dynamics(state), Math.max(0, now - state.at) / H, 0);
-  if (!state.bodyOffset) return base;
-  return Math.max(-1, Math.min(1, base + state.bodyOffset));
+  const offset = state.bodyOffset ?? 0;
+  if (!offset) return base;
+  return Math.max(-1, Math.min(1, base + offset));
 }
 
 /**
@@ -245,7 +246,7 @@ function appraise(
 }
 
 /** 给别的机制（如正向回流）写一条心情评价：复用 appraise 的条件重置与原因归一。 */
-export function pushAppraisal(
+function pushAppraisal(
   state: AffectState,
   mood: {
     word: string;
@@ -273,7 +274,7 @@ function appraisalLeft(a: Appraisal, home: number, now: number): number {
 }
 
 /** 她对一个人来找她的口气的感知（以后由感知给出；现在没有，按 undefined）。 */
-export type BidTone = "warm" | "cold";
+type BidTone = "warm" | "cold";
 
 /**
  * 一个人来找她（候选 warmth 的 bids）。推多少按他隔了多久才来：1 − 2^(−间隔/心情半衰期)，记录里第一次来算隔了
@@ -330,8 +331,8 @@ function bid(
 
 /**
  * tone：一条找她的话被判成冷淡或敌意（message.perceived 的 tone，比消息晚到）。那个人不因她回了这一条就算
- * "有过来往"（从在等她的人里拿掉）；这一条推向开心的那次退回到推之前，只退它自己那一次：之后有了新的评价就不动
- * （和 closeness.ts 的 retract 同一个形状）。
+ * "有过来往"（从在等她的人里去掉）；这一条推向开心的那次退回到推之前，只退它自己那一次：之后有了新的评价就不动
+ * （和原 closeness 机制的 retract 同一个形状）。
  */
 function unfriendly(state: AffectState, scope: string, messageId: string): AffectState {
   const place = state.places[scope];
@@ -342,13 +343,110 @@ function unfriendly(state: AffectState, scope: string, messageId: string): Affec
       : state.places;
   const p = state.pushed;
   const own = p?.scope === scope && p.messageId === messageId;
-  if (!own || !p) return places === state.places ? state : { ...state, places };
+  if (!own) return places === state.places ? state : { ...state, places };
   const { pushed: _, ...rest } = state;
   return state.appraisal?.at === p.at ? { ...rest, places, ...p.prior } : { ...rest, places };
 }
 
+type EventOf<T extends AliceEvent["type"]> = Extract<AliceEvent, { type: T }>;
+
+/** 背景波动走一格（OU 过程，随机数是外壳抽的 "mood"）。 */
+function drift(state: AffectState, event: EventOf<"noise.drawn">): AffectState {
+  const z = event.draws.mood;
+  if (z === undefined) return state;
+  // 第一格只定下起点：之前没有经过的时间。
+  if (state.at === 0) return { ...state, at: event.at };
+  return {
+    ...state,
+    valence: ouStep(state.valence, dynamics(state), (event.at - state.at) / H, z),
+    at: event.at,
+  };
+}
+
+/** 有人在这个会话里说话：记下在场的人和有没有人找她；warmth.bids 开着时，被人找是一次评价。 */
+function received(
+  state: AffectState,
+  event: EventOf<"message.received">,
+  warmth: Warmth,
+  relations: Pick<RelationsState, "people"> | undefined,
+): AffectState {
+  const prev = state.places[event.scope];
+  const sought = event.directed || event.chatType === "private";
+  const place: Place = {
+    ...prev,
+    chatType: event.chatType,
+    partner: event.chatType === "private" ? event.senderId : (prev?.partner ?? null),
+    senders: [...(prev?.senders ?? []), event.senderId].slice(-PRESENT_LINES),
+    soughtAt: sought ? event.at : (prev?.soughtAt ?? 0),
+    ...(warmth.tone && sought
+      ? {
+          sought: [...(prev?.sought ?? []), [event.messageId, event.senderId] as const].slice(
+            -SOUGHT_KEPT,
+          ),
+        }
+      : {}),
+  };
+  const next: AffectState = {
+    ...state,
+    at: state.at === 0 ? event.at : state.at,
+    places: { ...state.places, [event.scope]: place },
+    soughtAt: sought ? event.at : state.soughtAt,
+  };
+  if (!warmth.bids || !sought) return next;
+  const who = relations?.people[event.senderId];
+  return bid(
+    next,
+    { who: event.senderId, name: event.senderName, scope: event.scope, at: event.at },
+    {
+      lastToHerAt: who?.seen.lastToHerAt ?? 0,
+      met: (who?.warmth.exchanges ?? 0) > 0,
+    },
+    warmth.tone ? event.messageId : undefined,
+  );
+}
+
+/** 她自己写的 [心情] 是一次评价；[算了] 只给这个会话里还在的负面评价记一笔翻篇。 */
+function acted(state: AffectState, event: EventOf<"act.done">): AffectState {
+  const act = event.act;
+  if (act.kind === "feel") {
+    const mood = {
+      word: act.mood,
+      why: act.why,
+      valence: event.valence,
+      ...(act.secret ? { private: true as const } : {}),
+    };
+    return appraise(state, mood, event.scope, event.at);
+  }
+  const a = state.appraisal;
+  if (act.kind === "let-go" && a && a.scope === event.scope && a.valence < 0) {
+    return { ...state, appraisal: { ...a, letGo: true } };
+  }
+  return state;
+}
+
+function reflected(
+  state: AffectState,
+  event: EventOf<"ponder.done">,
+  warmth: Warmth,
+  rejected: number,
+): AffectState {
+  const p = event.ponder;
+  if (p.kind !== "reflect" || !p.mood) return state;
+  // 那里的人正嫌她时，反思写下的好心情推得少：推多少乘 1 − tanh(嫌她的程度)，和那里开口的代价同一个量
+  // （PLAN 第 3 件：线上 11-13 骂战里 9 次反思有 6 次写开心或兴奋）。不好的心情照常。
+  const good = (p.mood.valence ?? state.home) > state.home;
+  const damp = good ? 1 - Math.tanh(rejected) : 1;
+  return appraise(
+    state,
+    p.mood,
+    p.scope,
+    event.at,
+    (warmth.relevance ? relevance(state, p.scope) : 1) * damp,
+  );
+}
+
 /**
- * 折叠一个事件。warmth 默认全关（生产）；关着时和以前逐字节相同的状态转移（多出的几个字段不进提示词）。
+ * fold 一个事件。warmth 默认全关（生产）；关着时和以前逐字节相同的状态转移（多出的几个字段不进提示词）。
  */
 export function reduceAffect(
   state: AffectState,
@@ -360,19 +458,10 @@ export function reduceAffect(
   relations?: Pick<RelationsState, "people">,
 ): AffectState {
   switch (event.type) {
-    case "noise.drawn": {
-      const z = event.draws.mood;
-      if (z === undefined) return state;
-      // 第一格只定下起点：之前没有经过的时间。
-      if (state.at === 0) return { ...state, at: event.at };
-      return {
-        ...state,
-        valence: ouStep(state.valence, dynamics(state), (event.at - state.at) / H, z),
-        at: event.at,
-      };
-    }
+    case "noise.drawn":
+      return drift(state, event);
     case "message.sent": {
-      // 她在这里开口：记下时刻（评价强度）。在这里等她的人算她回应过了（有过来往）那一笔由 relation 折进
+      // 她在这里开口：记下时刻（评价强度）。在这里等她的人算她回应过了（有过来往）那一笔由 relation fold 进
       // relations（warmth.exchanges），这里只清掉自己的等待名单。
       const prev = state.places[event.scope];
       if (!prev || !(warmth.relevance || warmth.bids)) return state;
@@ -381,77 +470,16 @@ export function reduceAffect(
         places: { ...state.places, [event.scope]: { ...prev, spokeAt: event.at, waiting: [] } },
       };
     }
-    case "message.received": {
-      const prev = state.places[event.scope];
-      const sought = event.directed || event.chatType === "private";
-      const place: Place = {
-        ...prev,
-        chatType: event.chatType,
-        partner: event.chatType === "private" ? event.senderId : (prev?.partner ?? null),
-        senders: [...(prev?.senders ?? []), event.senderId].slice(-PRESENT_LINES),
-        soughtAt: sought ? event.at : (prev?.soughtAt ?? 0),
-        ...(warmth.tone && sought
-          ? {
-              sought: [...(prev?.sought ?? []), [event.messageId, event.senderId] as const].slice(
-                -SOUGHT_KEPT,
-              ),
-            }
-          : {}),
-      };
-      const next: AffectState = {
-        ...state,
-        at: state.at === 0 ? event.at : state.at,
-        places: { ...state.places, [event.scope]: place },
-        soughtAt: sought ? event.at : state.soughtAt,
-      };
-      if (!warmth.bids || !sought) return next;
-      const who = relations?.people[event.senderId];
-      return bid(
-        next,
-        { who: event.senderId, name: event.senderName, scope: event.scope, at: event.at },
-        {
-          lastToHerAt: who?.seen.lastToHerAt ?? 0,
-          met: (who?.warmth.exchanges ?? 0) > 0,
-        },
-        warmth.tone ? event.messageId : undefined,
-      );
-    }
+    case "message.received":
+      return received(state, event, warmth, relations);
     case "message.perceived": {
       if (!warmth.tone || (event.tone !== "cold" && event.tone !== "hostile")) return state;
       return unfriendly(state, event.scope, event.messageId);
     }
-    case "act.done": {
-      const act = event.act;
-      if (act.kind === "feel") {
-        const mood = {
-          word: act.mood,
-          why: act.why,
-          valence: event.valence,
-          ...(act.secret ? { private: true as const } : {}),
-        };
-        return appraise(state, mood, event.scope, event.at);
-      }
-      const a = state.appraisal;
-      if (act.kind === "let-go" && a && a.scope === event.scope && a.valence < 0) {
-        return { ...state, appraisal: { ...a, letGo: true } };
-      }
-      return state;
-    }
-    case "ponder.done": {
-      const p = event.ponder;
-      if (p.kind !== "reflect" || !p.mood) return state;
-      // 那里的人正嫌她时，反思写下的好心情推得少：推多少乘 1 − tanh(嫌她的程度)，和那里开口的代价同一个量
-      // （PLAN 第 3 件：线上 11-13 骂战里 9 次反思有 6 次写开心或兴奋）。不好的心情照常。
-      const good = (p.mood.valence ?? state.home) > state.home;
-      const damp = good ? 1 - Math.tanh(rejected) : 1;
-      return appraise(
-        state,
-        p.mood,
-        p.scope,
-        event.at,
-        (warmth.relevance ? relevance(state, p.scope) : 1) * damp,
-      );
-    }
+    case "act.done":
+      return acted(state, event);
+    case "ponder.done":
+      return reflected(state, event, warmth, rejected);
     default:
       return state;
   }
@@ -530,7 +558,7 @@ export function moodOf(
 }
 
 /** 醒着的 LONELY_AWAKE 里没有人找过她：那时到现在多久了（醒着的时长）；否则 null。 */
-export function lonelyFor(state: AffectState, now: number): number | null {
+function lonelyFor(state: AffectState, now: number): number | null {
   if (state.soughtAt === null || isAsleep(now)) return null;
   const awake = awakeBetween(state.soughtAt, now);
   return awake >= LONELY_AWAKE ? now - state.soughtAt : null;
@@ -553,7 +581,7 @@ export function moodFor(
 }
 
 /**
- * 她的心情是压力场的一样：折进 world.affect，给她 [心情] 这项能力，往提示词里写心情那一行和"很久没人找你"。
+ * 她的心情是压力场的一样：fold 进 world.affect，给她 [心情] 这项能力，往提示词里写心情那一行和"很久没人找你"。
  * noise：读不读外壳的波动（消融 affect-calm 不读：只剩评价和回归）。
  * lonely：写不写"很久没人找你"（消融 affect-unsought 不写：开发集里 affect 组在两个长空档的私聊里多出一倍
  * "想过、决定不主动"的唤醒，要分清是不是这句引起的）。
@@ -569,6 +597,10 @@ export function affect(o: {
   feedback?: boolean;
   /** body（lifeBody）：读取身体的饿/困偏移（moodNudge）。 */
   body?: boolean;
+  /** willDrive（PLAN 第 46 件）：心情温和调制内在驱动（[0.75, 1.20] 有界，不碰义务和回避）。 */
+  willDrive?: boolean;
+  /** 实验：把本会话内的心情波动按时间穿插回聊天时间线原位。 */
+  inline?: boolean;
 }): PressureFeature {
   const warmth = o.warmth ?? NO_WARMTH;
   const warm = warmth.home || warmth.relevance || warmth.bids;
@@ -586,8 +618,21 @@ export function affect(o: {
     ...(o.feedback ? (["feedback"] as const) : []),
     ...(o.body ? (["life"] as const) : []),
   ];
+  const will: Pick<WillTerms<View<"affect">>, "intrinsicGain"> | undefined = o.willDrive
+    ? {
+        intrinsicGain: (world, reading, now) => {
+          // 有界调制内在开口/分享劲（PLAN 第 46 件）：开心时轻轻往上推（至多 1.20），
+          // 低落时不冷掉正在找她或关系好的朋友，只在没人找的主动冒泡时收一点（最低 0.75）。
+          const delta = valenceAt(world.affect, now) - world.affect.home;
+          const shape = Math.tanh(delta / 0.35);
+          if (delta >= 0) return 1 + 0.2 * shape;
+          if (reading.solicited) return Math.max(0.9, 1 + 0.1 * shape);
+          return Math.max(0.75, 1 + 0.25 * shape);
+        },
+      }
+    : undefined;
   return feature({
-    name: o.rejection ? `${named}-rejection` : named,
+    name: `${o.rejection ? `${named}-rejection` : named}${o.willDrive ? "-will" : ""}`,
     provides: ["affect"],
     // 别处的原因注明在哪（place.ts）：群名、私聊的对方。没有 rejection / life / feedback 的组成里照常工作，
     // 所以它们是 uses。
@@ -614,7 +659,7 @@ export function affect(o: {
           at: boost.at,
         });
       }
-      const life = w.life as unknown as Partial<LifeBodyState> | undefined;
+      const life = w.life as Partial<LifeBodyState> | undefined;
       if (life && "sleep" in life && "hunger" in life) {
         const bodyOffset = life.moodNudge;
         if (next.bodyOffset !== bodyOffset) {
@@ -625,7 +670,8 @@ export function affect(o: {
       return next === w.affect ? w : { ...w, affect: next };
     },
     contribute: ({ world, chat, now }) =>
-      contribute(chat, now, world.affect, o.lonely, (s) => placeOf(world, s)),
+      contribute(chat, now, world.affect, o.lonely, (s) => placeOf(world, s), o.inline === true),
+    ...(will ? { will } : {}),
   });
 }
 
@@ -635,11 +681,32 @@ function contribute(
   state: AffectState,
   withLonely: boolean,
   place: (scope: string) => string,
+  withInline = false,
 ): Contribution[] {
   const lonely = withLonely ? lonelyFor(state, now) : null;
   const mood = moodOf(state, chat.scope, chat.chatType, now, place);
+  const a = state.appraisal;
+  const shift = valenceAt(state, now) - state.home;
+  const localInline =
+    withInline && a && a.scope === chat.scope && heldAt(a, state.home, shift, now)
+      ? [
+          {
+            at: a.at,
+            text: `(心情) ${Math.abs(shift) >= Math.abs(a.valence - state.home) / 2 ? a.word : fading(a.word)}${a.why ? `（${a.why}）` : ""}`,
+          },
+        ]
+      : undefined;
   return [
-    ...(mood === null ? [] : [{ mechanism: "affect", kind: "mood" as const, text: mood }]),
+    ...(mood === null && !localInline
+      ? []
+      : [
+          {
+            mechanism: "affect",
+            kind: "mood" as const,
+            text: mood ?? "",
+            ...(localInline ? { inline: localInline } : {}),
+          },
+        ]),
     ...(lonely === null
       ? []
       : [

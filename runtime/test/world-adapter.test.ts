@@ -2,6 +2,7 @@ import type { Dispatcher } from "@mtcute/dispatcher";
 import { describe, expect, it } from "vitest";
 import type { AliceEvent } from "../src/mind/events.js";
 import { bindTelegramWorldAdapter } from "../src/telegram/world-adapter.js";
+import { mtcuteFake } from "./mtcute-fake.js";
 
 /** 只记下注册的处理函数，按 Telegram 的形状手动喂更新。 */
 function fakeDispatcher() {
@@ -12,7 +13,7 @@ function fakeDispatcher() {
     };
     member?: (ctx: unknown) => unknown;
   } = {};
-  const dispatcher = {
+  const dispatcher = mtcuteFake<Dispatcher>({
     onNewMessage: () => {},
     onRawUpdate: (filter: never, fn: never) => {
       h.raw = { filter, fn };
@@ -20,7 +21,7 @@ function fakeDispatcher() {
     onChatMemberUpdate: (fn: never) => {
       h.member = fn;
     },
-  } as unknown as Dispatcher;
+  });
   return { dispatcher, h };
 }
 
@@ -169,7 +170,7 @@ describe("telegram world adapter: perception beyond messages", () => {
           downloaded += 1;
           return new Uint8Array([1, 2, 3]);
         },
-      } as never,
+      },
     );
     await perceived.promise;
     expect(downloaded).toBe(0);

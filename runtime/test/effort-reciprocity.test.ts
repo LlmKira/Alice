@@ -129,19 +129,4 @@ describe("effort reciprocity", () => {
     const w = fold(events);
     expect(reciprocityCost(w, end, true)).toBe(reciprocityCost(w, end, false));
   });
-
-  it("off by default: BARE_WILL is unchanged", () => {
-    const { events, end } = terseRounds(["1", "好的", "对的", null, "1"]);
-    const w = fold(events);
-    expect(BARE_WILL.effortReciprocity).toBeUndefined();
-    const off = intentionsFor(w, affordances, DM, end, BARE_WILL);
-    const explicitOff = intentionsFor(w, affordances, DM, end, {
-      ...BARE_WILL,
-      effortReciprocity: false,
-    });
-    expect(explicitOff).toEqual(off);
-    const chat = w.chats[DM];
-    if (!chat) throw new Error("no chat");
-    expect(socialCost(w, chat, 15, 0.3, end)).toBe(socialCost(w, chat, 15, 0.3, end, false));
-  });
 });

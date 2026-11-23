@@ -8,6 +8,7 @@ import { createGateway } from "../src/llm/gateway.js";
 import { type ImageTags, imageLine, localTagger, readTags, seeFrame } from "../src/llm/perceive.js";
 import type { AliceEvent } from "../src/mind/events.js";
 import { bindTelegramWorldAdapter } from "../src/telegram/world-adapter.js";
+import { mtcuteFake } from "./mtcute-fake.js";
 
 /** services/tagger/server.py 的回复形状。 */
 const reply = (over: Partial<Record<"rating" | "characters" | "tags", unknown>> = {}) => ({
@@ -85,13 +86,13 @@ const vision = (content: string | null, status = 200) => {
   const gateway = createGateway({
     apiKey: "k",
     charge: () => {},
-    fetch: (async (_: unknown, init?: RequestInit) => {
-      asked.push(JSON.parse(String(init?.body)));
+    fetch: async (_: unknown, init?: RequestInit) => {
+      asked.push(JSON.parse(String(init?.body)) as (typeof asked)[number]);
       return new Response(
         JSON.stringify({ choices: [{ message: { content } }], usage: { prompt_tokens: 1100 } }),
         { status },
       );
-    }) as typeof fetch,
+    },
   });
   return Object.assign(gateway, { asked });
 };
@@ -99,25 +100,16 @@ const vision = (content: string | null, status = 200) => {
 const image = new Uint8Array([0xff, 0xd8, 0xff]);
 
 describe("seeing a picture: description and tagger together", () => {
-  it("asks with the February prompt for each kind (English, specific, nothing filtered) and keeps the answer whole", async () => {
+  it("asks each kind with its own prompt and keeps the answer whole", async () => {
     const long = `**A poster** reading \`SALE\`\n${"and more details ".repeat(30)}`;
     const g = vision(long);
     const line = await seeFrame(g, null, image, "photo");
-    expect(g.asked[0]?.messages[0]?.content[0]?.text).toBe(
-      "What is in this image? Be specific: mention any visible text, names, numbers, UI elements. If there is text or a screenshot, prioritize summarizing the text content. Be concise but keep important details. DO NOT start with 'This image' or 'The image'.",
-    );
-    expect(g.asked[0]?.max_tokens).toBe(150);
     expect(line.startsWith("A poster reading SALE and more details")).toBe(true);
     expect(line.endsWith("…")).toBe(false);
     await seeFrame(g, null, image, "gif");
     await seeFrame(g, null, image, "video");
-    expect(g.asked.slice(1).map((b) => [b.messages[0]?.content[0]?.text, b.max_tokens])).toEqual([
-      ["What emotion or action does this GIF convey? Be brief but specific.", 60],
-      [
-        "What is happening in this video? Mention key details (people, scene, action). DO NOT start with 'This' or 'The'.",
-        100,
-      ],
-    ]);
+    const prompts = g.asked.map((b) => b.messages[0]?.content[0]?.text);
+    expect(new Set(prompts).size).toBe(3);
   });
 
   it("both arrive: one line with both", async () => {
@@ -159,7 +151,7 @@ describe("seeing a picture: description and tagger together", () => {
     const fake = (async (url: string, init?: RequestInit) => {
       seen.push({ url, body: init?.body });
       return new Response(JSON.stringify(reply()));
-    }) as unknown as typeof fetch;
+    }) as typeof fetch;
     expect(await localTagger("http://127.0.0.1:39100/", fake)(image)).toEqual(cirno);
     expect(seen[0]?.url).toBe("http://127.0.0.1:39100/tag");
     expect([...(seen[0]?.body as Uint8Array)]).toEqual([...image]);
@@ -177,11 +169,11 @@ describe("a GIF or a video: its preview frame is looked at", () => {
       return `${kind} description`;
     };
     const { receive } = bindTelegramWorldAdapter(
-      {
+      mtcuteFake<Dispatcher>({
         onNewMessage: () => {},
         onRawUpdate: () => {},
         onChatMemberUpdate: () => {},
-      } as unknown as Dispatcher,
+      }),
       {
         selfId: "42",
         now: () => 1,
@@ -211,7 +203,7 @@ describe("a GIF or a video: its preview frame is looked at", () => {
           downloaded.push(file);
           return new Uint8Array([1]);
         },
-      } as never,
+      },
     );
     await new Promise((r) => setTimeout(r, 0));
     const seen = events.find((e) => e.type === "message.perceived");

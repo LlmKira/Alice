@@ -107,7 +107,7 @@ const sayInPrivate: Oracle = (r) =>
     ? { acts: [{ kind: "send", text: "嗨", replyTo: null }] }
     : { acts: [] };
 
-async function run(events: AliceEvent[], oracle: Oracle, tickMs = 10_000) {
+async function run(events: AliceEvent[], oracle: Oracle, tickMs = 60_000) {
   const requests: SpeechRequest[] = [];
   const result = await replay(events, {
     mechanisms: withReach,
@@ -127,9 +127,12 @@ describe(
   "reach: a private chat with someone she knows from a group (A10)",
   { timeout: 60_000 },
   () => {
+    let cachedQuietDay: ReturnType<typeof run> | null = null;
+    const quietDay = () => (cachedQuietDay ??= run([...world(), until(T0 + D)], quiet));
+
     it("opens the private chat in that person's own scope, and says where they met", async () => {
       expect(DM).toBe("telegram:100");
-      const { requests } = await run([...world(), until(T0 + D)], quiet);
+      const { requests } = await quietDay();
       const first = requests.find((r) => r.scope === DM);
       expect(first).toBeDefined();
       expect(first?.chatType).toBe("private");
@@ -140,7 +143,7 @@ describe(
     });
 
     it("puts only that person's public lines from the group into the private chat", async () => {
-      const { requests } = await run([...world(), until(T0 + D)], quiet);
+      const { requests } = await quietDay();
       const all = requests
         .filter((r) => r.scope === DM)
         .flatMap((r) => r.contributions.map((c) => c.text))
@@ -186,7 +189,7 @@ describe(
     });
 
     it("thinking it over and deciding not to is consumed like any private chat", async () => {
-      const { requests, result } = await run([...world(), until(T0 + D)], quiet);
+      const { requests, result } = await quietDay();
       const times = requests.filter((r) => r.scope === DM).map((r) => r.at);
       const w = result.state.mechanisms[reach.name] as World;
       expect(w.chats[DM]?.partner).toBe("100");
@@ -209,30 +212,17 @@ describe(
 
     it("is off in no-reach ablation: no private chat appears that nobody started, and no group search", async () => {
       const noReach = arms({})["no-reach"] ?? [];
-      const offered: string[] = [];
-      await replay([...world(), until(T0 + D)], {
-        mechanisms: noReach,
-        tickMs: 10_000,
-        speech: (r) => {
-          offered.push(...r.affordances);
-          return { acts: [] };
-        },
-      });
-      expect(offered).not.toContain("chat-search");
-    });
-
-    it("is off in no-reach ablation: no private chat appears that nobody started (scopes)", async () => {
-      const noReach = arms({})["no-reach"] ?? [];
       const requests: SpeechRequest[] = [];
       await replay([...world(), until(T0 + D)], {
         mechanisms: noReach,
-        tickMs: 10_000,
+        tickMs: 60_000,
         speech: (r) => {
           requests.push(r);
           return { acts: [] };
         },
       });
       expect(requests.some((r) => r.scope === DM)).toBe(false);
+      expect(requests.flatMap((r) => r.affordances)).not.toContain("chat-search");
     });
   },
 );
@@ -275,7 +265,7 @@ describe("reach: groups and channels she has looked at (A18, A08)", () => {
     const requests: SpeechRequest[] = [];
     const result = await replay(events, {
       mechanisms: withReach,
-      tickMs: 10_000,
+      tickMs: 60_000,
       look,
       speech: (request) => {
         requests.push(request);
@@ -285,19 +275,22 @@ describe("reach: groups and channels she has looked at (A18, A08)", () => {
     return { requests, result };
   }
 
+  let cachedDeclined: ReturnType<typeof runPlaces> | null = null;
+  const declinedRun = () => (cachedDeclined ??= runPlaces(invited(), oracle(false)));
+
   it("offers looking for groups where the reach candidate runs", async () => {
-    const { requests } = await runPlaces(invited(), oracle(false));
+    const { requests } = await declinedRun();
     expect(requests.find((r) => r.scope === FRIEND)?.affordances).toContain("chat-search");
   });
 
   it("the preview comes back into the chat where she looked", async () => {
-    const { requests } = await runPlaces(invited(), oracle(false));
-    const after = requests.filter((r) => r.scope === FRIEND && r.looked?.length);
+    const { requests } = await declinedRun();
+    const after = requests.filter((r) => r.scope === FRIEND && (r.looked?.length ?? 0) > 0);
     expect(after[0]?.looked?.[0]?.text).toContain("胶片冲洗互助");
   });
 
   it("visits the group in its own chat, where joining is the only thing she can do", async () => {
-    const { requests } = await runPlaces(invited(), oracle(false));
+    const { requests } = await declinedRun();
     const visit = requests.find((r) => r.scope === PLACE.scope);
     expect(visit).toBeDefined();
     const outward = (visit?.affordances ?? []).filter((k) => affordanceOf(k).via !== "mind");
@@ -322,7 +315,7 @@ describe("reach: groups and channels she has looked at (A18, A08)", () => {
   });
 
   it("deciding not to join is consumed: she does not reconsider at every beat", async () => {
-    const { requests } = await runPlaces(invited(), oracle(false));
+    const { requests } = await declinedRun();
     const times = requests.filter((r) => r.scope === PLACE.scope).map((r) => r.at);
     expect(times.length).toBeGreaterThan(0);
     for (let i = 1; i < times.length; i++) {
@@ -402,6 +395,8 @@ describe(
       return ev;
     };
     const ID = itemId(CHANNEL, "77");
+    let cachedFriendsQuiet: ReturnType<typeof run> | null = null;
+    const friendsQuiet = () => (cachedFriendsQuiet ??= run(friends(), quiet));
 
     it("a post never wakes her by itself and never enters a chat's timeline", () => {
       const r = step(emptyState, post(T0, "章鱼有三颗心脏"), withReach);
@@ -410,7 +405,7 @@ describe(
     });
 
     it("is put before her in private chats, with a number to forward; offered only there", async () => {
-      const { requests } = await run(friends(), quiet);
+      const { requests } = await friendsQuiet();
       const later = requests.filter((r) => r.at > T0 + 3 * H);
       const inPrivate = later.find(
         (r) => r.chatType === "private" && r.contributions.some((c) => c.text.includes(ID)),
@@ -425,16 +420,18 @@ describe(
 
     it("the urge to share wakes her in a private chat after the post (information has a source)", async () => {
       // 帖子来了之后，她第一次主动去私聊的时刻比没有这条帖子时早（早出来的就是想分享）。
-      const first = async (events: AliceEvent[]) =>
-        (await run(events, quiet)).requests.find(
+      const firstFrom = (rs: readonly SpeechRequest[]) =>
+        rs.find(
           (r) => r.at >= T0 + 3 * H && r.chatType === "private" && r.triggerMessageId === null,
         )?.at ?? Number.POSITIVE_INFINITY;
       const without = friends().filter((e) => e.type !== "post.received");
-      expect(await first(friends())).toBeLessThan(await first(without));
+      expect(firstFrom((await friendsQuiet()).requests)).toBeLessThan(
+        firstFrom((await run(without, quiet)).requests),
+      );
     });
 
     it("thinking it over with one friend uses it up for that friend only", async () => {
-      const { requests } = await run(friends(), quiet);
+      const { requests } = await friendsQuiet();
       const shownTo = (scope: string) =>
         requests.filter(
           (r) => r.scope === scope && r.contributions.some((c) => c.text.includes(ID)),
@@ -483,3 +480,13 @@ describe(
     });
   },
 );
+
+describe("privateScopeOf: the private chat with someone met in a group", () => {
+  it("Telegram: the group id is replaced by the person's id", () => {
+    expect(privateScopeOf("telegram:-100123", "456")).toBe("telegram:456");
+  });
+
+  it("platforms that write the chat kind into the id: group becomes private", () => {
+    expect(privateScopeOf("qq:group:123", "456")).toBe("qq:private:456");
+  });
+});

@@ -8,7 +8,7 @@
  */
 import type { SpendKind } from "../ops/spend.js";
 
-export const GATEWAY_URL = "https://api.ohmygpt.com/v1";
+const GATEWAY_URL = "https://api.ohmygpt.com/v1";
 export const CREDITS_PER_USD = 250_000;
 
 /** 每百万 token 的 credits（网关 /v1/models 的 price_credits）。 */
@@ -18,6 +18,13 @@ const PRICE_CREDITS_PER_M: Readonly<Record<string, { input: number; output: numb
   "google/gemini-3-flash-preview": { input: 112_500, output: 675_000 },
   // 2026-11-13 读，2027-01-01 前的价；思考按输出算
   "google/gemini-3.8-flash": { input: 168_750, output: 843_750 },
+  // 2026-11-23 读自网关 /v1/models（g4-argon 在 2026-12-01 后翻倍）
+  "google/gemini-4-hydrogen": { input: 337_500, output: 1_687_500 },
+  "google/gemini-4-argon": { input: 450_000, output: 2_250_000 },
+  "google/gemini-4-neon": { input: 825_000, output: 4_125_000 },
+  "deepseek/deepseek-v4-pro-0813": { input: 168_750, output: 506_250 },
+  "deepseek/deepseek-v4.1-flash-1017": { input: 17_000, output: 67_500 },
+  "bytedance/doubao-seed-2.1-pro-260915": { input: 225_000, output: 1_125_000 },
   "cohere/rerank-v5.0-pro": { input: 13_750, output: 0 },
   "deepseek/deepseek-v4-flash-0731": { input: 27_600, output: 55_000 },
 };
@@ -55,7 +62,7 @@ export class GatewayError extends Error {
   }
 }
 
-export interface GatewayCall<T> {
+interface GatewayCall<T> {
   kind: SpendKind;
   model: string;
   /** 网关下的路径，如 "/chat/completions"。 */
@@ -65,14 +72,14 @@ export interface GatewayCall<T> {
   /** 5xx、429 和网络错误时最多试几次（退避 1、2、4 秒……）；默认 1。 */
   attempts?: number;
   /** 从回复里读用量（各接口写法不同）。 */
-  tokens(body: T): Tokens;
+  tokens: (body: T) => Tokens;
   /** 中止（暂停、停机）：不再重试，抛 signal.reason。 */
   signal?: AbortSignal;
 }
 
 export interface Gateway {
   /** 成功时已经记过账；回复体原样返回，和这次记的账一起。 */
-  post<T>(call: GatewayCall<T>): Promise<{ body: T; spent: Spent }>;
+  post: <T>(call: GatewayCall<T>) => Promise<{ body: T; spent: Spent }>;
   /** 不经网关的花费（执行代理的搜索）也记进同一本账。 */
   charge: Charge;
 }
@@ -89,6 +96,14 @@ function usdOf(model: string, credits: number | null, t: Tokens): number {
   const price = PRICE_CREDITS_PER_M[model] ?? FALLBACK;
   const estimated = (t.promptTokens * price.input + t.completionTokens * price.output) / 1_000_000;
   return estimated / CREDITS_PER_USD;
+}
+
+/** undici 只说 "fetch failed"，真正的原因（重置、DNS、证书、超时）在 cause 里。 */
+function networkReason(error: unknown): string {
+  const cause = error instanceof Error ? error.cause : undefined;
+  if (!(cause instanceof Error)) return String(error);
+  const code = (cause as { code?: unknown }).code;
+  return `${String(error)} (${typeof code === "string" ? `${code} ` : ""}${cause.message})`;
 }
 
 export function createGateway(options: {
@@ -119,7 +134,7 @@ export function createGateway(options: {
           });
         } catch (error) {
           call.signal?.throwIfAborted();
-          last = new GatewayError(`network: ${String(error)}`, null);
+          last = new GatewayError(`network: ${networkReason(error)}`, null);
           continue;
         }
         if (response.ok) {

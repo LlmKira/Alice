@@ -61,7 +61,7 @@ describe("Code Mode: the SDK, the examples and run_code", () => {
   const prompt = renderSpeechPrompt("p", request);
 
   it("declares every offered act except mark_read, outward first, her inner ones marked as hers", () => {
-    const names = [...prompt.system.matchAll(/^ {2}(\w+): /gm)].map((m) => m[1]);
+    const names = Array.from(prompt.system.matchAll(/^ {2}(\w+): /gm), (m) => m[1]);
     expect(names).toEqual([
       "say",
       "sticker",
@@ -73,9 +73,11 @@ describe("Code Mode: the SDK, the examples and run_code", () => {
       "inner",
       "go_to_bed",
     ]);
-    expect(prompt.system).toMatch(/\/\*\* （只有你自己看得到，不会发出去）记下你此刻的心情/);
+    expect(prompt.system).toMatch(
+      /\/\*\* \[internal only, never sent to chat\] Record your current mood/,
+    );
     // 心情是她自己的词（PLAN 第 34 件）：不再是 14 个词的联合类型。
-    expect(prompt.system).toContain("心情用你自己的词");
+    expect(prompt.system).toContain("use your own words for mood");
     expect(prompt.system).toContain("    mood: string;");
     expect(prompt.system).toContain(
       'type ToolReturn<K extends keyof ToolArgsMap> = K extends "look_up" ? string : void;',

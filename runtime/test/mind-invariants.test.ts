@@ -61,7 +61,8 @@ function wildActs(rnd: () => number, maxId: number): Act[] {
     { kind: "fulfil", what: "问问他" },
     { kind: "let-go", messageId: id() },
     { kind: "feel", mood: "开心", why: null },
-    { kind: "diary", about: null, entry: "今天好累" },
+    // 占着删掉的 [日记] 原来的位置（同上）。
+    { kind: "feel", mood: "累", why: null },
     { kind: "think", thought: "他是不是生气了" },
     { kind: "topic-open", title: "陪他准备面试" },
     { kind: "topic-advance", topic: "面试", beat: "约了周三" },
@@ -95,31 +96,18 @@ function drive(events: AliceEvent[], rnd: () => number) {
         produced.push({ at: event.at, decidedIn: event.scope, effect: e, state: before });
       }
     }
-    // 外壳的回执：表情、已读、退群算做成了；偶尔失败或结果未知。
-    for (const e of result.effects) {
-      if (e.type !== "act") continue;
-      if (rnd() < 0.1) {
-        apply({
-          type: "act.failed",
-          at: event.at,
-          scope: e.scope,
-          act: e.act,
-          reason: "outcome_unknown",
-        });
-      } else {
-        const posted = postedMessage(e.act);
-        // 她发出的消息回到记录里（编号 s…），之后才有她自己的话可改。
-        if (posted) {
-          apply({
-            type: "message.sent",
-            at: event.at,
-            scope: e.scope,
-            messageId: `s${++sent}`,
-            ...posted,
-          });
-        } else apply({ type: "act.done", at: event.at, scope: e.scope, act: e.act });
-      }
+    for (const e of result.effects) if (e.type === "act") apply(receipt(e, event.at));
+  };
+  /** 外壳的回执：表情、已读、退群算做成了；偶尔失败或结果未知。 */
+  const receipt = (e: Extract<Effect, { type: "act" }>, at: number): AliceEvent => {
+    if (rnd() < 0.1) {
+      return { type: "act.failed", at, scope: e.scope, act: e.act, reason: "outcome_unknown" };
     }
+    const posted = postedMessage(e.act);
+    // 她发出的消息回到记录里（编号 s…），之后才有她自己的话可改。
+    if (posted)
+      return { type: "message.sent", at, scope: e.scope, messageId: `s${++sent}`, ...posted };
+    return { type: "act.done", at, scope: e.scope, act: e.act };
   };
   for (const [i, event] of events.entries()) {
     apply(event);
@@ -160,6 +148,7 @@ describe("safety invariants", () => {
       "join-chat",
       "album-send",
       "delegate",
+      "unsend",
       "repeat",
       "chat-search",
       "forward",

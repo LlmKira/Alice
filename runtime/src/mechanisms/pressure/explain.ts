@@ -1,6 +1,6 @@
 /**
  * 意愿层的读数（事后分析 sim/trace.ts、线上快照 src/trace-log.ts）：此刻在所有（会话 × 动作）上的排序，每个候选
- * 拆成各驱动的原值、归一化值与缓解，社交代价、饱和代价，各样东西加进社交代价的部分（困意）和直接占用（生活），
+ * 拆成各驱动的原值、归一化值与缓解，社交代价、saturation cost，各样东西加进社交代价的部分（困意）和直接占用（生活），
  * 她在不在这段对话里；以及节律门、心情效价与精力。只读，调的就是意愿层自己的函数（rankIntentions、readChat、
  * reliefTerms、rhythmAt、willOf），所以读数就是那一刻意愿层算出来的数。纯函数：时刻由调用方给。
  */
@@ -28,10 +28,10 @@ import {
 } from "./will.js";
 import { type ChatNode, emptyWorld, type World } from "./world.js";
 
-export interface DriveReading {
+interface DriveReading {
   /** 原值 P_k。 */
   raw: number;
-  /** 归一化 τ̂_k（已乘习惯化，义务与回避豁免）。 */
+  /** 归一化 τ̂_k（已乘 habituation，义务与回避豁免）。 */
   norm: number;
   /** 这个动作对它的期望缓解（乘折扣之前）。 */
   relief: number;
@@ -81,7 +81,7 @@ export interface WillReadout {
 }
 
 /**
- * 一种组成的意愿层（和 createPressure 用同一个工厂 willWake 造出来）：读法、排序的可供性、叫醒她的理由；
+ * 一种组成的意愿层（和 createPressure 用同一个工厂 willWake 造出来）：读法、排序的 affordance、叫醒她的理由；
  * composition 用来把代价按格子拆开。
  */
 export type WillLens = ReturnType<typeof willWake> & { composition: PressureFeatures };
@@ -96,7 +96,7 @@ export function productionWorld(state: AliceState): World {
 }
 
 /** 意愿层此刻的全部排序（和节律到点时 createPressure 排的是同一个）。 */
-export function ranking(world: World, now: number, lens: WillLens): Intention[] {
+function ranking(world: World, now: number, lens: WillLens): Intention[] {
   return lens.rank(world, now);
 }
 
@@ -118,7 +118,7 @@ export function candidateOf(
     );
   }
   const reading = readings.get(intention.scope) as ChatReading;
-  const row = [...lens.rhythm, ...lens.affordances].find((a) => a.kind === intention.affordance);
+  const row = lens.affordances.find((a) => a.kind === intention.affordance);
   if (!row) throw new Error(`not a will affordance: ${intention.affordance}`);
   const intrinsic = policy.intrinsicGain?.(w, reading, now) ?? 1;
   const split = splitRelief(reliefTerms(chat, reading, row, now), INTRINSIC_DRIVES, intrinsic);

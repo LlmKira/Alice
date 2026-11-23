@@ -4,7 +4,6 @@
  * 回到原来的私聊时卡片上有。名字、会话都是虚构的。
  */
 import { describe, expect, it } from "vitest";
-import { causeLine } from "../src/mechanisms/pressure/cause-lines.js";
 import {
   createPressure,
   emptyWorld,
@@ -167,12 +166,6 @@ describe("a promise for another chat lives there", () => {
     const later = (c?.expireAt ?? 0) + H;
     expect(card(w, DM, later)).toContain("（在「周末爬山群【先看置顶】」群里做，我没记下做完）");
     expect(card(w, GROUP, later)).toContain("（和阿明私聊时定下的，我没记下做完）");
-  });
-
-  it("the wake reason line names it as a promise made elsewhere", () => {
-    expect(causeLine({ kind: "promise", what: "发条语音", origin: "和阿明私聊时" })).toBe(
-      "和阿明私聊时答应过要在这里做：发条语音。",
-    );
   });
 });
 

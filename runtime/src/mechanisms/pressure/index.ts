@@ -1,4 +1,11 @@
-import { type ActKind, affordances } from "../../mind/affordances.js";
+import {
+  type ActKind,
+  affordances,
+  type CapabilityResolver,
+  type PlatformCapabilities,
+  platformSupports,
+  resolveCapabilities,
+} from "../../mind/affordances.js";
 import { type Composition, compose, type Part } from "../../mind/compose.js";
 import type { AliceEvent } from "../../mind/events.js";
 import { type Contribution, defineMechanism, type Mechanism } from "../../mind/mechanism.js";
@@ -7,40 +14,33 @@ import { elapsed } from "../../mind/when.js";
 import { withMissed } from "../missed.js";
 import { affect } from "./affect.js";
 import type { WillAffordance } from "./affordances.js";
-import { awake } from "./availability.js";
-import { createBedtime } from "./bedtime.js";
+import { attachmentLoop } from "./attachment.js";
 import { contextWith } from "./context.js";
-import { createDesire, desire } from "./desire.js";
-import { febDiary, reflectDiary } from "./diary.js";
+import { createDesire } from "./desire.js";
+import { reflectDiary, reflectDiaryEmotive, reflectDiaryFlow } from "./diary.js";
 import { DRIVE_TERMS, type DriveTerms, wallClock } from "./drives.js";
-import { delegatedFairness } from "./fairness.js";
+import { createFairness } from "./fairness.js";
 import { feature, type PressureFeature, type Slice, type WillTerms } from "./feature.js";
 import { positiveLoop } from "./feedback.js";
-import { glance } from "./glance.js";
 import { isGroupAttentionWorthy } from "./group-filter.js";
 import { groupPull } from "./group-pull.js";
-import { body, echo, echoExpanded, thought } from "./inner.js";
+import { body, echoExpanded, thought } from "./inner.js";
 import { life } from "./life.js";
-import { createLifeBody, lifeBody } from "./life-body.js";
+import { createLifeBody } from "./life-body.js";
 import { FAILURE_BACKOFF, LAMBDA0, RHYTHM } from "./params.js";
-import { PEOPLE_ALL, people } from "./people.js";
+import { PEOPLE_LIVE, people } from "./people.js";
 import { phone } from "./phone.js";
-import { reach } from "./reach.js";
+import { createReach, reach } from "./reach.js";
 import { memory, recallTools, topics } from "./recall.js";
-import {
-  createRelation,
-  familiarityTier,
-  relation,
-  relationTier,
-  relationView,
-} from "./relation.js";
+import { relation, relationTier } from "./relation.js";
 import { sleep } from "./sleep.js";
-import { bondTurn, dwell, floor, floorWake, follow, topicTurn } from "./turn.js";
+import { dwell } from "./turn.js";
 import { causesOf } from "./why.js";
 import {
   globalReading,
   type Intention,
   intentionsFor,
+  platformOf,
   propensity,
   rankIntentions,
   type WillPolicy,
@@ -50,53 +50,32 @@ import { emptyWorld, isSolicited, reduceWorld, type World } from "./world.js";
 export type { WillAffordance } from "./affordances.js";
 export type { PressureFeature } from "./feature.js";
 export {
-  globalReading,
   type Intention,
   intentionsFor,
-  propensity,
   rankIntentions,
   readChat,
 } from "./will.js";
-export { emptyWorld, reduceWorld, type World } from "./world.js";
+export { emptyWorld, type World } from "./world.js";
 export {
   affect,
-  awake,
-  body,
   createDesire,
-  desire,
-  createBedtime,
-  echo,
+  createReach,
   echoExpanded,
-  febDiary,
-  floor,
-  floorWake,
-  delegatedFairness,
-  groupPull,
-  lifeBody,
-  createLifeBody,
-  positiveLoop,
+  createFairness,
   life,
   memory,
   people,
+  PEOPLE_LIVE,
   reach,
 };
-export { reflectDiary };
-export { sleep, thought, topics, topicTurn, bondTurn, recallTools };
-export {
-  createRelation,
-  dwell,
-  familiarityTier,
-  follow,
-  glance,
-  phone,
-  relation,
-  relationTier,
-  relationView,
-};
+export { reflectDiary, reflectDiaryEmotive, reflectDiaryFlow };
+export { attachmentLoop };
+export { sleep, thought, topics, recallTools };
+export { dwell, phone, relation, relationTier };
 
 /**
  * 主动开口（没人找她、她也没在做一件事）时的此刻：让模型知道这次是她自己想来。是压力场自己的那一行，
- * 排在够得着的地方的事实之后、作息之前。不说话（不调用 run_code）由回合锚点的最后一行说，这一句只说处境
+ * 排在够得着的地方的事实之后、作息之前。不说话（不调用 run_code）由回合 anchor 的最后一行说，这一句只说处境
  * （context-v2，out.md 风险 1）。
  */
 const proactive = feature({
@@ -119,7 +98,7 @@ const proactive = feature({
         : causes
           ? `${before}这会儿没人找你。`
           : `${before}这会儿没人找你，想找对方聊点什么就说。`;
-    // 名字固定：回放的桩按它认"这次没人找她"（sim/will-replay.ts rate-sought），不看文字。
+    // 名字固定：回放的 stub 按它认"这次没人找她"（sim/will-replay.ts rate-sought），不看文字。
     return [
       {
         mechanism: "pressure-unsought",
@@ -132,9 +111,9 @@ const proactive = feature({
 });
 
 /**
- * 世界折叠（world.ts reduceWorld）：总在的底座，写会话的核心字段和意愿层自己的结局（willingness：想过、决定先不找他）。
- * 关于人的事实（名字、看见的、有往来、亲近、回避）只由 relation 折进 relations。答应的事（chats.commitments）只由
- * 记忆（recall.ts memory）折：到期、到时了、响过了都跟着同一条事件，世界折叠不再写它。
+ * 世界 fold（world.ts reduceWorld）：总在的 base，写会话的核心字段和意愿层自己的结局（willingness：想过、决定先不找他）。
+ * 关于人的事实（名字、看见的、有往来、亲近、回避）只由 relation fold 进 relations。答应的事（chats.commitments）只由
+ * 记忆（recall.ts memory）折：到期、到时了、响过了都跟着同一条事件，世界 fold 不再写它。
  */
 export const WORLD_FOLD: Part<Slice> = {
   name: "world",
@@ -152,15 +131,14 @@ export const WORLD_FOLD: Part<Slice> = {
 };
 
 /**
- * 压力场的组成：每一格放一样东西（feature.ts），空着就是没有。格子的次序就是折叠、提示词、想一想的次序
+ * 压力场的组成：每一格放一样东西（feature.ts），空着就是没有。格子的次序就是 fold、提示词、想一想的次序
  * （够得着的地方先建出会话；提示词里够得着的地方的事实在前，主动开口的那一行接着，作息、生活在"轮到你了"
- * 之前；在场这几样要在其余折叠之后读世界）。
+ * 之前；在场这几样要在其余 fold 之后读世界）。
  */
 const SLOTS = [
   "reach",
   "fairness",
   "proactive",
-  "awake",
   "sleep",
   "diary",
   "life",
@@ -174,11 +152,9 @@ const SLOTS = [
   "people",
   "feedback",
   "affect",
+  "attachment",
   "topic",
-  "bond",
   "floor",
-  "glance",
-  "follow",
   "relation",
   "context",
   "phone",
@@ -187,8 +163,8 @@ type Slot = Exclude<(typeof SLOTS)[number], "proactive">;
 export type PressureFeatures = Partial<Record<Slot, PressureFeature>>;
 
 /**
- * 一种组成解析出来的样子（mind/compose.ts）：底座是世界折叠，部分是格子里的几样，加上意愿层里读某一样的块的
- * 驱动项（drives.ts DRIVE_TERMS）。两样提供同一块时在这里报错；缺块的不激活，列在 inactive 里。
+ * 一种组成解析出来的样子（mind/compose.ts）：base 是世界 fold，部分是格子里的几样，加上意愿层里读某一样的块的
+ * drive term（drives.ts DRIVE_TERMS）。两样提供同一块时在这里报错；缺块的不激活，列在 inactive 里。
  */
 export function partsOf(composition: PressureFeatures): Composition<Part<Slice>, Slice> {
   return compose<Slice, Part<Slice>>(WORLD_FOLD, [...slotted(composition), ...DRIVE_TERMS]);
@@ -202,18 +178,33 @@ function slotted(composition: PressureFeatures): PressureFeature[] {
   });
 }
 
-/** 意愿层里这些驱动项此刻算不算（它读的块有提供者才算）。 */
+/** 意愿层里这些 drive term 此刻算不算（它读的块有提供者才算）。 */
 function drivesOf(composition: PressureFeatures): DriveTerms {
   const on = new Set(partsOf(composition).active.map((p) => p.name));
   return Object.fromEntries(DRIVE_TERMS.map((t) => [t.term, on.has(t.name)])) as DriveTerms;
 }
 
+/** 多平台注意力层级：shared 共用全局节奏与 Top-1；per-platform 共享主体核心（记忆/心情/作息），各平台独立节奏与竞争。 */
+export type PlatformAttentionMode = "shared" | "per-platform";
+
+export interface PlatformAttentionOptions {
+  mode?: PlatformAttentionMode;
+  /** 可选按平台覆盖 lambda0（越小越容易主动开口，越大越克制）。 */
+  lambda?: Readonly<Record<string, number>>;
+}
+
 /** 把几样东西的意愿项合成意愿层的读法（时钟取第一个，代价相加，折扣相乘，"还在对话里"取或）。 */
-export function willOf(features: PressureFeatures, lambda0 = LAMBDA0): WillPolicy {
+export function willOf(
+  features: PressureFeatures,
+  lambda0 = LAMBDA0,
+  capabilities?: PlatformCapabilities | CapabilityResolver,
+  platformLambda?: Readonly<Record<string, number>>,
+): WillPolicy {
+  const resolveCaps = resolveCapabilities(capabilities);
   const ordered = featuresOf(features);
   const terms = ordered.flatMap((f) => (f.will ? [f.will] : []));
   const all = <K extends keyof WillTerms>(k: K) =>
-    terms.flatMap((t) => (t[k] ? [t[k] as WillTerms[K]] : []));
+    terms.flatMap((t) => (t[k] ? [t[k] as NonNullable<WillTerms[K]>] : []));
   const candidates = all("candidates");
   const visible = all("visible");
   const gains = all("gain");
@@ -222,10 +213,11 @@ export function willOf(features: PressureFeatures, lambda0 = LAMBDA0): WillPolic
   const costs = all("cost");
   const impositionScales = all("impositionScale");
   const busy = all("busy");
-  const aversion = all("aversion")[0];
+  const aversion = terms.find((t) => t.aversion)?.aversion;
   return {
     ...(aversion ? { aversion } : {}),
     lambda0,
+    ...(platformLambda && Object.keys(platformLambda).length > 0 ? { platformLambda } : {}),
     age: all("age")[0] ?? wallClock,
     candidates: (world) => candidates.reduce((w, f) => f(w), world),
     visible: (world, scope, now) => visible.every((f) => f(world, scope, now)),
@@ -240,17 +232,22 @@ export function willOf(features: PressureFeatures, lambda0 = LAMBDA0): WillPolic
     provided: (scope, world, now) => new Set(offeredIn(ordered, scope, world, now)),
     drives: drivesOf(features),
     effortReciprocity: true,
+    ...(resolveCaps
+      ? {
+          supports: (scope, kind, chatType) => platformSupports(resolveCaps(scope), kind, chatType),
+        }
+      : {}),
   };
 }
 
 /** 组成里激活的几样，按格子的次序（主动开口那一行在它的位置上）。 */
 function featuresOf(composition: PressureFeatures): PressureFeature[] {
   const terms = new Set<Part<Slice>>(DRIVE_TERMS);
-  return partsOf(composition).active.filter((p) => !terms.has(p)) as PressureFeature[];
+  return partsOf(composition).active.filter((p) => !terms.has(p));
 }
 
 /**
- * 一个事件进来，这几样和世界折叠依次改世界：先各样的 open（还不存在的会话建出来），再世界折叠，再各样的
+ * 一个事件进来，这几样和世界 fold 依次改世界：先各样的 open（还不存在的会话建出来），再世界 fold，再各样的
  * reduce（before 是这个事件之前的世界）。watch 只给 test/slices.test.ts 的写入审计用。
  */
 function foldWith(
@@ -278,14 +275,14 @@ function foldWith(
   };
 }
 
-/** 一种组成的世界折叠（世界折叠加这几样的 reduce），给只读意愿层的性质测试用。 */
+/** 一种组成的世界 fold（世界 fold 加这几样的 reduce），给只读意愿层的性质测试用。 */
 export function worldFold(
   composition: PressureFeatures,
 ): (world: World, event: AliceEvent) => World {
   return foldWith(featuresOf(composition));
 }
 
-/** 一个压力场机制的世界折叠，每一步交给 watch 看（写入审计）。 */
+/** 一个压力场机制的世界 fold，每一步交给 watch 看（写入审计）。 */
 export function auditedFold(
   m: Mechanism,
   watch: (part: string, before: World, after: World) => void,
@@ -293,7 +290,10 @@ export function auditedFold(
   const parts = resolved.get(m);
   if (!parts) throw new Error(`${m.name} is not a pressure field`);
   const terms = new Set<Part<Slice>>(DRIVE_TERMS);
-  return foldWith(parts.active.filter((p) => !terms.has(p)) as PressureFeature[], watch);
+  return foldWith(
+    parts.active.filter((p) => !terms.has(p)),
+    watch,
+  );
 }
 
 /** 她眼里的世界：还不存在的会话按已经在了算。 */
@@ -315,7 +315,7 @@ function offeredIn(
 }
 
 /**
- * 意愿层排序的可供性：只为需要斟酌、又真能缓解点什么的意愿叫醒模型。只标已读不值得一次调用，什么驱动都不缓解的行
+ * 意愿层排序的 affordance：只为需要斟酌、又真能缓解点什么的意愿叫醒模型。只标已读不值得一次调用，什么驱动都不缓解的行
  * （翻相册、查一下、发语音这类在她醒着时自己选的事）不是意愿。
  */
 export function willAffordances(all: readonly WillAffordance[]): WillAffordance[] {
@@ -330,44 +330,54 @@ export interface Rhythm {
   open: boolean;
 }
 
+/** 某平台最近一次发言调用时刻（取该平台所有会话的 habitAt / consideredAt / stayedAt 最大值，不改 World 结构）。 */
+function platformLastCallAt(world: World, platform: string): number {
+  let latest = 0;
+  for (const [scope, c] of Object.entries(world.chats)) {
+    if (platformOf(scope) !== platform) continue;
+    const at = Math.max(c.habitAt, c.consideredAt, c.stayedAt);
+    if (at > latest) latest = at;
+  }
+  return latest;
+}
+
 /**
  * 节律（ADR-195）：离上一次调用（决定或失败）还不到 Δt 就不行动。Δt 由外部需求的强度量决定：外面越热闹
  * 间隔越短，安静时拉长到 5 分钟——调用频率随外部需求自己调节，不设上限。发言调用连续失败时另按退避等。
+ * 传入 platform 时只按该平台的外部需求与最近调用时刻算节律，跨平台网关失败退避仍共享。
  */
-export function rhythmAt(world: World, now: number, policy: WillPolicy): Rhythm {
+export function rhythmAt(world: World, now: number, policy: WillPolicy, platform?: string): Rhythm {
   const dt =
     RHYTHM.min +
     (RHYTHM.max - RHYTHM.min) *
       Math.exp(
-        -globalReading(world, now, undefined, policy.age, policy.drives).demandPeak / RHYTHM.kappa,
+        -globalReading(world, now, undefined, policy.age, policy.drives, platform).demandPeak /
+          RHYTHM.kappa,
       );
   const { count, at } = world.callFailures;
   const backoff =
     count > 0 ? Math.min(FAILURE_BACKOFF.max, FAILURE_BACKOFF.first * 2 ** (count - 1)) : 0;
-  const since = now - world.lastCallAt;
+  const lastCall = platform === undefined ? world.lastCallAt : platformLastCallAt(world, platform);
+  const since = now - lastCall;
   return { dt, since, backoff, open: since >= dt && now - at >= backoff };
 }
 
 /**
- * 压力场叫醒她的理由（唤醒分数只从它算，sim/trace.ts 读同一个，所以事后读到的理由就是当时的理由）：
+ * 压力场叫醒她的理由（wake score 只从它算，sim/trace.ts 读同一个，所以事后读到的理由就是当时的理由）：
  * - alarm：她给自己定的、说了钟点的事到点了（时钟格上，只响一次，做不做由她定）；
  * - will：时钟格上节律到点，跨所有会话排第一的意愿在这里（NSV > 0）；
  * - directed：有人点她的名（外部义务），按这个会话里最好的意愿；
  * - floor：她还在这段对话里，别人接着说的话让她按这个会话最好的意愿再看一眼。
- * - follow（候选 follow，turn.ts）：她看着这段对话、还没开口，别人的话同样让她再看一眼（她是旁观者）。
- * 后三种的 score 是 logistic(NSV/τ)，到 0.5 才醒；没有候选时 intention 为 null、score 为 0。
- * glance（候选 glance.ts）：节律到点，排第一的是看一眼——不叫醒她（score 0），核心直接看一眼。
+ * 后两种的 score 是 logistic(NSV/τ)，到 0.5 才醒；没有候选时 intention 为 null、score 为 0。
  */
 export type WakeReason =
   | { kind: "alarm" }
-  | { kind: "will" | "glance"; intention: Intention }
-  | { kind: "directed" | "floor" | "follow"; intention: Intention | null; score: number };
+  | { kind: "will"; intention: Intention }
+  | { kind: "directed" | "floor"; intention: Intention | null; score: number };
 
 export function wakeScore(reason: WakeReason | null): number {
   if (!reason) return 0;
   switch (reason.kind) {
-    case "glance":
-      return 0;
     case "alarm":
     case "will":
       return 1;
@@ -377,50 +387,36 @@ export function wakeScore(reason: WakeReason | null): number {
 }
 
 /**
- * 一种组成的意愿层：读法、排序的可供性、节律到点时排第一的意愿，和每个事件上叫醒她的理由。
+ * 一种组成的意愿层：读法、排序的 affordance、节律到点时排第一的意愿，和每个事件上叫醒她的理由。
  * createPressure 用它决定唤醒；事后分析（sim/trace.ts）用同一个工厂重算，不另写一份判断。
  */
 export function willWake(
   all: readonly WillAffordance[],
   composition: PressureFeatures = {},
   lambda0?: number,
+  capabilities?: PlatformCapabilities | CapabilityResolver,
+  attention?: PlatformAttentionOptions,
 ) {
   const features = featuresOf(composition);
-  const policy = willOf(composition, lambda0);
+  const policy = willOf(composition, lambda0, capabilities, attention?.lambda);
+  const perPlatform = attention?.mode === "per-platform";
   const affordances = willAffordances(all);
   const listens = (world: World, scope: string, now: number) => {
     const c = world.chats[scope];
     return !!c && features.some((f) => f.listens?.(c, now) ?? false);
   };
-  /** 她看着这段对话、还没开口（turn.ts follow）：别人的话也叫醒她，但她是旁观者。 */
-  const watches = (world: World, scope: string, now: number) => {
-    const c = world.chats[scope];
-    return !!c && features.some((f) => f.watches?.(c, now) ?? false);
-  };
   /**
-   * 看着的时候再看一眼值不值（feature.ts watchGate look）：不收对别人的打扰（看一眼不打扰谁，C_social 属于动作，
-   * 醒来后的那次决定里她自己掂量），她自己的状态（睡着、回避、手上有事）和饱和代价照算。
+   * 在对话里再看一眼值不值（feature.ts looksInside）：不收对别人的打扰（看一眼不打扰谁，C_social 属于动作，
+   * 醒来后的那次决定里她自己掂量），她自己的状态（睡着、回避、手上有事）和 saturation cost 照算。
    */
-  const gate = features.find((f) => f.watchGate)?.watchGate ?? "will";
+  const looksInside = features.some((f) => f.looksInside);
   const lookValue = (i: Intention) => i.nsv + i.lambda * i.imposition;
-  // 看一眼（glance.ts）：节律到点时不用斟酌、能缓解点什么的行（标已读）也排序，要斟酌的只留还能叫醒她的。
-  const look = features.find((f) => f.glance)?.glance;
-  const rhythm = look
-    ? all.filter((a) => Object.keys(a.relieves).length > 0 && (!a.deliberate || look.wakes(a)))
-    : affordances;
-  const reflex = new Set(rhythm.filter((a) => !a.deliberate).map((a) => a.kind));
-  /** 节律到点时的全部排序（explain.ts 读同一个）。有人在等她、她在这段对话里的会话不看一眼：那要斟酌。 */
+  /** 节律到点时的全部排序（explain.ts 读同一个）。 */
   const rank = (world: World, now: number): Intention[] => {
     const w = policy.candidates(world);
-    const all = rankIntentions(w, rhythm, now, policy).filter((i) =>
+    return rankIntentions(w, affordances, now, policy).filter((i) =>
       policy.visible(w, i.scope, now),
     );
-    if (reflex.size === 0) return all;
-    return all.filter((i) => {
-      if (!reflex.has(i.affordance as ActKind)) return true;
-      const c = w.chats[i.scope];
-      return !!c && !isSolicited(c, now) && !listens(w, i.scope, now);
-    });
   };
 
   /** 一个 tick 会对每个会话问一遍 wake：同一状态、同一时刻只排一次序。只依赖输入，不影响确定性。 */
@@ -434,28 +430,45 @@ export function willWake(
     return best;
   };
 
-  const why = (scope: string, event: AliceEvent, now: number, world: World): WakeReason | null => {
-    if (event.type === "clock.tick") {
-      if (features.some((f) => f.alarm?.(world, scope, now))) return { kind: "alarm" };
-      const t = top(world, now);
-      if (t?.scope !== scope) return null;
-      return {
-        kind: reflex.has(t.affordance as ActKind) ? "glance" : "will",
-        intention: t,
-      };
+  /** per-platform 模式：各平台各自检查自己的节律门并取本平台 NSV > 0 的第一名。 */
+  const rankedByPlatform = new WeakMap<World, { now: number; tops: Map<string, Intention> }>();
+  const tops = (world: World, now: number): Map<string, Intention> => {
+    const hit = rankedByPlatform.get(world);
+    if (hit && hit.now === now) return hit.tops;
+    const out = new Map<string, Intention>();
+    const open = new Map<string, boolean>();
+    for (const item of rank(world, now)) {
+      if (item.nsv <= 0) break;
+      const p = platformOf(item.scope);
+      if (out.has(p)) continue;
+      let isOpen = open.get(p);
+      if (isOpen === undefined) {
+        isOpen = rhythmAt(world, now, policy, p).open;
+        open.set(p, isOpen);
+      }
+      if (isOpen) out.set(p, item);
     }
+    rankedByPlatform.set(world, { now, tops: out });
+    return out;
+  };
+
+  /** 节律到点：有闹钟就醒；否则排第一的意愿在这个会话里才醒（per-platform 按所属平台取第一）。 */
+  const onTick = (scope: string, now: number, world: World): WakeReason | null => {
+    if (features.some((f) => f.alarm?.(world, scope, now))) return { kind: "alarm" };
+    const t = perPlatform ? tops(world, now).get(platformOf(scope)) : top(world, now);
+    if (t?.scope !== scope) return null;
+    return { kind: "will", intention: t };
+  };
+
+  const why = (scope: string, event: AliceEvent, now: number, world: World): WakeReason | null => {
+    if (event.type === "clock.tick") return onTick(scope, now, world);
     // 普通消息只更新压力，行动由节律决定；被点名是外部义务，立刻按义务的意愿响应。
     if (event.type !== "message.received" || event.scope !== scope) return null;
     if (!isGroupAttentionWorthy(event)) return null;
     const inside = listens(world, scope, now);
-    if (!event.directed && !inside && !watches(world, scope, now)) return null;
-    const kind = event.directed ? "directed" : inside ? "floor" : "follow";
-    // 对话在她眼前（旁观或在对话里）时同一个门：她看着就看得到每一条。
-    const looks =
-      gate === "look"
-        ? kind !== "directed"
-        : kind === (gate === "look-watch" ? "follow" : gate === "look-dwell" ? "floor" : null);
-    const value = looks ? lookValue : (i: Intention) => i.nsv;
+    if (!event.directed && !inside) return null;
+    const kind = event.directed ? "directed" : "floor";
+    const value = looksInside && kind === "floor" ? lookValue : (i: Intention) => i.nsv;
     // 按人读的回避读发这条的人（relation.ts personAversion 的 waker）。
     const best = intentionsFor(
       world,
@@ -468,7 +481,7 @@ export function willWake(
     return { kind, intention: best, score: best ? propensity(value(best)) : 0 };
   };
 
-  return { policy, affordances, rhythm, rank, top, why, listens, glances: look !== undefined };
+  return { policy, affordances, rank, top, tops, why, listens };
 }
 
 /** 每个压力场机制解析出来的组成（测试和组别检查读它）。 */
@@ -481,7 +494,7 @@ export function compositionOf(m: Mechanism): Composition<Part<Slice>, Slice> | u
 
 /**
  * 压力场（论文 §3–4，按 eval-artifacts/trigger/pressure-fidelity.md 的取舍重建）：
- * 世界（world.ts）→ 驱动（drives.ts）→ 意愿（will.ts，读可供性声明）。在 FSM 里只做软引导：
+ * 世界（world.ts）→ 驱动（drives.ts）→ 意愿（will.ts，读 affordance 声明）。在 FSM 里只做软引导：
  * - 被点名时：这个会话里最好的意愿 NSV > 0 就醒（沉默公理），具体做什么由模型在会话里决定。
  * - 其余时候按节律：离上次决定满 Δt(API_peak) 后，跨所有会话排序，只叫醒排第一的意愿所在的会话。
  * - 主动开口（没人找她）时，往提示词里放一句事实，让模型知道这次是她自己想来。
@@ -495,6 +508,8 @@ export function createPressure(
   o: {
     name?: string;
     lambda0?: number;
+    capabilities?: PlatformCapabilities | CapabilityResolver;
+    attention?: PlatformAttentionOptions;
   } = {},
 ): Mechanism {
   const parts = partsOf(composition);
@@ -503,7 +518,13 @@ export function createPressure(
   const named = slotted(composition)
     .filter((f) => f !== proactive)
     .map((f) => f.name);
-  const { top, why, listens, glances, policy, affordances } = willWake(all, composition, o.lambda0);
+  const { top, tops, why, listens, policy, affordances } = willWake(
+    all,
+    composition,
+    o.lambda0,
+    o.capabilities,
+    o.attention,
+  );
   const reader = features.some((f) => f.readerInside);
   const provided: ActKind[] = features.flatMap((f) => f.affordances ?? []);
   const view = (world: World, scope: string) => viewOf(features, world, scope);
@@ -550,11 +571,15 @@ export function createPressure(
     ...(opens.length > 0
       ? {
           opens(now, world) {
-            const t = top(world, now);
-            if (!t) return null;
-            for (const f of opens) {
-              const o = f.opens?.(world, t.scope);
-              if (o) return o;
+            const winners =
+              o.attention?.mode === "per-platform"
+                ? [...tops(world, now).values()]
+                : [top(world, now)].filter((x): x is Intention => x !== undefined);
+            for (const t of winners) {
+              for (const f of opens) {
+                const opened = f.opens?.(world, t.scope);
+                if (opened) return opened;
+              }
             }
             return null;
           },
@@ -567,12 +592,6 @@ export function createPressure(
       ? { asleep: (now, world) => sleepers.some((f) => f.asleep?.(world, now) ?? false) }
       : {}),
     wake: (chat, event, now, world) => wakeScore(why(chat.scope, event, now, world)),
-    ...(glances
-      ? {
-          glance: (chat, event, now, world) =>
-            why(chat.scope, event, now, world)?.kind === "glance",
-        }
-      : {}),
     contribute(chat, now, here, offered): Contribution[] {
       const ctx = contextOf(chat, now, here, offered);
       return features.flatMap((f) =>
@@ -602,20 +621,20 @@ export function createPressure(
 /** 生产：registry 与实验回放都从这里派生，不各自抄一份。 */
 export const PRODUCTION: PressureFeatures = {
   memory,
-  reach,
-  fairness: delegatedFairness,
-  body: body("parallel"),
+  reach: createReach({ groupForward: true }),
+  fairness: createFairness({ cardFacts: true }),
+  body,
   life: withMissed(
     createLifeBody({ busyMode: "phi-half", dailyContent: true, dream: true, phoneWeight: 2 }),
   ),
   floor: dwell({ passBy: true, look: true, share: true, rejection: true }),
-  diary: reflectDiary,
+  diary: reflectDiaryEmotive,
   thought: thought({ examples: true, carry: true, composite: true }),
   echo: echoExpanded,
   topics,
   recallTools,
   topic: groupPull,
-  people: people(PEOPLE_ALL),
+  people: people(PEOPLE_LIVE),
   affect: affect({
     noise: true,
     lonely: true,
@@ -623,15 +642,19 @@ export const PRODUCTION: PressureFeatures = {
     rejection: true,
     feedback: true,
     body: true,
+    willDrive: true,
   }),
   feedback: positiveLoop,
   relation: relationTier,
   context: contextWith({ mentions: true }),
-  desire: createDesire({ dreamFeed: true, personalUrge: true }),
+  desire: createDesire({
+    dreamFeed: true,
+    personalUrge: true,
+    shareId: true,
+    groupForward: true,
+  }),
+  attachment: attachmentLoop,
 };
-
-/** 候选 groupturn 的三样信号（话题有关、想接某个人的话、在场）。 */
-export const GROUP_TURN: PressureFeatures = { topic: topicTurn, bond: bondTurn, floor };
 
 /** 生产（PRODUCTION，loop-v2 基线）。候选和对照是 sim/will-arms.ts 里的组别。 */
 export const pressureProduction = createPressure(affordances, PRODUCTION, {

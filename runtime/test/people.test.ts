@@ -252,7 +252,7 @@ describe("what she learned stays right", () => {
     const p = parseReflect(raw, request);
     expect(p.learned?.facts?.map((f) => f.text)).toEqual(["下周去成都出差"]);
     expect(p.learned?.self?.map((s) => s.text)).toEqual(["最近在学做蛋糕"]);
-    // Journal 里旧的、没有出处的不折叠进来：卡片上看不到。
+    // Journal 里旧的、没有出处的不 fold 进来：卡片上看不到。
     const old = reflected(T + 10 * MIN, DM_A, {
       facts: [{ about: "u1", text: "满嘴跑火车", when: null, replaces: null }],
       self: [{ text: "会说乌克兰语", replaces: null }],
@@ -311,7 +311,6 @@ describe("the no-people ablation is untouched", () => {
     expect(prod?.learn).toBeUndefined();
     const prompt = renderReflectPrompt("PERSONA", prod as ReflectRequest);
     expect(prompt.system).not.toContain("facts");
-    expect(prompt.maxTokens).toBe(400);
     const cand = run([...talk, tick]).asks[0];
     expect(cand?.learn?.facts).toBe(true);
   });

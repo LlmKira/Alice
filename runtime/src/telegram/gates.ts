@@ -1,49 +1,16 @@
 /**
  * 执行器护的资源不变量（不是社交节奏，节奏由意愿层的代价管）：全局节流、每个会话的第二道连发闸、加群和找群的
- * 次数上限。一份 Gates 由 index 构造，像花费账一样从 Journal 恢复计数（observe），所以重启不会把今天的加群
+ * 次数上限。一份 Gates 由平台（platform.ts）构造，像花费账一样从 Journal 恢复计数（observe），所以重启不会把今天的加群
  * 额度清零。Telegram 把客户端和这份限额绑在一起，telegram/ 里的每个请求都经它的 request / post。
  */
 import type { InputPeerLike, TelegramClient } from "@mtcute/node";
 import type { AliceEvent } from "../mind/events.js";
-import { createLogger } from "../utils/logger.js";
-import { KeyedBurstLimiter } from "./burst-limiter.js";
+import { KeyedBurstLimiter, SlidingWindowLimiter } from "../utils/rate-limit.js";
 import { rethrowTelegramActionFailure, TelegramActionError } from "./errors.js";
 import { Acquaintances, closesDm, reachUser } from "./first-dm.js";
 
-const log = createLogger("actions");
-
 const MIN = 60_000;
 const H = 60 * MIN;
-
-/** 全局请求节流（所有会话合计每分钟 30 次），超出时排队等待。 */
-class SlidingWindowLimiter {
-  private timestamps: number[] = [];
-  private queue: Promise<void> = Promise.resolve();
-
-  constructor(
-    private readonly maxRequests: number,
-    private readonly windowMs: number,
-    private readonly now: () => number,
-  ) {}
-
-  acquire(): Promise<void> {
-    this.queue = this.queue.then(() => this.acquireSlot());
-    return this.queue;
-  }
-
-  private async acquireSlot(): Promise<void> {
-    const now = this.now();
-    this.timestamps = this.timestamps.filter((timestamp) => timestamp > now - this.windowMs);
-    const oldest = this.timestamps[0];
-    if (oldest !== undefined && this.timestamps.length >= this.maxRequests) {
-      const waitMs = oldest + this.windowMs - now;
-      log.debug("Rate limit hit, waiting", { waitMs });
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
-      return this.acquireSlot();
-    }
-    this.timestamps.push(now);
-  }
-}
 
 export type Exploration = "join" | "search";
 
@@ -70,8 +37,9 @@ export class Gates {
   }
 
   /**
-   * Journal 里的事件（启动时折叠，之后每写一条）：加群、找群各试过几次（做成了或 Telegram 拒绝了都算；
-   * 被这里的额度挡下的 too_often 没发出请求，不算），她在每个会话发出的消息。
+   * 启动时从 Journal 恢复历史计数（只在启动 fold 阶段调用，运行期由 Telegram.post / explore 的 tryAcquire
+   * 记账，重复调用会双倍计数）：加群、找群各试过几次（做成了或 Telegram 拒绝了都算；被这里的额度挡下的
+   * too_often 没发出请求，不算），以及她在每个会话发出的消息。
    */
   observe(event: AliceEvent): void {
     if (event.type === "message.sent") {
@@ -133,7 +101,7 @@ export class Telegram {
    * 第一次私聊时是先经共同的群拿到的对方（first-dm.ts reachUser）。发往人的私聊被对方的设置挡住时，
    * 失败带上 dmClosed（这个人不收她的私聊）。
    */
-  post<T>(
+  async post<T>(
     scope: string,
     chatId: number,
     name: string,

@@ -1,5 +1,5 @@
 /**
- * 副作用怎么兑现成事件：外壳（src/shell.ts，真的模型和 Telegram）和回放（src/sim/replay.ts，即时完成的桩）
+ * 副作用怎么兑现成事件：外壳（src/shell.ts，真的模型和 Telegram）和回放（src/sim/replay.ts，即时完成的 stub）
  * 共用这一份。两边只是端口不同、排期不同（外壳并发、按真实时钟；回放按顺序、按事件时刻），
  * "做成了写什么、没做成写什么、一批里前一个失败后面怎么办、后台的事怎么回来"只在这里。
  */
@@ -25,12 +25,12 @@ export type ActEffect = Extract<Effect, { type: "act" }>;
 type SpeechEffect = Extract<Effect, { type: "call-speech" }>;
 type PonderEffect = Extract<Effect, { type: "call-ponder" }>;
 
-export function describe(error: unknown): string {
+function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
 /** 动作没做成的原因：带类型的失败原样记，其余一律当作结果未知。都不重做。 */
-export function failureOf(error: unknown): Failure {
+function failureOf(error: unknown): Failure {
   return error instanceof Failed ? error.failure : { reason: "outcome_unknown" };
 }
 
@@ -71,14 +71,14 @@ export async function ponderOutcome(
 }
 
 export interface DeliveryPorts {
-  now(): number;
+  now: () => number;
   /** 写回一个事件（外壳：先写日志再 step；回放：直接 step）。 */
-  emit(event: AliceEvent): void | Promise<void>;
+  emit: (event: AliceEvent) => void | Promise<void>;
   /** 执行一个对外动作；抛 Failed 是确定没做成，其他错误是结果未知。 */
-  act(scope: string, act: Act): Promise<ActOutcome>;
+  act: (scope: string, act: Act) => Promise<ActOutcome>;
   /** 这个会话此刻的时间线（复读要找原话）。 */
-  timeline(scope: string): readonly TimelineEntry[];
-  log?(message: string, fields: Record<string, unknown>): void;
+  timeline: (scope: string) => readonly TimelineEntry[];
+  log?: (message: string, fields: Record<string, unknown>) => void;
 }
 
 const failed = (scope: string, act: Act, failure: Failure, at: number): ActFailed => ({

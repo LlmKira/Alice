@@ -2,8 +2,8 @@
  * 只往提示词里写她自己的几样东西（不碰驱动）：内心独白、行动回声、能力事实。
  * 各是压力场的一样（feature.ts），读世界里她自己写下的东西。
  */
-import type { ActKind } from "../../mind/affordances.js";
 import type { Contribution } from "../../mind/mechanism.js";
+import { crossPlatformTag, platformLabel } from "../../mind/platform.js";
 import { type ChatState, SEGMENT_GAP_MS } from "../../mind/state.js";
 import { audienceOf, diaryAgo, type EchoOptions, echoText, reaches, relevance } from "./diary.js";
 import { feature, type PressureFeature, type View } from "./feature.js";
@@ -12,15 +12,15 @@ import { placeOf } from "./place.js";
 import { dwellSince } from "./turn.js";
 import { presentIn, type ThoughtLine } from "./world.js";
 
-// ── 内心独白（候选 feb-thought，2 月 think()，ADR-117）──────────────────
+// ── 内心独白（2 月 think()，ADR-117）──────────────────
 
 /**
  * 每一轮可以先在心里想一想（<inner>，不发出去），这个会话里最近 3 条读回给她。每个会话都开。
- * examples：带"第一反应"的示范（INNER_EXAMPLES；2 月日记的示范已经带着先想后说时不带）。
+ * examples：带"第一反应"的示范（INNER_EXAMPLES）。
  * readBack：下一轮读不读回她刚才想过的（消融 inner-no-readback 不读：照样先想后说，只是想过的不再回到提示里；
  * 用来分开"读回负面的想法让下一轮更冷"和"先想后说本身"，eval-artifacts/warmth/prereg.md）。
  * conversation：想过的读回到这段对话结束（记忆流第 1 片，docs/research/memory-stream.md）；不给就是
- * 10 分钟（对照组 inner）。按对话时每个会话只留最近 THOUGHT.shown 条：更早的那几条在同一段或更早的对话里，
+ * 10 分钟。按对话时每个会话只留最近 THOUGHT.shown 条：更早的那几条在同一段或更早的对话里，
  * 新的还在时轮不到它们。
  * carry（生产，记忆流第 3 片）：别处写下的也带到这里，注明在哪想的（"……在「X」群里想过："）。和日记是同一条
  * （diary.ts reaches）：她写下时标了私密的（[inner] 的 secret）只到写下时在场的人的私聊；其余的哪里都行。写下后
@@ -36,6 +36,10 @@ export function thought(o: {
   divergent?: boolean;
   /** 复合示例（去 1-2-3 模板 + 串联 open_topic / feel / sticker / 非套话反应）。 */
   composite?: boolean;
+  /** 实验：本会话内想过的直接穿插回聊天时间线原位，不再放进顶部卡片。 */
+  inline?: boolean;
+  /** 语境完整性（Contextual Integrity）：公开群不带入源自一对一私聊的内心独白。 */
+  keepDmInDm?: boolean;
 }): PressureFeature {
   const readBack = o.readBack ?? true;
   const carry = o.carry === true;
@@ -77,6 +81,8 @@ export function thought(o: {
         carry,
         o.divergent === true,
         o.composite === true,
+        o.inline === true,
+        o.keepDmInDm === true,
       ),
   });
 }
@@ -85,10 +91,11 @@ export function thought(o: {
  * 哪里都行；标了的只到写下时在场的人的私聊）。和此刻在场的人、在聊的话有关系的在前（diary.ts relevance），
  * 一样相关时新的在前，取 THOUGHT.shown 条。
  */
-export function carriedHere(
+function carriedHere(
   world: View<"thoughts" | "chats">,
-  chat: Pick<ChatState, "scope" | "timeline">,
+  chat: Pick<ChatState, "scope" | "timeline" | "chatType">,
   now: number,
+  keepDmInDm = false,
 ): ThoughtLine[] {
   const here = audienceOf(world, chat.scope, chat);
   return world.thoughts
@@ -103,6 +110,7 @@ export function carriedHere(
         private: t.private === true,
       },
     }))
+    .filter(({ source }) => !(keepDmInDm && chat.chatType === "group" && !source.group))
     .filter(({ source }) => reaches(source, here))
     .map(({ t, source }) => ({ t, r: relevance(source, here) }))
     .sort((a, b) => b.r - a.r || b.t.at - a.t.at)
@@ -121,7 +129,7 @@ type Alive = (world: View<"chats.turn.dwell">, chat: ChatState, at: number, now:
  *   隔不到 SEGMENT_GAP_MS，最后一条到现在也不到。
  * 对话分线（pressure/threads.ts）进 main 后，两种都换成"写下它的那条线还开着"。
  */
-export function stillTalking(
+function stillTalking(
   world: View<"chats.turn.dwell">,
   chat: ChatState,
   at: number,
@@ -152,9 +160,19 @@ export function segmentSince(chat: ChatState, now: number): number | null {
   return i === 0 && seg && first - seg.to <= SEGMENT_GAP_MS ? seg.from : first;
 }
 
+const clipped = (text: string): string =>
+  text.length > THOUGHT.chars ? `${text.slice(0, THOUGHT.chars)}...` : text;
+
+/** 第一反应的示范用哪一套，和 layout 按哪种风格排它。 */
+function examplesFor(divergent: boolean, composite: boolean) {
+  if (composite) return { examples: INNER_EXAMPLES_COMPOSITE, style: "composite" as const };
+  if (divergent) return { examples: INNER_EXAMPLES_VS, style: "vs" as const };
+  return { examples: INNER_EXAMPLES, style: undefined };
+}
+
 /**
  * 内心独白回写（context-v2）：她在这个会话里刚才心里想过的几条，写成"刚才想过：……"，放进"心里还记着"；
- * 示范是 INNER_EXAMPLES，没有标题（版式把它们并进参考的回法开头）。
+ * 示范是 INNER_EXAMPLES，没有标题（layout 把它们并进参考的回法开头）。
  */
 function thoughtLines(
   world: View<"thoughts" | "chats.turn.dwell" | "relations">,
@@ -166,28 +184,34 @@ function thoughtLines(
   carry: boolean,
   divergent = false,
   composite = false,
+  inline = false,
+  keepDmInDm = false,
 ): Contribution[] {
   const recent = readBack
     ? world.thoughts
         .filter((t) => t.scope === chat.scope && t.at <= now && alive(world, chat, t.at, now))
         .slice(-THOUGHT.shown)
     : [];
-  const carried = readBack && carry ? carriedHere(world, chat, now) : [];
-  const text = [...carried, ...recent]
-    .sort((a, b) => a.at - b.at)
-    .map((t) => {
-      const words = t.text.length > THOUGHT.chars ? `${t.text.slice(0, THOUGHT.chars)}...` : t.text;
-      return `- ${diaryAgo(now - t.at)}${t.scope === chat.scope ? "" : placeOf(world, t.scope)}想过：${words}`;
-    })
-    .join("\n");
-  const examples = composite
-    ? INNER_EXAMPLES_COMPOSITE
-    : divergent
-      ? INNER_EXAMPLES_VS
-      : INNER_EXAMPLES;
-  const style = composite ? ("composite" as const) : divergent ? ("vs" as const) : undefined;
+  const carried = readBack && carry ? carriedHere(world, chat, now, keepDmInDm) : [];
+  const formatLine = (t: ThoughtLine) =>
+    `- ${diaryAgo(now - t.at)}${crossPlatformTag(t.scope, chat.scope)}${t.scope === chat.scope ? "" : placeOf(world, t.scope)}想过：${clipped(t.text)}`;
+  const cardLines = inline ? carried : [...carried, ...recent].sort((a, b) => a.at - b.at);
+  const text = cardLines.map(formatLine).join("\n");
+  const inlineItems = inline
+    ? recent.map((t) => ({ at: t.at, text: `(心里) ${clipped(t.text)}` }))
+    : [];
+  const { examples, style } = examplesFor(divergent, composite);
   return [
-    ...(text ? [{ mechanism: "pressure-thought", kind: "thought" as const, text }] : []),
+    ...(text || inlineItems.length > 0
+      ? [
+          {
+            mechanism: "pressure-thought",
+            kind: "thought" as const,
+            text,
+            ...(inlineItems.length > 0 ? { inline: inlineItems } : {}),
+          },
+        ]
+      : []),
     ...(withExamples
       ? [
           {
@@ -208,7 +232,7 @@ function thoughtLines(
  * （/home/alice/.local/share/alice-briefs/prompt-gemini/out-examples.md 第二节，措辞未改）：心里是真实反应，嘴上拐个弯，
  * 说得嘴硬、俏皮或含蓄，温度不丢。只有前两条时 inner 和 say 说成一样的话，机灵有时吞在 inner 里。
  */
-export const INNER_EXAMPLES = [
+const INNER_EXAMPLES = [
   {
     scene: "聊到你也喜欢的乐队",
     acts: [
@@ -221,7 +245,7 @@ export const INNER_EXAMPLES = [
     scene: "朋友说这周超累，今天还搞砸了一件事",
     acts: [
       { kind: "think" as const, thought: "听着都替他累 先接住他" },
-      { kind: "send" as const, text: "抱抱 这周太辛苦了", replyTo: null },
+      { kind: "send" as const, text: "这周太辛苦了", replyTo: null },
       { kind: "send" as const, text: "我在呢 你慢慢说", replyTo: null },
     ],
   },
@@ -269,7 +293,7 @@ export const INNER_EXAMPLES = [
  * Verbalized Sampling（Zhang et al., ICML 2026）版本的第一反应示范：先在 inner 里闪过 2–3 个不同方向
  * （顺着接、反着调侃、带出自己的事），跳过最平庸的套话，只把最有意思的那一句说出口。含一条俄语示范防语言串台。
  */
-export const INNER_EXAMPLES_VS = [
+const INNER_EXAMPLES_VS = [
   {
     scene: "群里有人发了张加班到凌晨的工位照片，大家都在刷辛苦了",
     acts: [
@@ -361,54 +385,30 @@ export const INNER_EXAMPLES_COMPOSITE = [
 // ── 能力事实（G1b，scenes/candidates.md）──────────────────────────────
 
 /**
- * 她在 Telegram 上能做的，按这一轮实际给她的动作说（null：看消息，她总能看）。语音、查东西是可以拿掉的机制
- * （没配执行代理时没有查一下，群里没人发过语音时没有发语音）：没给她的就不说，事实才是真的。
- */
-const CAN: ReadonlyArray<readonly [ActKind | null, string]> = [
-  ["send", "打字"],
-  ["sticker", "发贴纸"],
-  ["voice", "发语音"],
-  ["react", "点表情"],
-  [null, "看消息"],
-  ["delegate", "上网查点东西"],
-];
-
-function canDo(offered: readonly ActKind[]): string {
-  return CAN.filter(([kind]) => kind === null || offered.includes(kind))
-    .map(([, words]) => words)
-    .join("、");
-}
-
-/**
  * 她的世界里写明她能做什么、做不了什么，情节拉力下她不会补全出人的动作（"我到楼下了"）。只陈述，不禁止。
- * parallel（研究员 2026-11-12 定的身份，context-v2 的短句）：她那边有自己的日子，但两边之间只有 Telegram；
- * 所以她有生活（life 的事实不和它冲突），又到不了对方身边。telegram：之前的身份（G1b，对照 telegram-only）。
+ * 研究员 2026-11-12 定的身份（context-v2 的短句）：她那边有自己的日子，但两边之间只有一个聊天平台；所以她有生活
+ * （life 的事实不和它冲突），又到不了对方身边。平台名按会话前缀取，QQ 上的她不会说自己只在 Telegram 上。
+ * 之前的"只活在 Telegram 里"（对照 telegram-only）已删（ADR-284）。
  */
-export function body(world: "telegram" | "parallel"): PressureFeature {
-  const text = (offered: readonly ActKind[]) =>
-    world === "parallel"
-      ? PARALLEL_BODY
-      : `我只活在 Telegram 里：能${canDo(offered)}；去不了谁的身边，也看不见对方那边的样子。`;
-  return feature({
-    name: world === "telegram" ? "body" : world,
-    requires: [],
-    contribute: ({ offered }) => [
-      { mechanism: "pressure-body", kind: "state", text: text(offered) },
-    ],
-  });
-}
+export const body: PressureFeature = feature({
+  name: "parallel",
+  requires: [],
+  contribute: ({ chat }) => [
+    { mechanism: "pressure-body", kind: "state", text: parallelBody(chat.scope) },
+  ],
+});
 
-/**
- * context-v2（out.md 诊断 1-3 后果 A、诊断 5）：人格第一段和"你的世界"一节已经写明两个世界只有 Telegram 一根线；
- * 每轮原样重复 68 个字会被读惯，这里只留一句短的，放进记录上方"我这边"那一行，越界交给示例（别人约露营、
- * 看展时的化解）。以前贴着"轮到你了"放是量过的（在场声称 9/40 → 2/41，batch-1111 挪到上方后 s24 又出现）。
- */
-const PARALLEL_BODY = "我住在平行世界，和这边只能在 Telegram 上来往，见不了面。";
+function parallelBody(scope: string): string {
+  const name = platformLabel(scope);
+  return name
+    ? `我住在平行世界，和这边只能在 ${name} 上来往，见不了面。`
+    : "我住在平行世界，和这边只能在网上来往，见不了面。";
+}
 
 // ── 行动回声（只写她最近在这里说过的话这个纯事实，不附带写死的规则）────────
 
 /** 她在这个会话里最近说过的话作为纯事实（不写"别再问/别重复自己"命令）。 */
-export function createEcho(options: EchoOptions = {}): PressureFeature {
+function createEcho(options: EchoOptions = {}): PressureFeature {
   return feature({
     name: "echo",
     requires: ["said"],
@@ -427,9 +427,7 @@ export function createEcho(options: EchoOptions = {}): PressureFeature {
   });
 }
 
-export const echo: PressureFeature = createEcho();
-
-/** 候选（diversity 消融，ADR-109 延伸）：把回看窗口扩大到 6 小时 / 12 句，并标出重复起手式。 */
+/** 生产（diversity 消融，ADR-109 延伸）：回看 6 小时 / 12 句，并标出重复起手式。1 小时 / 5 句的原版已删。 */
 export const echoExpanded: PressureFeature = createEcho({
   lookback: 6 * 3_600_000,
   max: 12,

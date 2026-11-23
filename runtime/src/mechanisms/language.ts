@@ -28,7 +28,7 @@ function detect(text: string): string | null {
   const result = eld.detect(text);
   const code = result.language;
   const long = [...text.replace(/\s/g, "")].length >= ENOUGH_TEXT;
-  if (!code || !(result.isReliable() || long)) return null;
+  if (!code || (!result.isReliable() && !long)) return null;
   try {
     return names.of(code) ?? null;
   } catch {
@@ -109,7 +109,7 @@ function spoken(entry: TimelineEntry, timeline: readonly TimelineEntry[]): boole
 }
 
 /** 最近说话的人（最近的在前）和他们说的语言。 */
-export function speakersLanguages(chat: ChatState): Array<{ name: string; language: string }> {
+function speakersLanguages(chat: ChatState): Array<{ name: string; language: string }> {
   const order: string[] = [];
   const byId = new Map<string, { name: string; texts: string[] }>();
   for (const entry of chat.timeline.slice(-RECENT_ENTRIES).reverse()) {
@@ -142,9 +142,9 @@ export const language: Mechanism = {
     const groups = new Map<string, string[]>();
     for (const s of speakers) groups.set(s.language, [...(groups.get(s.language) ?? []), s.name]);
     // 写法和探针里 10/10 的那句一样："用俄语跟你说话"比"说俄语"更像在说此刻这段对话。
-    const parts = [...groups].map(([lang, who]) => `${who.join("、")} 用${lang}跟你说话`);
+    const parts = Array.from(groups, ([lang, who]) => `${who.join("、")} 用${lang}跟你说话`);
     // 没人找她时（群里别人自己聊，或私聊里久未发言），他们此刻没在跟她说话。
-    const aside = [...groups].map(([lang, who]) =>
+    const aside = Array.from(groups, ([lang, who]) =>
       chat.chatType === "private"
         ? `${who.join("、")} 平时说${lang}`
         : `${who.join("、")} 在说${lang}`,

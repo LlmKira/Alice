@@ -1,7 +1,7 @@
 /**
- * 关系模型的线上足迹（src/sim/addressed.ts）：
+ * 关系模型的线上 footprint（src/sim/addressed.ts）：
  * - 回避按人记：在复刻 12:17 的一串事件上，点她名的那条叫醒她、是按人读才值得回的，没有哪条冲着她的消息还在读会话的
- *   回避。拿掉 relation 时 rescued 变 0、readRoom 变满（足迹看得见它不在）。
+ *   回避。拿掉 relation 时 rescued 变 0、readRoom 变满（footprint 看得见它不在）。
  * - 口气不好的来找：敌意那条带来的推向开心，判出口气以后不再是她的心情；拿掉 tone 时 unfriendlyGlad 变 1。
  */
 import { describe, expect, it } from "vitest";

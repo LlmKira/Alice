@@ -263,8 +263,8 @@ describe("sleep dream -> endogenous desire & PTC self-coherence", () => {
     }
     // 验证：公开日记与日程查到了，DM_B 的私密日记绝不泄漏到 DM_A！
     expect(recalledJson).toBe("翻到：true/false/《沙丘》");
-    // 验证：note_self 与 open_topic 都已经折叠进最终状态
-    const mechState = shell.current.mechanisms[mechs[0].name] as World;
+    // 验证：note_self 与 open_topic 都已经 fold 进最终状态
+    const mechState = shell.current.mechanisms[mechs[0]?.name ?? ""] as World;
     expect(mechState.facts[SELF_SUBJECT]?.map((f) => f.text)).toContain("现在改喝热拿铁了");
     expect(mechState.facts[SELF_SUBJECT]?.map((f) => f.text)).not.toContain("平时只喝冰美式");
     expect(mechState.chats[DM_A]?.topics.map((t) => t.title)).toContain("一起聊《沙丘》");

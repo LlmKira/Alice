@@ -1,7 +1,7 @@
 /**
  * 群里什么时候该看这一眼（ADR-276 环节四、五）：话题和交情合成一股拉力。
  *
- * 旧 groupturn（turn.ts topicTurn）的 idf 只在这个群最近 30 条话和她心里的东西上数。群的话越日常，
+ * 旧候选 groupturn 的话题信号（已删）的 idf 只在这个群最近 30 条话和她心里的东西上数。群的话越日常，
  * "知道""不是""这个"这类填充词在背景里也越常见，可一旦这个群自己不怎么用、她心里又有一句带它的话，
  * 它就被当成话题词拉她。这里换成跨会话的文档频率（desire.ts idfOf 同一个做法）：她所有会话最近在聊的
  * 各自算一份文档，填充词在哪儿都有、权重接近 0；"吉他""芙莉莲""露营"这类只在一两处出现的词才拉得动她。
@@ -117,7 +117,6 @@ export function topicSalience(
 
 /**
  * 说话的人此刻能拉她多少：这条消息之前和她有过有回应的互动（contact.lastBondAt），随后按 24 小时半衰期淡掉。
- * 和 turn.ts bondTurn 的写法相同，单独拿出来是为了能直接看它怎么起、怎么淡。
  */
 export function bondPull(
   person: Pick<RelationView, "lastBondAt"> | undefined,
@@ -171,7 +170,7 @@ function withTurn<W extends Pick<World, "chats">>(
 
 /**
  * 候选 group-pull：群里别人的一条话同时算话题和交情。话题用跨会话 idf（crossChatIdf / topicSalience），
- * 交情用 bondPull；她在群里看过、说过时两股都清零。它是 turn.ts 的 topicTurn + bondTurn 的替代：
+ * 交情用 bondPull；她在群里看过、说过时两股都清零。它取代了旧候选 groupturn 的话题、交情两样：
  * 所有会话的话都记进 recent 当跨会话语料，拉力只在群里的那条写（chats.turn.topic、chats.turn.bond）。
  */
 export const groupPull: PressureFeature = feature({

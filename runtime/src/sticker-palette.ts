@@ -1,9 +1,9 @@
 /**
- * 贴纸调色板（迁移自旧 sticker-palette——@see ADR-148/153/168）。
+ * 贴纸调色板（迁移自旧 sticker-palette——@see ADR-148/153/168），各平台共用，按 platform 列各管各的。
  *
- * 真实 Telegram 社交用贴纸而非 emoji 堆砌；LLM 只需描述情绪/动作维度
- * （happy/sad/hug/laugh...），本模块从 sticker_palette 表（225 条真实贴纸，
- * 旧数据保留）匹配最佳贴纸 fileId。
+ * 真实社交用贴纸而非 emoji 堆砌；LLM 只需描述情绪/动作维度
+ * （happy/sad/hug/laugh...），本模块从 sticker_palette 表（Telegram 225 条真实贴纸，
+ * 旧数据保留；QQ 的表情包看过一次就收进来）匹配最佳贴纸 fileId。
  *
  * 匹配降级链：
  * 1. dimension：emotion/action 列精确匹配（LLM 标准查询词汇）
@@ -11,11 +11,21 @@
  * 3. label：label 列包含匹配
  * 4. null（发送记为 send.failed）
  *
- * 表只读，由旧库带来；新库里没有这张表时一律返回 null。
+ * 新库里没有这张表时一律返回 null。
+ *
+ * 看贴纸（perceiveSticker）也在这里：同一张贴纸只问一次看图模型，看懂的顺带收进这个平台的贴纸库。
  */
 
-import { getSqlite } from "../db/connection.js";
-import { putSticker, relabelSticker } from "../journal.js";
+import { getSqlite } from "./db/connection.js";
+import { hasStickerTable, putSticker, relabelSticker } from "./journal.js";
+import type { Gateway } from "./llm/gateway.js";
+import {
+  describeSticker,
+  formatStickerMedia,
+  type StickerCache,
+  type StickerMeta,
+  type StickerPerception,
+} from "./llm/sticker-perceive.js";
 
 const EMOTIONS = new Set(["happy", "sad", "angry", "surprised", "shy", "love", "tired", "scared"]);
 
@@ -60,7 +70,7 @@ const ZH_EMOTION: ReadonlyArray<readonly [RegExp, string]> = [
   [/惊讶|震惊|吃惊|懵|疑惑|不解/, "surprised"],
   [/害羞|脸红|不好意思|羞/, "shy"],
   [/爱|喜欢|喜爱|比心|贴贴|亲|撒娇|期待/, "love"],
-  [/累|困|疲惫|摸鱼|无语|摆烂|瘫/, "tired"],
+  [/[累困瘫]|疲惫|摸鱼|无语|摆烂/, "tired"],
   [/害怕|吓|慌|紧张|崩溃|痛哭/, "scared"],
 ];
 
@@ -69,7 +79,7 @@ const ZH_ACTION: ReadonlyArray<readonly [RegExp, string]> = [
   [/哭|流泪|呜|崩溃|土下座/, "cry"],
   [/笑|哈哈|咧嘴|偷笑/, "laugh"],
   [/挥手|再见|拜拜|打招呼/, "wave"],
-  [/赞|点头|同意|支持|棒|牛/, "thumbsup"],
+  [/[赞棒牛]|点头|同意|支持/, "thumbsup"],
   [/捂脸|无语|叹气|无奈|扶额/, "facepalm"],
   [/偷看|探头|暗中观察|盯/, "peek"],
 ];
@@ -87,24 +97,26 @@ interface PaletteRow {
   action: string;
 }
 
-function hasPalette(): boolean {
-  return (
-    getSqlite()
-      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sticker_palette'")
-      .get() !== undefined
-  );
-}
-
-function queryPalette(): PaletteRow[] {
-  if (!hasPalette()) return [];
+function queryPalette(platform: string): PaletteRow[] {
+  if (!hasStickerTable()) return [];
   return getSqlite()
     .prepare(
       `SELECT file_id as fileId, file_unique_id as fileUniqueId, label,
               COALESCE(emoji, '') as emoji, COALESCE(set_name, '') as setName,
               COALESCE(emotion, '') as emotion, COALESCE(action, '') as action
-         FROM sticker_palette WHERE file_id IS NOT NULL AND file_id != ''`,
+         FROM sticker_palette WHERE platform = ? AND file_id IS NOT NULL AND file_id != ''`,
     )
-    .all() as PaletteRow[];
+    .all(platform) as PaletteRow[];
+}
+
+/** 这个平台的贴纸库里有没有这张（启动时收藏表情只看还没看过的）。 */
+export function knownSticker(fileUniqueId: string, platform: string): boolean {
+  if (!hasStickerTable()) return false;
+  return (
+    getSqlite()
+      .prepare("SELECT 1 FROM sticker_palette WHERE platform = ? AND file_unique_id = ?")
+      .get(platform, fileUniqueId) !== undefined
+  );
 }
 
 function bigrams(s: string): Set<string> {
@@ -141,6 +153,7 @@ export function upsertStickerPerception(input: {
   text?: string | null;
   emotion?: string;
   now?: number;
+  platform?: string;
 }): boolean {
   if (!input.fileId || !input.fileUniqueId || isRefusalSummary(input.summary)) return false;
   const combined = `${input.emotion ?? ""} ${input.summary} ${input.text ?? ""}`;
@@ -155,6 +168,7 @@ export function upsertStickerPerception(input: {
       action: mapBy(ZH_ACTION, combined, "none"),
     },
     input.now ?? Date.now(),
+    input.platform ?? "telegram",
   );
   return true;
 }
@@ -167,7 +181,20 @@ function labelOf(summary: string, text: string | null | undefined): string {
     .join("");
 }
 
-/** 启动时用 sticker-cache.db 已有 VLM 缓存精化调色板里重合的贴纸，零额外模型调用。 */
+/** 看图缓存的键：平台加上贴纸在那个平台上的 id。 */
+function stickerCacheKey(platform: string, fileUniqueId: string): string {
+  return `${platform}:${fileUniqueId}`;
+}
+
+/** 缓存键属于哪个平台的哪张贴纸；没有平台前缀的是加平台之前 Telegram 写的旧行。 */
+function cacheOwner(key: string): { platform: string; fileUniqueId: string } {
+  const m = /^(telegram|qq):(.+)$/.exec(key);
+  return m
+    ? { platform: m[1] as string, fileUniqueId: m[2] as string }
+    : { platform: "telegram", fileUniqueId: key };
+}
+
+/** 启动时用 sticker-cache.db 已有 VLM 缓存精化这个平台调色板里重合的贴纸，零额外模型调用。 */
 export function syncStickerCache(
   entries: ReadonlyArray<{
     fileUniqueId: string;
@@ -175,25 +202,81 @@ export function syncStickerCache(
     text: string | null;
     emotion: string;
   }>,
+  platform = "telegram",
 ): number {
-  if (!hasPalette() || entries.length === 0) return 0;
-  const select = getSqlite().prepare<[string], { label: string; emotion: string }>(
-    "SELECT label, emotion FROM sticker_palette WHERE file_unique_id = ?",
+  if (!hasStickerTable() || entries.length === 0) return 0;
+  const select = getSqlite().prepare<[string, string], { label: string; emotion: string }>(
+    "SELECT label, emotion FROM sticker_palette WHERE file_unique_id = ? AND platform = ?",
   );
   let updated = 0;
   for (const e of entries) {
     if (isRefusalSummary(e.summary)) continue;
-    const row = select.get(e.fileUniqueId);
+    const owner = cacheOwner(e.fileUniqueId);
+    if (owner.platform !== platform) continue;
+    const row = select.get(owner.fileUniqueId, platform);
     if (!row) continue;
     const combined = `${e.emotion} ${e.summary} ${e.text ?? ""}`;
     const emotion = mapBy(ZH_EMOTION, combined, row.emotion || "neutral");
     const label = labelOf(e.summary, e.text);
     if (row.label !== label || row.emotion !== emotion) {
-      relabelSticker(e.fileUniqueId, label, emotion, mapBy(ZH_ACTION, combined, "none"));
+      const action = mapBy(ZH_ACTION, combined, "none");
+      relabelSticker(owner.fileUniqueId, label, emotion, action, platform);
       updated++;
     }
   }
   return updated;
+}
+
+/** 平台交给看图的一张贴纸：哪个平台、能用来再发出去的 fileId、去重用的 fileUniqueId，和随消息来的提示。 */
+export interface StickerSeen extends StickerMeta {
+  platform: string;
+  fileId?: string;
+  fileUniqueId?: string;
+}
+
+/**
+ * 看贴纸：同一张贴纸只问一次看图模型（缓存键带平台；Telegram 的旧缓存行没有前缀，也认），
+ * 有 fileId 和 fileUniqueId 时把看到的描述收进这个平台的贴纸库。返回时间线里那一行。
+ */
+export function perceiveSticker(gateway: Gateway, cache: StickerCache) {
+  // 同一张贴纸几乎同时出现在几个群里：正在看的那次结果大家共用，不重复调模型。
+  const looking = new Map<string, Promise<StickerPerception>>();
+  const look = (key: string | null, meta: StickerMeta, load: () => Promise<Uint8Array>) => {
+    const pending = key ? looking.get(key) : undefined;
+    if (pending) return pending;
+    const task = load().then((bytes) => describeSticker(gateway, bytes, meta));
+    if (!key) return task;
+    const stored = task
+      .then((p) => {
+        cache.set(key, p);
+        return p;
+      })
+      .finally(() => looking.delete(key));
+    looking.set(key, stored);
+    return stored;
+  };
+  return async (seen: StickerSeen, load: () => Promise<Uint8Array>): Promise<string> => {
+    const { platform, fileId, fileUniqueId: id } = seen;
+    const meta: StickerMeta = {
+      ...(seen.emoji ? { emoji: seen.emoji } : {}),
+      ...(seen.setTitle ? { setTitle: seen.setTitle } : {}),
+    };
+    const key = id ? stickerCacheKey(platform, id) : null;
+    const cached =
+      key && id ? (cache.get(key) ?? (platform === "telegram" ? cache.get(id) : null)) : null;
+    const perceived = cached ?? (await look(key, meta, load));
+    if (id && fileId) {
+      upsertStickerPerception({
+        fileId,
+        fileUniqueId: id,
+        emoji: seen.emoji,
+        setName: seen.setTitle,
+        platform,
+        ...perceived,
+      });
+    }
+    return formatStickerMedia(perceived, meta);
+  };
 }
 
 /** 按 emotion/action 维度随机取一条（同维度多贴纸——多样性）。 */
@@ -206,6 +289,45 @@ function pickByDimension(
   return hits[Math.floor(Math.random() * hits.length)]?.fileId ?? null;
 }
 
+/** 一张贴纸和查询的贴切分：标签、包名包含查询，标签和查询的字重合，映射到的情绪/动作对得上。 */
+function descriptionScore(
+  row: PaletteRow,
+  q: string,
+  qBigrams: ReadonlySet<string>,
+  mapped: string,
+): number {
+  const label = row.label.toLowerCase();
+  const setName = row.setName.toLowerCase();
+  // 没有任何描述的不参与（得 0 分不会进入候选）。
+  if (!label && !setName) return 0;
+  let score = 0;
+  if (label.includes(q)) score += 10;
+  else if (setName.includes(q)) score += 6;
+  if (qBigrams.size > 0) score += overlapScore(q, qBigrams, label);
+  if (mapped && (row.emotion === mapped || row.action === mapped)) score += 2;
+  return score;
+}
+
+/** 标签和查询的 bigram 重合，每个 3 分；一个也不重合时退到单字命中。 */
+function overlapScore(q: string, qBigrams: ReadonlySet<string>, label: string): number {
+  const lBigrams = bigrams(label);
+  let overlap = 0;
+  for (const b of qBigrams) if (lBigrams.has(b)) overlap++;
+  if (overlap > 0) return overlap * 3;
+  // 单字直接命中（例如查询"猫猫"但库里是"白猫"）不靠 bigram，保底检查连续单字。
+  const qChars = [...q.replace(/[\s\p{P}\p{S}]/gu, "")];
+  const charHits = qChars.filter((c) => label.includes(c)).length;
+  return qChars.length >= 2 && charHits >= 2 ? charHits : 0;
+}
+
+/** 标准情绪词先按情绪挑，挑不到、或是标准动作词再按动作挑。 */
+function pickByStandardWord(rows: PaletteRow[], word: string): string | null {
+  return (
+    (EMOTIONS.has(word) ? pickByDimension(rows, "emotion", word) : null) ||
+    (ACTIONS.has(word) ? pickByDimension(rows, "action", word) : null)
+  );
+}
+
 /** 用自然语言描述（VLM 标签与包名）打分挑出最贴切的一张。 */
 function matchByDescription(rows: PaletteRow[], query: string): string | null {
   const q = query.trim().toLowerCase();
@@ -214,25 +336,7 @@ function matchByDescription(rows: PaletteRow[], query: string): string | null {
   let bestScore = 0;
   let top: PaletteRow[] = [];
   for (const row of rows) {
-    const label = row.label.toLowerCase();
-    const setName = row.setName.toLowerCase();
-    if (!label && !setName) continue;
-    let score = 0;
-    if (label.includes(q)) score += 10;
-    else if (setName.includes(q)) score += 6;
-    if (qBigrams.size > 0) {
-      const lBigrams = bigrams(label);
-      let overlap = 0;
-      for (const b of qBigrams) if (lBigrams.has(b)) overlap++;
-      score += overlap * 3;
-      // 单字直接命中（例如查询"猫猫"但库里是"白猫"）不靠 bigram，保底检查连续单字。
-      if (overlap === 0) {
-        const qChars = [...q.replace(/[\s\p{P}\p{S}]/gu, "")];
-        const charHits = qChars.filter((c) => label.includes(c)).length;
-        if (qChars.length >= 2 && charHits >= 2) score += charHits;
-      }
-    }
-    if (mapped && (row.emotion === mapped || row.action === mapped)) score += 2;
+    const score = descriptionScore(row, q, qBigrams, mapped);
     if (score > bestScore) {
       bestScore = score;
       top = [row];
@@ -252,21 +356,15 @@ function matchByDescription(rows: PaletteRow[], query: string): string | null {
  * 4. emoji 匹配；
  * 5. 最近似情绪兜底（仅已知词；绝不乱发无关贴纸）。
  */
-export function resolveStickerFileId(keyword: string): string | null {
+export function resolveStickerFileId(keyword: string, platform = "telegram"): string | null {
   const lower = keyword.trim().toLowerCase();
   if (!lower) return null;
-  const rows = queryPalette();
+  const rows = queryPalette(platform);
   if (rows.length === 0) return null;
 
   // 1. dimension 匹配
-  if (EMOTIONS.has(lower)) {
-    const hit = pickByDimension(rows, "emotion", lower);
-    if (hit) return hit;
-  }
-  if (ACTIONS.has(lower)) {
-    const hit = pickByDimension(rows, "action", lower);
-    if (hit) return hit;
-  }
+  const hit = pickByStandardWord(rows, lower);
+  if (hit) return hit;
 
   // 2. 自然语言标签/VLM 描述匹配
   const textHit = matchByDescription(rows, lower);
@@ -274,12 +372,8 @@ export function resolveStickerFileId(keyword: string): string | null {
 
   // 3. 中文同义词映射回标准维度
   const mapped = mapBy(ZH_QUERY_MAP, lower, "");
-  if (mapped) {
-    const mappedHit =
-      (EMOTIONS.has(mapped) && pickByDimension(rows, "emotion", mapped)) ||
-      (ACTIONS.has(mapped) && pickByDimension(rows, "action", mapped));
-    if (mappedHit) return mappedHit;
-  }
+  const mappedHit = mapped ? pickByStandardWord(rows, mapped) : null;
+  if (mappedHit) return mappedHit;
 
   // 4. emoji 匹配（直接 emoji，或 keyword / 映射词由近到远的几个 emoji）
   const emojiKeys = KEYWORD_TO_EMOJI[lower] ??
@@ -295,28 +389,28 @@ export function resolveStickerFileId(keyword: string): string | null {
 }
 
 /** 给出的贴纸词里，库里一张也对不上的（启动检查报出来，免得她选了却永远发不出去）。 */
-export function unresolvedStickerWords(words: readonly string[]): string[] {
-  if (queryPalette().length === 0) return [];
-  return words.filter((w) => resolveStickerFileId(w) === null);
+export function unresolvedStickerWords(words: readonly string[], platform = "telegram"): string[] {
+  if (queryPalette(platform).length === 0) return [];
+  return words.filter((w) => resolveStickerFileId(w, platform) === null);
 }
 
-/** 可发的贴纸张数（启动检查用）。 */
-export function paletteSize(): number {
-  return queryPalette().length;
+/** 这个平台可发的贴纸张数（启动检查用）。 */
+export function paletteSize(platform = "telegram"): number {
+  return queryPalette(platform).length;
 }
 
 /**
  * 从本地贴纸库挑出一批有具体画面/情绪描述的贴纸给模型参考（先中文/非占位描述，按不同情绪轮流挑，不重复）。
  * 纯读本地库，不调用模型。
  */
-export function listStickerHints(limit = 14): string[] {
-  const rows = queryPalette().filter((r) => {
+export function listStickerHints(limit = 14, platform = "telegram"): string[] {
+  const rows = queryPalette(platform).filter((r) => {
     const l = r.label.trim();
     return l.length >= 2 && l !== "sticker" && l !== "贴纸" && l.length <= 36;
   });
   if (rows.length === 0) return [];
   // 中文具体描写排前面，再按情绪/动作分桶轮流拿，保证覆盖多样表情而不是全堆同一类。
-  const isZh = (s: string) => /[\u4e00-\u9fff]/.test(s);
+  const isZh = (s: string) => /[\u4E00-\u9FFF]/.test(s);
   const buckets = new Map<string, string[]>();
   const ordered = [...rows].sort((a, b) => Number(isZh(b.label)) - Number(isZh(a.label)));
   const seen = new Set<string>();
@@ -329,8 +423,12 @@ export function listStickerHints(limit = 14): string[] {
     list.push(text);
     buckets.set(key, list);
   }
+  return roundRobin([...buckets.values()], limit);
+}
+
+/** 各队轮流各取一条，取满 limit 条或都取空为止（会取空传进来的队列）。 */
+function roundRobin(queues: string[][], limit: number): string[] {
   const out: string[] = [];
-  const queues = [...buckets.values()];
   while (out.length < limit && queues.some((q) => q.length > 0)) {
     for (const q of queues) {
       const next = q.shift();

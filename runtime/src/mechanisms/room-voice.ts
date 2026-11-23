@@ -6,7 +6,7 @@ import { fnv1a as hash } from "./hash.js";
  * 这个群的人平时怎么打字（生产，2026-11-13；PLAN 第 42、49 件，docs/adr/282-speech-style-and-room-voice.md）。
  *
  * 为什么：线上判别员 41 段认出她 40 段，靠的是说话的样子（比群友长 2–4 倍、感叹号、句末表情、一条塞几句）；她看不到
- * 这个群的人平时怎么打字，群友的话只出现在聊天记录里。按群折叠群友的消息，到了冷启动门槛才写：说得多的那些人的长短、
+ * 这个群的人平时怎么打字，群友的话只出现在聊天记录里。按群 fold 群友的消息，到了冷启动门槛才写：说得多的那些人的长短、
  * 一条几句、一轮几条、引用回复挂在哪、开口点名、感叹号、句尾表情、只发贴纸，她自己最近在这里带感叹号的条数，再加三段
  * 清洗过的群友之间的接话（引用回复的一对，和"有人回复了他、他直接接着说"的一对按这个群的比例混着放），写成群友之间
  * 的话，不写成她的台词。只回到同一个群的提示词里；不取她此刻记录里看得到的消息。文字是 Gemini 改稿 4 的写法。
@@ -32,7 +32,7 @@ export interface RoomState {
   rooms: Readonly<Record<string, readonly RoomMessage[]>>;
   /** 每个群里见过的发言人名字（和名字的第一个词），算开口点名用。 */
   names: Readonly<Record<string, readonly string[]>>;
-  /** Telegram 标过是机器人的发送者（旧数据只在后来的消息上标，所以按人记，标到时把他之前的也拿掉）。 */
+  /** 平台标过是机器人的发送者（旧数据只在后来的消息上标，所以按人记，标到时把他之前的消息也去掉）。 */
   bots?: readonly string[];
   /** 她自己最近在每个会话里发出的文字（最近 MINE_KEPT 条）。 */
   mine?: Readonly<Record<string, readonly string[]>>;
@@ -44,7 +44,7 @@ export interface RoomState {
  * - noNumbers：不写字数、比例和统计，只在群里几乎不用感叹号而她最近 10 句里超过一半带感叹号时提醒一句；
  * - filterWater：群友的原话示范跳过纯叹词/水词（草、6、Да.）和空回声（`А чо я? / а я чо?`）。
  */
-export interface RoomVoiceOptions {
+interface RoomVoiceOptions {
   noNumbers?: boolean;
   filterWater?: boolean;
   /** 按调用次数与 15 分钟窗口轮换群友接话示范（替代按整天锁死）。 */
@@ -76,14 +76,14 @@ const CJK = /[一-鿿]/g;
 const HAS_CJK = /[一-鿿]/;
 const EMOJI_END = /\p{Extended_Pictographic}️?\s*$/u;
 const URL = /https?:\/\/|t\.me\/|www\./i;
-const HER = /alice|алис|элис|爱丽丝|愛麗絲|アリス|艾丽丝|kohaku|琥珀|小琥/i;
+const HER = /alice|алис|элис|爱丽丝|愛麗絲|アリス|艾丽丝/i;
 /** 粗口（俄、中、英的常见词根）：带这些的原话不进示范，统计照算。 */
 const PROFANE =
-  /ху[йеёяи]|пизд|[её]б[аеуы]|ебл|бля|сук[аи]|муда|пид[оа]?р|гандон|залуп|шлюх|дроч|操|肏|傻逼|煞笔|妈的|他妈|你妈|屌|鸡巴|婊|fuck|shit|bitch|cunt|dick|asshole/i;
+  /ху[йеёяи]|пизд|[её]б[аеуы]|ебл|бля|сук[аи]|муда|пид[оа]?р|гандон|залуп|шлюх|дроч|[操肏屌婊]|傻逼|煞笔|妈的|他妈|你妈|鸡巴|fuck|shit|bitch|cunt|dick|asshole/i;
 const SENTENCE_END = /[。！？!?…]+|\n+|(?<=\.)\s+/;
 /** 纯叹词/水词（норм、草、6）：金句过滤时不算"有实质内容"。 */
 const BARE =
-  /^(?:а|и|ну|да|нет|чо|что|я|ты|он|она|это|ясно|ок|ok|ладно|ага|угу|хм|ха|лол|пфф|草|6|甜|嗯|啊|哦|哈|好|对|是|是的|确实|真的|牛|牛的|可以|在|噗|啥)$/u;
+  /^(?:[аия草6甜嗯啊哦哈好对是牛在噗啥]|ну|да|нет|чо|что|ты|он|она|это|ясно|ок|ok|ладно|ага|угу|хм|ха|лол|пфф|是的|确实|真的|牛的|可以)$/u;
 const DAY_MS = 24 * 60 * 60_000;
 const CN_OFFSET_MS = 8 * 60 * 60_000;
 const ROTATION_WINDOW_MS = 15 * 60_000;
@@ -188,7 +188,7 @@ const share = (xs: readonly boolean[]) => (xs.length ? xs.filter(Boolean).length
 const pct = (x: number) => (x < 0.03 ? "几乎没有" : `约 ${Math.round(x * 20) * 5}%`);
 
 /** 这个群此刻的打字样子；没到冷启动门槛时为 null。 */
-export function roomFacts(room: readonly RoomMessage[], names: readonly string[]) {
+function roomFacts(room: readonly RoomMessage[], names: readonly string[]) {
   if (room.length < MIN_MESSAGES) return null;
   const counts = new Map<string, number>();
   for (const m of room) counts.set(m.who, (counts.get(m.who) ?? 0) + 1);
@@ -235,7 +235,7 @@ interface QuoteSituations {
  * 说话时，没有把那条回复引用回去的比例（他引用别的话也算）。real-v1 上只给一个笼统的引用比例时，她在有人刚回复她时
  * 引用回去 65%，真人 27%。
  */
-export function quoteSituations(room: readonly RoomMessage[]): QuoteSituations {
+function quoteSituations(room: readonly RoomMessage[]): QuoteSituations {
   const index = new Map(room.map((m, i) => [m.id, i]));
   let quotes = 0;
   let latest = 0;
@@ -264,7 +264,7 @@ export function quoteSituations(room: readonly RoomMessage[]): QuoteSituations {
 }
 
 /** 一条几句、一轮几条（说得多的那些人）。real-v1 上她每条 1.2–1.6 句，真人 1.15 句；她一轮约 1.0 条，真人 1.1–1.9 条。 */
-export function typingTurns(room: readonly RoomMessage[], active: ReadonlySet<string>) {
+function typingTurns(room: readonly RoomMessage[], active: ReadonlySet<string>) {
   const texts = room.filter((m): m is Said => m.text !== null && active.has(m.who));
   const runs: number[] = [];
   room.forEach((m, i) => {
@@ -296,10 +296,14 @@ function clean(m: RoomMessage, facts: Facts, filterWater = false): m is Said {
   );
 }
 
-type Shown = { a: Said; b: Said; kind: "quote" | "direct" };
+interface Shown {
+  a: Said;
+  b: Said;
+  kind: "quote" | "direct";
+}
 
 /** 三段接话：引用回复的一对，和"有人回复了他、他直接接着说"的一对按这个群的比例混着放；按群和日子轮换。 */
-export function exchanges(
+function exchanges(
   scope: string,
   seed: number | string,
   room: readonly RoomMessage[],
@@ -310,7 +314,7 @@ export function exchanges(
 ): Shown[] {
   const ok = (m: RoomMessage | undefined): m is Said =>
     !!m && !visible.has(m.id) && facts.activeIds.has(m.who) && clean(m, facts, filterWater);
-  const pairOk = (a: Said, b: Said) => !(filterWater && echoPair(a.text, b.text));
+  const pairOk = (a: Said, b: Said) => !filterWater || !echoPair(a.text, b.text);
   const byId = new Map(room.map((m) => [m.id, m]));
   const quotePairs = room.flatMap((b): Shown[] => {
     const quoted = b.replyTo ? byId.get(b.replyTo) : undefined;
@@ -399,7 +403,7 @@ function factLines(
  * 候选（out-charm.md 改法 2）：roomVoiceGolden 是"不给数字、挑水词"的那一版；roomVoice 不带选项，
  * 与生产逐字相同。
  */
-export function createRoomVoice(options: RoomVoiceOptions = {}): Mechanism {
+function createRoomVoice(options: RoomVoiceOptions = {}): Mechanism {
   return defineMechanism<RoomState>({
     name: "room-voice",
     initial,

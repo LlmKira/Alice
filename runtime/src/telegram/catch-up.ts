@@ -12,7 +12,7 @@
  * 停机期间的消息不在这里补（那是另一件事，补了会让她一醒来就面对一大批旧消息）。
  * 每轮写一行诊断：几个会话有缺口、补了多少条——也就是推送漏了多少。
  */
-import type { Message, TelegramClient } from "@mtcute/node";
+import type { Dialog, Message, TelegramClient } from "@mtcute/node";
 import type { AliceEvent } from "../mind/events.js";
 import type { Telegram } from "./gates.js";
 import { scopeOf } from "./world-adapter.js";
@@ -28,7 +28,7 @@ export const CATCH_UP_PAGES_PER_ROUND = 20;
 /** 每个会话记住的最近见过的消息 id（去重用；更早的靠"不比见过的最新更新"挡住）。 */
 const REMEMBERED = 200;
 
-/** 她见过的消息：Journal 里的（启动折叠、运行时）加上刚进来、还没写日志的。 */
+/** 她见过的消息：Journal 里的（启动 fold、运行时）加上刚进来、还没写日志的。 */
 export class Inbox {
   private readonly recent = new Map<string, Set<string>>();
   private readonly newest = new Map<string, number>();
@@ -77,7 +77,7 @@ export class Inbox {
 }
 
 /**
- * 她在哪些会话里：这次启动时对话列表里有的，加上 Journal 里出现过的（启动折叠和运行时走同一个投影）。
+ * 她在哪些会话里：这次启动时对话列表里有的，加上 Journal 里出现过的（启动 fold 和运行时走同一个投影）。
  * 两边都没有的群，是她启动之后才被拉进来的。对话列表还没拿到时谁都不算新的。
  */
 export class Groups {
@@ -133,21 +133,7 @@ export async function catchUp(
   since: number,
 ): Promise<CatchUpRound> {
   const round: CatchUpRound = { dialogs: 0, gaps: 0, fetched: 0, carried: 0 };
-  // 按最后一条的时间从新到旧（置顶的也按时间排、归档的也算）：看到 since 之前的就不用再往下翻。
-  const dialogs = await tg.request("catch_up", {}, async (c) => {
-    const recent = [];
-    for await (const dialog of c.iterDialogs({ pinned: "keep", archived: "keep" })) {
-      const last = dialog.lastMessage;
-      if (!last) continue;
-      // 置顶的排在最前、不按时间：一个很久没动的置顶会话不能让这一轮就此停下（上线第一轮 dialogs: 0）。
-      if (last.date.getTime() < since) {
-        if (dialog.isPinned) continue;
-        break;
-      }
-      recent.push(dialog);
-    }
-    return recent;
-  });
+  const dialogs = await recentDialogs(tg, since);
   let pages = 0;
   for (const dialog of dialogs) {
     round.dialogs++;
@@ -161,30 +147,74 @@ export async function catchUp(
       round.carried++;
       continue;
     }
-    // mtcute reverse：从 offset 往后（编号含 offset），从旧到新。没见过的会话从 since 那一刻（秒）起。
-    let offset =
-      seen === null ? { id: 0, date: Math.floor(since / 1000) } : { id: seen + 1, date: 0 };
-    for (let chatPages = 1; ; chatPages++) {
-      const page = await tg.request("catch_up", { scope }, (c) =>
-        c.getHistory(dialog.peer, { reverse: true, offset, limit: CATCH_UP_PAGE }),
-      );
-      pages++;
-      const sorted = [...page].sort((a, b) => a.id - b.id);
-      const missed = sorted.filter(
-        (m) => (seen === null || m.id > seen) && m.date.getTime() >= since,
-      );
-      for (const msg of missed) receive(msg, tg.client);
-      round.fetched += missed.length;
-      const end = sorted.at(-1)?.id;
-      // 这一页拉过了（包括她自己发的那几条）：下一页、下一轮从这里往后。
-      if (end !== undefined) inbox.caughtUp(scope, end);
-      if (end === undefined || page.length < CATCH_UP_PAGE || end >= last.id) break;
-      if (chatPages >= CATCH_UP_PAGES_PER_CHAT || pages >= CATCH_UP_PAGES_PER_ROUND) {
-        round.carried++;
-        break;
-      }
-      offset = { id: end + 1, date: 0 };
-    }
+    const chat = await catchUpChat({ tg, inbox, receive, since }, dialog, last.id, seen, pages);
+    pages = chat.pages;
+    round.fetched += chat.fetched;
+    if (chat.carried) round.carried++;
   }
   return round;
+}
+
+/** 按最后一条的时间从新到旧（置顶的也按时间排、归档的也算）：看到 since 之前的就不用再往下翻。 */
+async function recentDialogs(tg: Telegram, since: number): Promise<Dialog[]> {
+  return tg.request("catch_up", {}, async (c) => {
+    const recent = [];
+    for await (const dialog of c.iterDialogs({ pinned: "keep", archived: "keep" })) {
+      const last = dialog.lastMessage;
+      if (!last) continue;
+      // 置顶的排在最前、不按时间：一个很久没动的置顶会话不能让这一轮就此停下（上线第一轮 dialogs: 0）。
+      if (last.date.getTime() < since) {
+        if (dialog.isPinned) continue;
+        break;
+      }
+      recent.push(dialog);
+    }
+    return recent;
+  });
+}
+
+/**
+ * 补拉一个会话，拉到最后一条（lastId）或到了本会话、本轮的页数上限为止。
+ * pages 进来是这一轮已经拉过的页数，出去是加上这个会话之后的；carried 表示这个会话没拉完。
+ */
+async function catchUpChat(
+  ctx: {
+    tg: Telegram;
+    inbox: Inbox;
+    receive: (msg: Message, client: TelegramClient) => void;
+    since: number;
+  },
+  dialog: Dialog,
+  lastId: number,
+  seen: number | null,
+  pages: number,
+): Promise<{ pages: number; fetched: number; carried: boolean }> {
+  const { tg, inbox, receive, since } = ctx;
+  const scope = scopeOf(dialog.peer.id);
+  let fetched = 0;
+  // mtcute reverse：从 offset 往后（编号含 offset），从旧到新。没见过的会话从 since 那一刻（秒）起。
+  let offset =
+    seen === null ? { id: 0, date: Math.floor(since / 1000) } : { id: seen + 1, date: 0 };
+  for (let chatPages = 1; ; chatPages++) {
+    const page = await tg.request("catch_up", { scope }, (c) =>
+      c.getHistory(dialog.peer, { reverse: true, offset, limit: CATCH_UP_PAGE }),
+    );
+    pages++;
+    const sorted = [...page].sort((a, b) => a.id - b.id);
+    const missed = sorted.filter(
+      (m) => (seen === null || m.id > seen) && m.date.getTime() >= since,
+    );
+    for (const msg of missed) receive(msg, tg.client);
+    fetched += missed.length;
+    const end = sorted.at(-1)?.id;
+    // 这一页拉过了（包括她自己发的那几条）：下一页、下一轮从这里往后。
+    if (end !== undefined) inbox.caughtUp(scope, end);
+    if (end === undefined || page.length < CATCH_UP_PAGE || end >= lastId) {
+      return { pages, fetched, carried: false };
+    }
+    if (chatPages >= CATCH_UP_PAGES_PER_CHAT || pages >= CATCH_UP_PAGES_PER_ROUND) {
+      return { pages, fetched, carried: true };
+    }
+    offset = { id: end + 1, date: 0 };
+  }
 }

@@ -16,10 +16,12 @@ import {
   affordanceOf,
   affordances,
 } from "../mind/affordances.js";
-import { type ArgContext, buildAct } from "../mind/args.js";
+import { type ArgContext, buildAct, explainInvalidArgs } from "../mind/args.js";
 import type { SpeechRequest } from "../mind/effects.js";
 import type { Defect, ToolReply } from "../speech/decision.js";
 import { readObject } from "../speech/json.js";
+import { renderSpeechPrompt, type SpeechPrompt } from "../speech/prompt.js";
+import type { ChatMessage } from "./speech-model.js";
 
 /** 看了才知道的三件事：结果要回到程序里（其余动作只是做出来）。 */
 export type QueryKind = "album-search" | "chat-search" | "delegate" | "recall" | "dm-check";
@@ -65,13 +67,16 @@ export interface PtcResult {
   queries: PtcRecord[];
 }
 
-export const QUERY_KINDS = new Set<ActKind>([
+const QUERY_KINDS = new Set<ActKind>([
   "album-search",
   "chat-search",
   "delegate",
   "recall",
   "dm-check",
 ]);
+
+/** 这个动作是不是查询（结果当场交回给她）。 */
+export const isQueryKind = (kind: ActKind): kind is QueryKind => QUERY_KINDS.has(kind);
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const DEFAULT_MAX_CALLS = 20;
@@ -82,15 +87,11 @@ const byName: Record<string, Affordance> = Object.fromEntries(
   affordances.map((a) => [a.name, a] as const),
 );
 
-function isQueryKind(kind: ActKind): kind is QueryKind {
-  return QUERY_KINDS.has(kind);
-}
-
 /** 参数必须是对象（没写就是空对象）；别的形状整条动作不成立。 */
 function argsOf(name: string, raw: unknown): Record<string, unknown> {
   if (raw === undefined || raw === null) return {};
   if (typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error(`invalid args for ${name}`);
+    throw new TypeError(`invalid args for ${name}`);
   }
   return raw as Record<string, unknown>;
 }
@@ -113,7 +114,7 @@ interface Deadline {
   signal: AbortSignal;
   stopped: Promise<never>;
   timeoutMs: number;
-  done(): void;
+  done: () => void;
 }
 
 function deadline(timeoutMs: number, external?: AbortSignal): Deadline {
@@ -123,7 +124,7 @@ function deadline(timeoutMs: number, external?: AbortSignal): Deadline {
     controller.abort();
     reject(new Error(reason === "timeout" ? `timed out after ${timeoutMs}ms` : "aborted"));
   };
-  const timer = setTimeout(() => stop("timeout"), timeoutMs);
+  const timer = setTimeout(stop, timeoutMs, "timeout");
   const onAbort = () => stop("abort");
   external?.addEventListener("abort", onAbort, { once: true });
   return {
@@ -193,7 +194,8 @@ function bindTools(
     if (calls > maxCalls) throw new Error(`too many tool calls (max ${maxCalls})`);
     const args = argsOf(row.name, raw);
     const act = buildAct(row.kind, args, ctx);
-    if (!act) throw new Error(`invalid args for ${row.name}`);
+    if (!act)
+      throw new Error(`invalid args for ${row.name}: ${explainInvalidArgs(row.kind, args, ctx)}`);
     const kind = act.kind;
     if (!isQueryKind(kind)) {
       acts.push(act);
@@ -204,7 +206,7 @@ function bindTools(
     return runQuery(kind, act, args);
   };
 
-  const tools = new Proxy<Record<string, unknown>>(Object.create(null), {
+  const tools = new Proxy(Object.create(null) as Record<string, unknown>, {
     get(_target, prop) {
       if (typeof prop !== "string") return undefined;
       // 原型上的 toString、constructor 不是工具（表本身是普通对象）。
@@ -307,14 +309,17 @@ export async function executeProgram(
   return { acts: [...acts], defects: defect ? [defect] : [], queries: [...queries] };
 }
 
-/** 读模型原文；不是 JSON 时 null（整段不算）。 */
+/** 读模型原文；不是 JSON 时 null（整段不算），保留 id / extra_content / reasoning_content 供多轮回流。 */
 function parseReply(rawJson: string): ToolReply | null {
   try {
     const value = JSON.parse(rawJson) as unknown;
-    const reply = (value && typeof value === "object" ? value : {}) as Partial<ToolReply>;
+    const reply = (value !== null && typeof value === "object" ? value : {}) as Partial<ToolReply>;
     return {
       content: typeof reply.content === "string" ? reply.content : "",
       calls: Array.isArray(reply.calls) ? reply.calls : [],
+      ...(typeof reply.reasoning_content === "string"
+        ? { reasoning_content: reply.reasoning_content }
+        : {}),
     };
   } catch {
     return null;
@@ -327,7 +332,7 @@ async function runReplyCall(
   request: SpeechRequest,
   options: PtcOptions,
 ): Promise<PtcResult> {
-  const call = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const call = (raw !== null && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const name = typeof call.name === "string" ? call.name : "";
   const argumentsText = typeof call.arguments === "string" ? call.arguments : "";
   if (name !== RUN_CODE) {
@@ -378,4 +383,138 @@ export async function executeToolReply(
     queries.push(...run.queries);
   }
   return { decision: { acts }, defects, queries };
+}
+
+export interface PtcTurnOptions extends PtcOptions {
+  persona: string;
+  request: SpeechRequest;
+  initialPrompt?: SpeechPrompt;
+  callModel: (prompt: SpeechPrompt) => Promise<string>;
+  /** 遇到代码或参数报错时最多让模型自然修正几轮（默认 1）。 */
+  maxErrorRetries?: number;
+}
+
+const summarizeOutwardAct = (act: Act): string => {
+  switch (act.kind) {
+    case "send":
+      return `say(${JSON.stringify(act.text)})`;
+    case "sticker":
+      return `sticker(${JSON.stringify(act.word)})`;
+    case "react":
+      return `react(${JSON.stringify(act.messageId)}, ${JSON.stringify(act.emoji)})`;
+    default:
+      return affordanceOf(act.kind).name;
+  }
+};
+
+function buildErrorTurnMessages(
+  reply: ToolReply,
+  errorSummary: string,
+  executedSummary: readonly string[],
+  hasNewOutward: boolean,
+  attempt: number,
+): ChatMessage[] {
+  const normalizedCalls = reply.calls.map((c, idx) => ({
+    ...c,
+    id: c.id ?? `ptc_${attempt}_${idx}`,
+  }));
+  const feedback = hasNewOutward
+    ? {
+        ok: false,
+        error: errorSummary,
+        already_executed: executedSummary,
+        instruction:
+          "Outward actions listed in already_executed were already sent—do not repeat them. Fix the failing call and run only the remaining actions.",
+      }
+    : {
+        ok: false,
+        error: errorSummary,
+        already_executed: [],
+        instruction: "No outward actions were sent. Fix the error and call run_code again.",
+      };
+  return [
+    {
+      role: "assistant",
+      content: reply.content ?? "",
+      tool_calls: normalizedCalls.map((c) => ({
+        id: c.id,
+        type: "function" as const,
+        function: { name: c.name, arguments: c.arguments },
+        ...(c.extra_content !== undefined ? { extra_content: c.extra_content } : {}),
+      })),
+      ...(reply.reasoning_content !== undefined
+        ? { reasoning_content: reply.reasoning_content }
+        : {}),
+    },
+    ...normalizedCalls.map(
+      (call): ChatMessage => ({
+        role: "tool",
+        tool_call_id: call.id,
+        content: JSON.stringify(feedback),
+      }),
+    ),
+  ];
+}
+
+/**
+ * Code Mode 的完整一轮执行：没有实质报错时与单轮完全相同、零额外调用；
+ * 若 run_code 出现语法、参数或运行报错，把错误作为 tool 结果回流给模型一次，让她看清原因并自然修正。
+ */
+export async function executePtcTurn(
+  options: PtcTurnOptions,
+): Promise<{ decision: { acts: Act[] }; defects: Defect[]; queries: PtcRecord[] }> {
+  const initialPrompt =
+    options.initialPrompt ?? renderSpeechPrompt(options.persona, options.request);
+  const maxErrorRetries = Math.max(0, Math.floor(options.maxErrorRetries ?? 1));
+  const messages: ChatMessage[] = [
+    { role: "system", content: initialPrompt.system },
+    { role: "user", content: initialPrompt.user },
+  ];
+
+  let committedActs: Act[] = [];
+  const allQueries: PtcRecord[] = [];
+  let lastDefects: Defect[] = [];
+
+  for (let attempt = 0; attempt <= maxErrorRetries; attempt++) {
+    if (options.signal?.aborted) break;
+    const roundPrompt: SpeechPrompt =
+      attempt === 0 ? initialPrompt : { ...initialPrompt, messages: [...messages] };
+    const raw = await options.callModel(roundPrompt);
+    const reply = parseReply(raw);
+    const ptc = await executeToolReply(raw, options.request, options);
+    allQueries.push(...ptc.queries);
+
+    const actionable = ptc.defects.filter((d) => d.kind !== "stray" && d.text !== "aborted");
+    const hadUncaughtQuery = ptc.queries.some((q) => q.uncaught === true);
+    const canRetry =
+      !hadUncaughtQuery &&
+      actionable.length > 0 &&
+      attempt < maxErrorRetries &&
+      !options.signal?.aborted &&
+      reply !== null &&
+      reply.calls.length > 0;
+    if (!canRetry) {
+      return {
+        decision: { acts: [...committedActs, ...ptc.decision.acts] },
+        defects: ptc.defects,
+        queries: allQueries,
+      };
+    }
+
+    lastDefects = ptc.defects;
+    const hasNewOutward = ptc.decision.acts.some(isOutward);
+    if (hasNewOutward) committedActs = [...committedActs, ...ptc.decision.acts];
+    const executedSummary = committedActs.filter(isOutward).map(summarizeOutwardAct);
+    messages.push(
+      ...buildErrorTurnMessages(
+        reply,
+        actionable.map((d) => d.text).join("；"),
+        executedSummary,
+        hasNewOutward,
+        attempt,
+      ),
+    );
+  }
+
+  return { decision: { acts: committedActs }, defects: lastDefects, queries: allQueries };
 }

@@ -42,7 +42,7 @@ export interface PhoneState {
   activeAt: number;
   /** 抽中的下一次拿起的时刻（可能在这一格稍后；0 = 没有）。 */
   pickupAt: number;
-  /** 一共拿起过几次（足迹）。 */
+  /** 一共拿起过几次（footprint）。 */
   pickups: number;
 }
 
@@ -57,7 +57,7 @@ export function online(phone: PhoneState | undefined, now: number): boolean {
 }
 
 /** 她正在这个会话里聊着：群里她开口后的这段对话还开着（dwell）；私聊里她说过话、来回还没停过 SESSION_GAP。 */
-export function talking(chat: ChatNode, now: number): boolean {
+function talking(chat: ChatNode, now: number): boolean {
   if (chat.chatType === "group") return dwellSince(chat, now) !== null;
   return (
     chat.lastAliceAt > 0 && now - Math.max(chat.lastAliceAt, chat.lastIncomingAt) <= SESSION_GAP
@@ -68,7 +68,7 @@ export function talking(chat: ChatNode, now: number): boolean {
  * 有人在找她、她还没回：在等她（isSolicited），或者有人点名、回复了她，她看过但还没在这里说过话，在
  * SOLICITED_FOR 之内（和私聊里"对方说了最后一句、她还没回"同一个时限）。通知一直在锁屏上，手机放着也看得到。
  */
-export function awaited(chat: ChatNode, now: number): boolean {
+function awaited(chat: ChatNode, now: number): boolean {
   return (
     isSolicited(chat, now) ||
     (chat.lastDirectedAt > chat.lastAliceAt && now - chat.lastDirectedAt <= SOLICITED_FOR)

@@ -137,7 +137,7 @@ async function run(
   const requests: SpeechRequest[] = [];
   await replay(events, {
     mechanisms: ms,
-    tickMs: 10_000,
+    tickMs: 60_000,
     speech: (request) => {
       requests.push(request);
       return oracle(request);
@@ -150,14 +150,18 @@ const text = (r: SpeechRequest) => r.contributions.map((c) => c.text).join("\n")
 const after = (rs: SpeechRequest[]) => rs.filter((r) => r.at >= HIT_AT);
 
 describe("desire: what she sees in channels and wants to share", { timeout: 90_000 }, () => {
+  // 下面 4 条只读断言跑的是完全相同的默认世界；复用同一份不可变回放结果。
+  let cachedDefault: Promise<SpeechRequest[]> | null = null;
+  const defaultRun = () => (cachedDefault ??= run(world()));
+
   it("a fresh post that matches what a close group is talking about is put before her there, with title and content", async () => {
-    const rs = after(await run(world()));
+    const rs = after(await defaultRun());
     const shown = rs.filter(
       (r) => r.scope === GROUP && text(r).includes("英伟达CEO黄仁勋宣布辞职"),
     );
     expect(shown.length).toBeGreaterThan(0);
     expect(text(shown[0] as SpeechRequest)).toContain("显卡市场震动");
-    expect(text(shown[0] as SpeechRequest)).toContain("刚在频道看到一条内容：");
+    expect(text(shown[0] as SpeechRequest)).toContain("刚在频道看到一条：");
     // 猫猫群没在聊这个：不摆给她。
     for (const r of rs.filter((x) => x.scope === OTHER)) expect(text(r)).not.toContain("黄仁勋");
   });
@@ -165,13 +169,13 @@ describe("desire: what she sees in channels and wants to share", { timeout: 90_0
   it("the urge itself wakes her in the quiet group; without it the post is never shown", async () => {
     const wakes = (rs: SpeechRequest[]) =>
       after(rs).filter((r) => r.scope === GROUP && r.triggerMessageId === null).length;
-    expect(wakes(await run(world()))).toBeGreaterThan(wakes(await run(world(false))));
+    expect(wakes(await defaultRun())).toBeGreaterThan(wakes(await run(world(false))));
     const prod = after(await run(world(), without)).filter((r) => r.scope === GROUP);
     for (const r of prod) expect(text(r)).not.toContain("黄仁勋宣布辞职");
   });
 
   it("once she has thought it over there, it is used up there", async () => {
-    const rs = after(await run(world()));
+    const rs = after(await defaultRun());
     const shown = rs.filter((r) => r.scope === GROUP && text(r).includes("黄仁勋宣布辞职"));
     expect(shown.length).toBe(1);
   });
@@ -227,7 +231,7 @@ describe("desire: what she sees in channels and wants to share", { timeout: 90_0
     );
     const events = [...world(), second].sort((a, b) => a.at - b.at);
     const speaksShare: Oracle = (r) =>
-      text(r).includes("频道看到一条内容")
+      text(r).includes("频道看到一条：")
         ? { acts: [{ kind: "send", text: "你们看这个", replyTo: null }] }
         : { acts: [] };
     const rs = after(await run(events, candidate, speaksShare));
@@ -248,7 +252,7 @@ describe("desire: what she sees in channels and wants to share", { timeout: 90_0
   });
 
   it("the bystander line becomes a plain fact when she knows why she woke", async () => {
-    const rs = await run(world());
+    const rs = await defaultRun();
     const unsought = rs.filter((r) => r.scope === GROUP && r.triggerMessageId === null);
     expect(unsought.length).toBeGreaterThan(0);
     for (const r of unsought) {

@@ -1,16 +1,16 @@
 /**
- * 她的日记：她的主观世界（她觉得谁在躲她，也许对方只是忙）。两种写法各配一种显示，构造时选定（DiaryStrategy）：
- * - feb：2 月 diary.mod.ts 的忠实复现（ADR-82/102/110，eval-artifacts/emotion/feb-diary.md）：她每轮顺手写
- *   日记（tools.diary），显示最近 3.3 小时的。作对照。
- * - reflect：她在一个会话里经历累计到一定分量时单独想一次、写下来（Generative Agents 的反思），按近因、重要性、
- *   相关性取前几条，并按受众规则筛（docs/research/mature-designs-2026-11-11.md）。
- * 条目只从事件折叠（act.done 的 diary、ponder.done 的反思），时间只来自事件。
+ * 她的日记：她的主观世界（她觉得谁在躲她，也许对方只是忙）。她在一个会话里经历累计到一定分量时单独想一次、
+ * 写下来（Generative Agents 的反思），按近因、重要性、相关性取前几条，并按受众规则筛
+ * （docs/research/mature-designs-2026-11-11.md）。2 月原样的顺手写（tools.diary）现在的模型只写 0–2%，已删
+ * （ADR-293）。条目只从事件 fold（ponder.done 的反思），时间只来自事件。
  */
 import type { Person } from "../../mind/effects.js";
 import type { AliceEvent } from "../../mind/events.js";
 import type { Contribution, PonderAsk } from "../../mind/mechanism.js";
+import { crossPlatformTag } from "../../mind/platform.js";
 import { type AliceState, type ChatState, onTimeline } from "../../mind/state.js";
-import { moodFor } from "./affect.js";
+import { moodFor, valenceAt } from "./affect.js";
+import { decayedAttachment } from "./attachment.js";
 import { feature, type PressureFeature, type View } from "./feature.js";
 import { memoryPairs, memoryReaches, memoryRelevance, memorySimilarity } from "./memory-stream.js";
 import { DIARY, DIARY_RANK, ECHO, REFLECT } from "./params.js";
@@ -32,56 +32,14 @@ export interface DiaryEntry {
   present: readonly string[];
   /** 别人托她保密的、明显私密的（反思时她自己标的）：只有这样的守受众规则（reaches）。 */
   private?: true;
-}
-
-/**
- * feb：她每轮顺手写日记（2 月原样）。thinking：示范按 2 月原版写成先想、再说、再记（和内心独白一起用时）。
- */
-export function febDiary(o: { thinking: boolean }): PressureFeature {
-  return feature({
-    name: "diary",
-    provides: ["diary"],
-    requires: ["chats", "relations", "lastCallAt"],
-    affordances: ["diary"],
-    reduce: (_before, w, event) => {
-      if (event.type !== "act.done" || event.act.kind !== "diary") return w;
-      // 关于谁：编号所指那条消息的发言人；没写编号就不针对谁（2 月：写显示名的也进全局）。
-      const act = event.act;
-      const chat = w.chats[event.scope];
-      const index = act.about === null || !chat ? -1 : chat.recentIds.lastIndexOf(act.about);
-      const about = index >= 0 ? (chat?.recentFrom[index] ?? null) : null;
-      const entry = {
-        text: act.entry,
-        about,
-        scope: event.scope,
-        group: chat?.chatType === "group",
-        at: event.at,
-        importance: null,
-        present: presentIn(chat),
-      };
-      return { ...w, diary: writeDiary(w.diary, entry, w.lastCallAt) };
-    },
-    contribute: ({ world, chat, now }) => [
-      ...diaryLines(
-        world,
-        febShown(world.diary, audienceOf(world, chat.scope).target, now),
-        null,
-        now,
-      ),
-      {
-        mechanism: "pressure-diary",
-        kind: "reference" as const,
-        text: DEMO_INTRO,
-        examples: o.thinking ? DEMOS_THINKING : DEMOS,
-      },
-    ],
-  });
+  /** 写入那一刻来自心情偏离常态的心震强度 [0, 1]（ADR-299 第二片）。 */
+  shock?: number;
 }
 
 /**
  * 她此刻看得见哪些日记的另外两条规矩（context-v2，out.md 改动 5-4）：staleAfter 之前写的、又不是关于此刻对象的
  * 不再看得见（样例里 114、75 小时前的两条"去不了露营有点小失落"一起出现，跨天反刍）；同一个会话里写下的几条
- * 几乎一样（两字片段 Jaccard 超过 collapse）只留最新的一条。2 月日记的对照（febDiary）不设。
+ * 几乎一样（两字片段 Jaccard 超过 collapse）只留最新的一条。
  */
 export interface DiaryView {
   staleAfter: number;
@@ -91,22 +49,48 @@ export interface DiaryView {
    * 不看她说了什么：不按字面判断"说的是不是这件事"。反思时不设，反思要看见写过的，免得再写一遍。
    */
   spent?: boolean;
+  /**
+   * 候选连续性视图（ADR-297）：重要度 >= minImportance 且在 softSpentMs（默认 6h）内的高分量日记，
+   * 不因为她刚顺手回过一条无关消息就被 spent 立刻清空（仍受 onTimeline 与 staleAfter 约束，防止反刍）。
+   */
+  softSpentMs?: number;
+  minImportance?: number;
+  /** ADR-299 第二/三片：高心震或高重要度条目的长期保留窗与按人牵挂/深疤检索加权。 */
+  salienceRetainMs?: number;
+  attachmentBoost?: (about: string) => number;
+  /** 独自写下的高心震个人感想，面对偏心私聊对象时可带出一点倾诉余温。 */
+  personalShockBoost?: (shock: number) => number;
 }
 export const DIARY_VIEW: DiaryView = { staleAfter: 48 * 3_600_000, collapse: 0.35 };
 /** 卡片上的显示（eval-artifacts/rehash/prereg-3.md）。 */
 const CARD_VIEW: DiaryView = { ...DIARY_VIEW, spent: true };
+/** 候选连续性卡片视图：保留 6 小时内重要度 >= 7 的心事余韵。 */
+const FLOW_CARD_VIEW: DiaryView = {
+  ...DIARY_VIEW,
+  spent: true,
+  softSpentMs: 6 * 3_600_000,
+  minImportance: 7,
+};
+/** ADR-299 第二片：高心震（>= 0.35）或高重要度（>= 8）往事最长保留 14 天不自动淡出。 */
+const EMOTIVE_CARD_VIEW: DiaryView = {
+  ...DIARY_VIEW,
+  spent: true,
+  softSpentMs: 12 * 3_600_000,
+  minImportance: 6,
+  salienceRetainMs: 14 * 24 * 3_600_000,
+};
 
 /**
- * 反思的写法示范（context-v2，out.md 改动 5-3）：一暖一柔。以前的两条（FEB_LINES，2 月日记的对照还用）都是负面的。
+ * 反思的写法示范（context-v2，out.md 改动 5-3）：一暖一柔。2 月日记的两条示范都是负面的。
  * out.md 原句的"小满"换成"朋友"：场景里有叫小满的人（warm-02、d08、h06），示范里的名字会被读成她真记得的事。
  */
-export const REFLECT_LINES = [
+const REFLECT_LINES = [
   "朋友一遇到急事第一个来找我帮忙，被人这样信赖着，心里暖洋洋的",
   "他说这周连着加班快撑不住了，虽然还在开玩笑，其实挺累的",
 ] as const;
 
 /**
- * reflect：经历累计到一定分量时单独想一次、写下来，按打分和受众规则显示（context-v2：日记只写条目，标题由版式写；
+ * reflect：经历累计到一定分量时单独想一次、写下来，按打分和受众规则显示（context-v2：日记只写条目，标题由 layout 写；
  * 示范是 REFLECT_LINES；看得见的日记按 DIARY_VIEW 再筛一次，卡片上按 CARD_VIEW）。
  */
 export const reflectDiary: PressureFeature = feature({
@@ -123,9 +107,85 @@ export const reflectDiary: PressureFeature = feature({
   ponder: (world, chats, now) => reflectAsk(world, chats, now, DIARY_VIEW, REFLECT_LINES),
 });
 
+/** 候选（ADR-297）：重要未了的心事不因短暂开口被 spent 一刀清光，保留 6 小时内高重要度日记余韵。 */
+export const reflectDiaryFlow: PressureFeature = feature({
+  name: "reflect-flow",
+  provides: ["diary", "involvement"],
+  requires: ["chats", "relations"],
+  uses: ["affect"],
+  reduce: (_before, w, event) => involve(reflected(w, event, DIARY_VIEW), event),
+  contribute: ({ world, chat, now }) => {
+    const here = audienceOf(world, chat.scope, chat);
+    return diaryLines(world, rankedShown(world.diary, here, now, FLOW_CARD_VIEW), chat.scope, now);
+  },
+  ponder: (world, chats, now) => reflectAsk(world, chats, now, DIARY_VIEW, REFLECT_LINES),
+});
+
+/**
+ * ADR-299 第二片（上入下 · 心震加权的非对称回忆）：写入时记录心震强度，
+ * 高心震或高重要度记忆按情境线索与慢印记引力跨越 48 小时自然浮现。
+ */
+export const reflectDiaryEmotive: PressureFeature = feature({
+  name: "reflect-emotive",
+  provides: ["diary", "involvement"],
+  requires: ["chats", "relations"],
+  uses: ["affect", "attachment"],
+  reduce: (_before, w, event) => involve(reflectedEmotive(w, event, DIARY_VIEW), event),
+  contribute: ({ world, chat, now }) => {
+    const here = audienceOf(world, chat.scope, chat);
+    const att = world.attachment;
+    const partnerRec = att && here.target ? decayedAttachment(att.people[here.target], now) : null;
+    const view: DiaryView = att
+      ? {
+          ...EMOTIVE_CARD_VIEW,
+          attachmentBoost: (about) => {
+            const p = decayedAttachment(att.people[about], now);
+            return 0.45 * Math.max(p.bond, p.scar);
+          },
+          ...(partnerRec && partnerRec.bond > 0.25 && partnerRec.scar < 0.15
+            ? {
+                personalShockBoost: (shock) => (shock >= 0.35 ? 0.25 * partnerRec.bond * shock : 0),
+              }
+            : {}),
+        }
+      : EMOTIVE_CARD_VIEW;
+    return diaryLines(world, rankedShown(world.diary, here, now, view), chat.scope, now);
+  },
+  ponder: (world, chats, now) => reflectAsk(world, chats, now, DIARY_VIEW, REFLECT_LINES),
+});
+
+function reflectedEmotive<W extends View<"chats" | "diary" | "affect">>(
+  w: W,
+  event: AliceEvent,
+  view?: DiaryView,
+): W {
+  if (event.type !== "ponder.done" || event.ponder.kind !== "reflect") return w;
+  const p = event.ponder;
+  const shockValence = p.mood?.valence ?? valenceAt(w.affect, event.at);
+  const shock = Math.min(1, Math.abs(shockValence - w.affect.home) / 0.8);
+  const node = w.chats[p.scope];
+  const present = presentIn(node);
+  const here = audienceOf(w, p.scope);
+  const diary = p.entries.reduce((d, e) => {
+    const entry: DiaryEntry = {
+      text: e.text,
+      about: e.about,
+      scope: p.scope,
+      group: node?.chatType === "group",
+      at: event.at,
+      importance: e.importance,
+      present,
+      ...(e.private ? { private: true as const } : {}),
+      ...(shock >= 0.1 ? { shock } : {}),
+    };
+    return writeDiary(d, entry, event.at, rankedShown(d, here, event.at, view));
+  }, w.diary);
+  return { ...w, diary };
+}
+
 /**
  * 反思写下的日记：同一次最多 DIARY.perDecision 条（从这次算起）；和这里的受众此刻看得见的某条几乎一样就不写
- * （同一次里先写下的也算）。写完日记时的心情由 affect.ts 折进她的心情。
+ * （同一次里先写下的也算）。写完日记时的心情由 affect.ts fold 进她的心情。
  */
 function reflected<W extends View<"chats" | "diary">>(
   w: W,
@@ -220,30 +280,6 @@ export function audienceOf(
 export { memoryReaches as reaches, memoryRelevance as relevance };
 
 /**
- * feb 的显示（2 月原样）：不针对谁的最新 DIARY.global 条，加上关于此刻对象的最新 DIARY.target 条，
- * 只看 3.3 小时之内的，按写下的时间从旧到新排。
- */
-export function febShown(
-  entries: readonly DiaryEntry[],
-  target: string | null,
-  now: number,
-): DiaryEntry[] {
-  const alive = entries.filter((e) => e.at <= now && now - e.at < DIARY.ttl);
-  const newest = (list: DiaryEntry[], n: number) => list.slice(-n);
-  const targeted = target
-    ? newest(
-        alive.filter((e) => e.about === target),
-        DIARY.target,
-      )
-    : [];
-  const global = newest(
-    alive.filter((e) => e.about === null),
-    DIARY.global,
-  );
-  return [...targeted, ...global].slice(0, DIARY.total).sort((a, b) => a.at - b.at);
-}
-
-/**
  * reflect 的显示。先按 reaches 筛：标了私密的只在写下它的会话、和与当时在场的人的私聊里；其余的哪里都行。
  * 在它自己的会话里，那段对话还在时间线上时不放：对话就在眼前，日记只多一份可以照抄的文字。再按近因 + 重要性 +
  * 相关性取前几条（DIARY_RANK）：这里写下的，相关性是"关于此刻的对象，或此刻的对象当时在场"；别处写下的是
@@ -257,8 +293,15 @@ export function rankedShown(
   view?: DiaryView,
 ): DiaryEntry[] {
   const witness = (e: DiaryEntry) => here.target !== null && e.present.includes(here.target);
+  const salient = (e: DiaryEntry) =>
+    view?.salienceRetainMs !== undefined &&
+    now - e.at <= view.salienceRetainMs &&
+    ((e.shock ?? 0) >= 0.35 || (e.importance ?? 0) >= 8);
   const fresh = (e: DiaryEntry) =>
-    !view || now - e.at <= view.staleAfter || (here.target !== null && e.about === here.target);
+    !view ||
+    now - e.at <= view.staleAfter ||
+    (here.target !== null && e.about === here.target) ||
+    salient(e);
   // 同一个会话里几乎一样的几条只留最新的（view.collapse）。
   const newest = (e: DiaryEntry) =>
     !view ||
@@ -270,16 +313,26 @@ export function rankedShown(
         f.at > e.at &&
         memorySimilarity(f.text, e.text) > view.collapse,
     );
+  const keptByImportance = (e: DiaryEntry) =>
+    view?.softSpentMs !== undefined &&
+    now - e.at <= view.softSpentMs &&
+    (e.importance ?? 0) >= (view.minImportance ?? 7);
   const allowed = (e: DiaryEntry) =>
     fresh(e) &&
     newest(e) &&
     (e.scope === here.scope
-      ? !here.onTimeline(e.at) && !(view?.spent && (here.spokeAt ?? 0) > e.at)
+      ? !here.onTimeline(e.at) &&
+        (!view?.spent || (here.spokeAt ?? 0) <= e.at || keptByImportance(e))
       : memoryReaches(e, here));
   const mine = (e: DiaryEntry) => here.target !== null && e.about === here.target;
   const score = (e: DiaryEntry) =>
     DIARY_RANK.decayPerHour ** ((now - e.at) / 3_600_000) +
     (e.importance ?? DIARY_RANK.importance) / 10 +
+    0.55 * (e.shock ?? 0) +
+    (e.about && view?.attachmentBoost ? view.attachmentBoost(e.about) : 0) +
+    (e.about === null && !e.private && view?.personalShockBoost
+      ? view.personalShockBoost(e.shock ?? 0)
+      : 0) +
     (e.scope === here.scope ? (mine(e) || witness(e) ? 1 : 0) : memoryRelevance(e, here));
   const pool = entries
     .filter((e) => e.at <= now && allowed(e))
@@ -293,7 +346,7 @@ export function rankedShown(
     .sort((a, b) => a.at - b.at);
 }
 
-/** 只写条目（"- 3 小时前 关于 名字：内容"；别处写下的注明出处），标题由版式写。 */
+/** 只写条目（"- 3 小时前 关于 名字：内容"；别处写下的注明出处），标题由 layout 写。 */
 function diaryLines(
   world: View<"relations" | "chats">,
   entries: readonly DiaryEntry[],
@@ -302,10 +355,11 @@ function diaryLines(
 ): Contribution[] {
   const text = entries
     .map((e) => {
-      // here 为 null：2 月日记的对照，原样不注出处。
+      // here 为 null：2 月日记的对照，原样不注出处；跨平台条目轻标来源平台，同平台逐字不变。
+      const tag = crossPlatformTag(e.scope, here);
       const where = here === null || e.scope === here ? "" : ` ${placeOf(world, e.scope)}`;
       const about = e.about ? ` 关于 ${nameOf(world, e.about) ?? "某人"}` : "";
-      return `- ${diaryAgo(now - e.at)}${where}${about}：${e.text}`;
+      return `- ${diaryAgo(now - e.at)}${tag}${where}${about}：${e.text}`;
     })
     .join("\n");
   return text ? [{ mechanism: "pressure-diary", kind: "self", text }] : [];
@@ -397,52 +451,7 @@ function reflectAsk(
   };
 }
 
-// ── 2 月原版的写法示范（f72379d gold-examples L143、L165）──────────────
-
-/** 2/19 那一刻提示词里的两条日记。 */
-const FEB_LINES = [
-  "被说了不太好听的话 有点难过 但也许他不是故意的",
-  "她说算了不说了 有点担心",
-] as const;
-const DEMO_INTRO = "你写日记的时候";
-const DEMOS = [
-  {
-    scene: "被说了伤人的话",
-    acts: [
-      { kind: "send" as const, text: "嗯...好吧", replyTo: null },
-      { kind: "diary" as const, about: null, entry: FEB_LINES[0] },
-    ],
-  },
-  {
-    scene: "她说「算了不说了」",
-    acts: [
-      { kind: "send" as const, text: "最近是不是特别累啊", replyTo: null },
-      { kind: "diary" as const, about: null, entry: FEB_LINES[1] },
-    ],
-  },
-];
-/** 2 月原版的顺序：先想，再说，再记。 */
-const DEMOS_THINKING = [
-  {
-    scene: DEMOS[0].scene,
-    acts: [
-      { kind: "think" as const, thought: "这话说得挺重的...不过算了 他可能只是今天心情不好" },
-      ...DEMOS[0].acts,
-    ],
-  },
-  {
-    scene: DEMOS[1].scene,
-    acts: [
-      {
-        kind: "think" as const,
-        thought: "她突然说算了不说了...最近换了工作 上周说压力大 不要直接戳",
-      },
-      ...DEMOS[1].acts,
-    ],
-  },
-];
-
-// ── 同属"她自己写下的、下一轮读回"的两样（候选 echo、feb-thought）──────
+// ── 行动回声（inner.ts echoExpanded）──────
 
 /**
  * 行动回声（ADR-102 组件 1）：她在这个会话里最近说过的话，独立于时间线窗口，
@@ -458,9 +467,9 @@ export interface EchoOptions {
 function starterOf(text: string): string | null {
   const t = text.trim().replace(/^[\p{P}\p{S}\s]+/gu, "");
   if (!t) return null;
-  const hasCjk = /[\u4e00-\u9fff]/.test(t);
+  const hasCjk = /[\u4E00-\u9FFF]/.test(t);
   if (hasCjk) {
-    const cjk = t.match(/^[\u4e00-\u9fff]{2}/);
+    const cjk = t.match(/^[\u4E00-\u9FFF]{2}/);
     return cjk ? cjk[0] : null;
   }
   const w = t.toLowerCase().match(/^[\p{L}\p{N}]{2,}/u);

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { Album } from "../src/album.js";
 import type { Effect } from "../src/mind/effects.js";
 import type { AliceEvent, MessageReceived } from "../src/mind/events.js";
 import { type AliceState, emptyState, LOOK_RUN_LIMIT } from "../src/mind/state.js";
 import { step } from "../src/mind/step.js";
 import { renderSpeechPrompt } from "../src/speech/prompt.js";
-import { Album } from "../src/telegram/album.js";
 import { directedWake } from "./directed-wake.js";
 
 const T0 = 1_771_000_000_000;
@@ -83,6 +83,17 @@ describe("album: photos she saw in groups", () => {
     const id = lines[2]?.match(/\[(p[0-9a-z]{6})\]/)?.[1] ?? "";
     expect(album.source(id)).toMatchObject({ scope: GROUP, messageId: "10" });
     expect(await new Album(async () => []).search("猫", T0)).toBe("想找的“猫”。相册里还没有图。");
+  });
+
+  it("a scope prefix keeps one platform's search to its own photos", async () => {
+    const mixed = new Album(async (_query, documents) => documents.map((_, i) => i));
+    mixed.observe(groupPhoto("20", T0, "群里的猫"));
+    mixed.observe({ ...groupPhoto("21", T0, "QQ 群里的猫"), scope: "qq:group:300" });
+    const qq = await mixed.searchItems("猫", T0, "qq:");
+    expect(qq.map((h) => h.caption)).toEqual(["QQ 群里的猫"]);
+    const telegram = await mixed.searchItems("猫", T0, "telegram:");
+    expect(telegram.map((h) => h.caption)).toEqual(["群里的猫"]);
+    expect(await mixed.searchItems("猫", T0)).toHaveLength(2);
   });
 });
 

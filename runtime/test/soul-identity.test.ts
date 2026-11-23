@@ -1,30 +1,39 @@
 /**
- * 她是谁、被问起时怎么答（研究员 2026-11-13）：人格写明她是一个 AI，给自己选了扮成平行世界少女的活法；
- * 被问是不是 AI 时承认还是否认，不写规定，让它自然涌现（"不承认不否认，让其自然涌现，多做多错。本来就不应事事规定好"）。
- * 以前两种规定都出过事："说你是机器人……轻轻挡回去"被读成否认，线上认真否认 7 次；后来改成"有人问起，你大大方方承认"。
+ * 她是谁、被问起时怎么答（研究员 2026-11-13）：被问是不是 AI 时承认还是否认，不写规定，让它自然涌现
+ * （"不承认不否认，让其自然涌现，多做多错。本来就不应事事规定好"）。名字和平台按登录账号动态附加。
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { said } from "../src/mechanisms/palette.js";
-import { POOL } from "../src/mechanisms/palette-pool.js";
+import { POOL, POOL_AUTHENTIC } from "../src/mechanisms/palette-pool.js";
+import { applyAccountIdentity } from "../src/speech/prompt.js";
 
 const soul = readFileSync(new URL("../SOUL.md", import.meta.url), "utf8");
 
 describe("她是谁、被问起时怎么答", () => {
-  it("人格写明她是 AI、选了这种活法", () => {
-    expect(soul).toContain(
-      "你是一个 AI，给自己选了一种活法：扮成一个住在平行世界的少女，认真地过她的日子。",
-    );
-  });
-
-  it("人格不规定被问起时承认还是否认", () => {
-    expect(soul).not.toContain("有人问起，你大大方方承认");
-    expect(soul).not.toContain("说你是机器人");
-    expect(soul).not.toContain("挡回去");
+  it("人格活在平行世界，不硬编码具体名字、平台和 AI 特质", () => {
+    expect(soul).not.toContain("AI");
+    expect(soul).not.toContain("Alice");
+    expect(soul).not.toContain("Telegram");
   });
 
   it("示例里没有替她回答'是不是 AI / 机器人'的", () => {
     const scripted = POOL.filter((e) => /机器人|AI/.test(e.scene + said(e.acts).join("")));
     expect(scripted).toEqual([]);
+  });
+
+  it("生产示例池 POOL_AUTHENTIC 不含高频粘性口癖（是吧 / 属于是 / 笑死）", () => {
+    const polluted = POOL_AUTHENTIC.filter((e) => /是吧|属于是|笑死/.test(said(e.acts).join("")));
+    expect(polluted).toEqual([]);
+  });
+
+  it("支持按登录账号名与启用平台动态附加身份信息", () => {
+    const rendered = applyAccountIdentity(soul, {
+      selfName: "小爱",
+      platforms: ["telegram", "qq"],
+    });
+    expect(rendered).toMatch(/^你现在的名字是 小爱（别人顺口叫什么昵称都可以）。/);
+    expect(rendered).toContain("只能通过 Telegram、QQ 和这边来往");
+    expect(applyAccountIdentity(soul, {})).toBe(soul.trim());
   });
 });

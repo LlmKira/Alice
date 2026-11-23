@@ -26,7 +26,7 @@ import { noiseSource } from "../src/noise-source.js";
 const LIFE_COMP = {
   ...PRODUCTION,
   sleep: withMissed(bedtime),
-  life: lifeFeature({ occupies: true, warm: true }),
+  life: lifeFeature({ warm: true }),
 };
 const pressureLife = createPressure(affordances, LIFE_COMP);
 
@@ -54,7 +54,7 @@ function dm(at: number): MessageReceived {
   };
 }
 const chat: ChatState = emptyChat(DM, "private", true);
-const reduce = pressureLife.reduce as (w: World, e: AliceEvent) => World;
+const reduce = (w: World, e: AliceEvent) => pressureLife.reduce?.(w, e) as World;
 const fold = (events: AliceEvent[]) => events.reduce(reduce, pressureLife.initial as World);
 const wake = (w: World, e: AliceEvent) =>
   (pressureLife.wake as (c: ChatState, e: AliceEvent, now: number, w: World) => number)(
@@ -339,18 +339,5 @@ describe("candidate life-l2-glance: she glances at her phone between bits of wha
     expect(busyCost(s, s.glanceAt + GLANCE.ms - 1)).toBe(0);
     expect(busyCost(s, s.glanceAt + GLANCE.ms)).toBe(full);
     if (s.glanceAt > s.at) expect(busyCost(s, s.glanceAt - 1)).toBe(full);
-  });
-
-  it("scan: the glance itself is when she scans her chats; without scan there is no scan at all", () => {
-    const s = glancing.find((x) => x.glanceAt !== undefined);
-    if (!s || s.glanceAt === undefined) throw new Error("no glance");
-    const w = { ...(pressureLife.initial as World), life: s };
-    const scans = lifeFeature({ occupies: true, fill: true, glance: true, scan: true }).scans as (
-      w: World,
-      now: number,
-    ) => boolean;
-    expect(scans(w, s.glanceAt)).toBe(true);
-    expect(scans(w, s.glanceAt + GLANCE.ms)).toBe(false);
-    expect(lifeFeature({ occupies: true, fill: true, glance: true }).scans).toBeUndefined();
   });
 });

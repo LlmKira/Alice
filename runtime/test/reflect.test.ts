@@ -5,7 +5,7 @@
  * - 写什么：那段对话、她此刻在这里还在的心情、这里看得见的日记、写法示范。
  * - 给谁看：私聊里写下的只在那个私聊；群里写下的只在那个群、和与当时在场的人的私聊；关于第三个人的只给当时
  *   在场的人；在它自己的会话里，那段对话还在时间线上时不放。
- * - 写入前只和同一批受众看得见的条目去重。生产不反思、提示词里没有日记。
+ * - 写入前只和同一批受众看得见的条目去重。
  */
 import { describe, expect, it } from "vitest";
 import { decodeEvent } from "../src/journal.js";
@@ -191,7 +191,7 @@ describe("when she reflects", () => {
 });
 
 describe("what she is asked", () => {
-  it("the conversation with people by number, her lines as hers, and Feb's two lines as the example", () => {
+  it("the conversation with people by number and her lines as hers", () => {
     const [ask] = run([
       msg(T, GROUP, "u1", "大家看 Alice 的日志", true),
       ...four().slice(1),
@@ -203,7 +203,6 @@ describe("what she is asked", () => {
     const prompt = renderReflectPrompt("PERSONA", ask as ReflectRequest);
     expect(prompt.user).toContain("p1 莉莉丝: 大家看 Alice 的日志");
     expect(prompt.user).toContain("你: 干嘛");
-    expect(prompt.system).toContain("被人这样信赖着，心里暖洋洋的");
   });
 
   it("her mood only while she still feels it, and only if she felt it here (D1)", () => {

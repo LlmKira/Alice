@@ -1,11 +1,12 @@
 /**
- * 她的相册（ADR-260 的做法，archive/untracked-2026-11-10）：她在群里见过的图片，按描述和配文能找到，
- * 发的时候用 Telegram 的"不带原作者转发"，不用下载再上传。私聊里的图不进相册。
- * 相册是日志的投影：启动时从 Journal 折叠出来，之后随新事件更新，删了也能重建。
+ * 她的相册（ADR-260 的做法，archive/untracked-2026-11-10）：她在群里见过的图片，按描述和配文能找到。
+ * 各平台共用这一份做法，每个平台一本：Telegram 发的时候用"不带原作者转发"，QQ 取出原消息里的图再发。
+ * 私聊里的图不进相册。
+ * 相册是日志的投影：启动时从 Journal fold 出来，之后随新事件更新，删了也能重建。
  * 找图交给多语言重排（llm/rerank.ts），不做字词匹配：想找的话和描述是什么语言都行。
  * 给她看最像的几张，对不对得上由她自己看描述判断。搜索结果由外壳写进 act.done，回放读日志里的结果。
  */
-import type { AliceEvent } from "../mind/events.js";
+import type { AliceEvent } from "./mind/events.js";
 
 export interface AlbumPhoto {
   id: string;
@@ -85,10 +86,14 @@ export class Album {
     }
   }
 
-  /** 她翻相册看到的结构化结果：PTC 代码可直接读 asset / description / caption 再发图。 */
-  async searchItems(query: string, now: number): Promise<AlbumHit[]> {
+  /**
+   * 她翻相册看到的结构化结果：PTC 代码可直接读 asset / description / caption 再发图。
+   * scopePrefix 只翻这个平台的图（"telegram:"、"qq:"）：别的平台的图在这里发不出去。
+   */
+  async searchItems(query: string, now: number, scopePrefix?: string): Promise<AlbumHit[]> {
     const known = [...this.photos.values()]
-      .filter((p) => p.description !== null || p.caption)
+      .filter((p) => scopePrefix === undefined || p.scope.startsWith(scopePrefix))
+      .filter((p) => p.description !== null || (p.caption ?? "") !== "")
       .sort((a, b) => b.at - a.at);
     if (known.length === 0) return [];
     const what = (p: AlbumPhoto) =>
@@ -107,8 +112,8 @@ export class Album {
   }
 
   /** 她翻相册看到的东西：一段写给她看的文字。 */
-  async search(query: string, now: number): Promise<string> {
-    const hits = await this.searchItems(query, now);
+  async search(query: string, now: number, scopePrefix?: string): Promise<string> {
+    const hits = await this.searchItems(query, now, scopePrefix);
     if (hits.length === 0) return `想找的“${query}”。相册里还没有图。`;
     const lines = hits.map((h) => {
       const desc = [h.description, h.caption && `配文“${h.caption}”`].filter(Boolean).join("，");
@@ -133,4 +138,15 @@ export class Album {
       this.byId.set(p.id, this.photos.get(key) as AlbumPhoto);
     }
   }
+}
+
+/** 平台查询（PTC 的 search_album）给她看的文字：每张一行。 */
+export function albumSearchText(q: string, hits: readonly AlbumHit[]): string {
+  if (hits.length === 0) return `想找的“${q}”，相册里没有匹配的图。`;
+  return hits
+    .map(
+      (h) =>
+        `[${h.asset}] ${[h.description, h.caption && `配文“${h.caption}”`].filter(Boolean).join("，")}（${h.sender} ${h.ago}在群里发的）`,
+    )
+    .join("\n");
 }

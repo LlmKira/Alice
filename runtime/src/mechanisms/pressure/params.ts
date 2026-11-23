@@ -4,7 +4,9 @@
  * 时间一律用毫秒。
  */
 import type { ChatType } from "../../mind/events.js";
-import { CLOSENESS_HALF_LIFE } from "../closeness.js";
+
+/** 亲疏分数的半衰期（离开的机会成本里，回应的价值也按它消退）。 */
+export const CLOSENESS_HALF_LIFE = 14 * 24 * 60 * 60_000;
 
 export type Tier = 5 | 15 | 50 | 150 | 500;
 export const TIERS: readonly Tier[] = [5, 15, 50, 150, 500];
@@ -25,13 +27,13 @@ export const TIER_THETA: Record<Tier, number> = {
 /** 群聊没有双边层级，2 月统一记为 150。 */
 export const GROUP_TIER: Tier = 150;
 
-// ── P1 注意力债（论文 Def P1，ADR-150 EWMS，ADR-176 tonic/phasic）──
+/** ── P1 注意力债（论文 Def P1，ADR-150 EWMS，ADR-176 tonic/phasic）── */
 export const UNREAD_HALF_LIFE = H;
 export const KAPPA_TONIC = 1.0;
 /** chat-type 注意力权重（2 月 CHAT_TYPE_WEIGHTS.attention）。 */
 export const ATTENTION_CHAT: Record<ChatType, number> = { private: 3, group: 1 };
 
-// ── P3 关系冷却（论文 Def P3，ADR-111 对数域 sigmoid）──
+/** ── P3 关系冷却（论文 Def P3，ADR-111 对数域 sigmoid）── */
 export const P3_TAU0 = 600_000;
 export const P3_BETA = 2.5;
 /** 群聊存在感：群自己 K 轮消息的时长作 θ（ADR-161 §3.4），夹在 [30 分钟, 7 天]。 */
@@ -41,11 +43,11 @@ export const GROUP_THETA_MAX = 7 * D;
 export const GROUP_THETA_COLD = 4 * H;
 export const GAP_EMA_ALPHA = 0.2;
 
-// ── P5 回应义务（论文 Def P5；ADR-157 指数核；ADR-186 私聊群聊同一半衰期）──
+/** ── P5 回应义务（论文 Def P5；ADR-157 指数核；ADR-186 私聊群聊同一半衰期）── */
 export const OBLIGATION_HALF_LIFE = H;
 export const RESPONSE_CHAT: Record<ChatType, number> = { private: 2, group: 1 };
 
-// ── P6 好奇心（论文 Def P6 有界形式；Remark per-contact surprise）──
+/** ── P6 好奇心（论文 Def P6 有界形式；Remark per-contact surprise）── */
 export const CURIOSITY_ETA = 0.6;
 /** novelty 的滑动和用这个时间常数（论文 "最近 k 个 tick"，这里换成与 tick 长度无关的指数窗）。 */
 export const NOVELTY_TAU = H;
@@ -67,13 +69,13 @@ export const EXPECTED_DAILY: Record<Tier, number> = {
   500: 0.016,
 };
 
-// ── 习惯化（论文 §3 Habituation；ADR-222）──
+/** ── habituation（论文 §3 Habituation；ADR-222）── */
 export const HABITUATION_TAU = 1_800_000;
 export const HABITUATION_ALPHA = 0.5;
 
-// 归一化与全局读数的 κ、声部、习惯化、外部需求：驱动表 DRIVE_SPEC（drives.ts）。
+// 归一化与全局读数的 κ、声部、habituation、外部需求：驱动表 DRIVE_SPEC（drives.ts）。
 
-// ── 声部（论文 §4；R_v 权重来自 ADR-181；Caution 用论文 BIS 变体）──
+/** ── 声部（论文 §4；R_v 权重来自 ADR-181；Caution 用论文 BIS 变体）── */
 export const PERSONALITY = { diligence: 0.25, curiosity: 0.25, sociability: 0.25, caution: 0.25 };
 export const CAUTION_CONFLICT = 0.6;
 export const CAUTION_NORM = 10;
@@ -83,12 +85,12 @@ export const VOICE_TAU_MIN = 0.1;
 export const VOICE_TAU_MAX = 0.4;
 export const VOICE_TAU_C = 10;
 
-// ── 社交成本（论文 Eq NSV；2 月 social-cost.ts 的 dist/imp/temp，去掉没有输入的 power）──
+/** ── 社交成本（论文 Eq NSV；2 月 social-cost.ts 的 dist/imp/temp，去掉没有输入的 power）── */
 export const SOCIAL_WEIGHTS = { dist: 0.3, imp: 0.3, temp: 0.3 } as const;
 export const COST_WINDOW = 1_800_000;
 export const DENSITY_SCALE = 6;
 
-// ── 饱和成本 C_sat（ADR-136：约束作为目标函数里的连续代价，不在优化之后设闸）──
+/** ── saturation cost C_sat（ADR-136：约束作为目标函数里的连续代价，不在优化之后设闸）── */
 export const SAT = {
   wRate: 2,
   wCool: 1.5,
@@ -140,7 +142,7 @@ export const RHYTHM = { min: 1_000, max: 300_000, kappa: 1 } as const;
  */
 export const FAILURE_BACKOFF = { first: 30_000, max: 30 * 60_000 } as const;
 
-/** 唤醒分数 = logistic(NSV / τ)：NSV > 0 ⇔ 分数 > 0.5，正好是论文的沉默公理（Axiom V）。 */
+/** wake score = logistic(NSV / τ)：NSV > 0 ⇔ 分数 > 0.5，正好是论文的沉默公理（Axiom V）。 */
 export const WAKE_TEMPERATURE = 0.1;
 
 // ── 反应感知（研究员 2026-11-11：确定性地从她行动之后的事件折叠出带类型的反应）──
@@ -237,13 +239,13 @@ export const MOOD_RESET = 0.15;
 /** 评价离常态不到这么多就不再归给那件事（2 月 0.3 以下记为 neutral）。手设。 */
 export const MOOD_VISIBLE = 0.15;
 
-// ── 日记（diary.ts；2 月 diary.mod.ts 的常量名写在括号里）──
+/** ── 日记（diary.ts；2 月 diary.mod.ts 的常量名写在括号里）── */
 export const DIARY = {
   /** 一条最长多少字（MAX_ENTRY_LENGTH）。 */
   maxChars: 200,
   /** 一个决定（或一次反思）里最多写几条（DIARY_CAP_PER_TURN）。 */
   perDecision: 2,
-  /** feb 的显示：写下后多久不再放进提示词（ENTRY_TTL_S = 12000 秒）。 */
+  /** 别处想过的带到这里的寿命（inner.ts carry；2 月日记的 ENTRY_TTL_S = 12000 秒）。 */
   ttl: 12_000_000,
   /** 存多久：reflect 的显示要用到几天前的条目。 */
   retention: 30 * 24 * H,
@@ -253,8 +255,6 @@ export const DIARY = {
   duplicate: 0.4,
   /** 不针对谁的放几条（GLOBAL_INJECT_LIMIT）。 */
   global: 3,
-  /** feb：关于此刻对象的放几条（TARGET_INJECT_LIMIT）。 */
-  target: 1,
   /** 一共最多放几条（TOTAL_INJECT_LIMIT）。 */
   total: 5,
 } as const;
@@ -272,7 +272,7 @@ export const ECHO = { lookback: H, max: 5, chars: 80 } as const;
 /**
  * 反思（reflect）：她在一个会话里经历累计到 involved 就写一次（GA 按累计重要性触发、每天两三次），那里安静
  * quiet 之后写，累计到 burst 倍还没安静也写；带那段对话最近 lines 条。冲着她的消息和她的话记 1，群里没冲着她的
- * 记 ambient（GA 重要性量表上平常小事约 2、刻骨铭心约 8）。参数按反思频率挑，不按送达挑
+ * 记 ambient（GA 重要性量表上平常小事约 2、刻骨铭心约 8）。参数按反思频率挑，不按发送效果挑
  * （eval-artifacts/scenes/prereg-round6.md）。
  */
 export const REFLECT = {
@@ -283,7 +283,7 @@ export const REFLECT = {
   ambient: 0.25,
 } as const;
 
-// ── 她最近几次开口的结果（2 月 printPastResults、feedback-arc）──
+/** ── 她最近几次开口的结果（2 月 printPastResults、feedback-arc）── */
 export const OUTCOMES_SHOWN = 3;
 /** 过期没做的承诺，这么久之内还记得提。手设。 */
 export const EXPIRED_SHOWN = 2 * D;

@@ -4,7 +4,7 @@
  *
  * 意愿层原来只在已有的会话里选目标：群友没有私聊时，想念这个人的冲动（关系冷却按人算）无处可去；世界里也没有
  * 她不在的群，加群永远选不到（论文 §8 Joining）。这里把"和这个人的私聊""那个群"当作还不存在的会话放进候选：
- * 驱动、社交代价、饱和代价都照已有会话的算法算（主动、对方没请求的私聊侵入度 1.0，取自 2 月 social-cost.ts），
+ * 驱动、社交代价、saturation cost 都照已有会话的算法算（主动、对方没请求的私聊 intrusiveness 1.0，取自 2 月 social-cost.ts），
  * 选中时核心建出空会话、在那里叫醒她（Mechanism.opens），她在里面开口、加入或什么都不做——动作仍只作用于做决定的
  * 那个会话。同一脉络是 The Sims 的自主行为：对认识的人、知道的地方才有动作可选，由需要和代价决定去哪，不由脚本。
  *
@@ -34,7 +34,7 @@ const LINE_CHARS = 60;
 /** 看过的群最多记几个（最新的）。 */
 const PLACES_KEPT = 12;
 
-export interface MetLine {
+interface MetLine {
   at: number;
   text: string;
   /** 这句是对她说的（回复她、点名她）。 */
@@ -42,18 +42,18 @@ export interface MetLine {
 }
 
 /** 她最近在哪个群里见过这个人，他在那里说过的几句。 */
-export interface Met {
+interface Met {
   scope: string;
   lines: readonly MetLine[];
 }
 
 /** 她看过预览的群或频道。 */
-export interface SeenPlace extends FoundPlace {
+interface SeenPlace extends FoundPlace {
   seenAt: number;
 }
 
 /** 她在订阅的频道里看到的一条帖子（P02）：她可以跟人说起，或者转发（A14）。 */
-export interface InfoItem {
+interface InfoItem {
   /** 给她看的编号（itemId）。 */
   id: string;
   scope: string;
@@ -73,7 +73,7 @@ export interface ReachState {
   /** 最近看到的频道帖子（旧的在前）。 */
   info: readonly InfoItem[];
   /**
-   * 不收她私聊的人 → Telegram 说的那一刻（act.failed 的 dmClosed：对方的隐私设置，或拿到凭证后仍说没有这个人）。
+   * 不收她私聊的人 → 平台这么说的那一刻（act.failed 的 dmClosed：对方的隐私设置，或拿到凭证后仍说没有这个人）。
    * 和他的私聊不再是她够得着的地方；他先来找她就去掉。
    */
   closed?: Readonly<Record<string, number>>;
@@ -106,10 +106,13 @@ export function mayForward(
 }
 
 /**
- * 和一个人的私聊会话：和你们见面的那个群在同一个网络里，会话 id 换成这个人的 id
- * （telegram:<群> → telegram:<人>；Telegram 私聊的会话 id 就是对方的用户 id）。
+ * 和一个人的私聊会话：和你们见面的那个群在同一个网络里，会话 id 换成这个人的 id。
+ * 两种写法：telegram:<群> → telegram:<人>（Telegram 私聊的会话 id 就是对方的用户 id）；
+ * 会话种类写在 id 里的平台，<平台>:group:<群> → <平台>:private:<人>（qq:group:123 → qq:private:456）。
  */
 export function privateScopeOf(groupScope: string, contactId: string): string {
+  const typed = /^([^:]+):group:[^:]+$/.exec(groupScope);
+  if (typed) return `${typed[1]}:private:${contactId}`;
   const i = groupScope.lastIndexOf(":");
   return i < 0 ? contactId : `${groupScope.slice(0, i + 1)}${contactId}`;
 }
@@ -121,8 +124,8 @@ function clip(text: string, max = LINE_CHARS): string {
 }
 
 /**
- * 谁不收她的私聊：Telegram 这么说了就记下这个人；他先在私聊里找她，就不再算。
- * 私聊的对方取世界里这个会话的 partner（第一次私聊失败时世界底座已经建出了这个会话）。
+ * 谁不收她的私聊：平台这么说了就记下这个人；他先在私聊里找她，就不再算。
+ * 私聊的对方取世界里这个会话的 partner（第一次私聊失败时世界 base 已经建出了这个会话）。
  */
 function noteClosed<W extends View<"reach" | "chats">>(world: W, event: AliceEvent): W {
   const reach = world.reach;
@@ -141,18 +144,18 @@ function noteClosed<W extends View<"reach" | "chats">>(world: W, event: AliceEve
 }
 
 /** 这个私聊的对方不收她的私聊（noteClosed）。 */
-export function closedTo(world: View<"reach" | "chats">, scope: string): boolean {
+function closedTo(world: View<"reach" | "chats">, scope: string): boolean {
   const partner = world.chats[scope]?.partner;
   return !!partner && world.reach.closed?.[partner] !== undefined;
 }
 
-/** 世界折叠之后：记下谁在哪个群里说过什么、群叫什么、她找群时看到了哪些群、谁不收她的私聊。 */
-export function noteReach<W extends View<"reach" | "chats">>(world: W, event: AliceEvent): W {
+/** 世界 fold 之后：记下谁在哪个群里说过什么、群叫什么、她找群时看到了哪些群、谁不收她的私聊。 */
+function noteReach<W extends View<"reach" | "chats">>(world: W, event: AliceEvent): W {
   const closed = noteClosed(world, event);
   if (closed !== world) return closed;
   const noted = noteInfo(world, event);
   if (noted !== world) return noted;
-  if (event.type === "act.done" && event.found?.length) {
+  if (event.type === "act.done" && event.found && event.found.length > 0) {
     const reach = world.reach;
     const places = { ...reach.places };
     for (const p of event.found) places[p.scope] = { ...p, seenAt: event.at };
@@ -224,8 +227,8 @@ function candidateNode(world: Reachable, scope: string): ChatNode | null {
   return partner ? { ...freshChat("private"), partner, unopened: true } : null;
 }
 
-/** 意愿层排序用的世界：已有的会话加上还没开过的私聊、看过预览的群（只用来排序，不折进状态）。 */
-export function withUnopened<W extends Reachable>(world: W): W {
+/** 意愿层排序用的世界：已有的会话加上还没开过的私聊、看过预览的群（只用来排序，不 fold 进状态）。 */
+function withUnopened<W extends Reachable>(world: W): W {
   const scopes = [...unopenedPrivate(world).keys(), ...unjoined(world).map((p) => p.scope)];
   if (scopes.length === 0) return world;
   const chats: Record<string, ChatNode> = { ...world.chats };
@@ -237,40 +240,18 @@ export function withUnopened<W extends Reachable>(world: W): W {
 }
 
 /** 只带上一个候选（她被叫醒在那里时，提示词里的事实按它算）。 */
-export function withOne<W extends Reachable>(world: W, scope: string): W {
+function withOne<W extends Reachable>(world: W, scope: string): W {
   const node = candidateNode(world, scope);
   return node ? { ...world, chats: { ...world.chats, [scope]: node } } : world;
 }
 
 /** 意愿落在一个还没有的会话上时，核心建出的空会话：私聊她能直接开口，没加入的群只能加入。 */
-export function openingOf(world: Reachable, scope: string): Opening | null {
+function openingOf(world: Reachable, scope: string): Opening | null {
   if (world.chats[scope]) return null;
   const node = candidateNode(world, scope);
   if (!node) return null;
   const chatType: ChatType = node.chatType;
   return { scope, chatType, member: node.member };
-}
-
-/**
- * 世界折叠之前：她在一个还没有的会话里做了决定（或开了口、动作做完或失败），这个会话从此存在，
- * 后面的折叠（想过就消耗、对方没回的连发、冷却、加入）都照已有会话算。
- */
-export function openOnUse<W extends Reachable>(world: W, event: AliceEvent): W {
-  switch (event.type) {
-    case "speech.decided":
-    case "speech.failed":
-    case "message.sent":
-    case "act.done":
-    case "act.failed": {
-      if (world.chats[event.scope]) return world;
-      const node = candidateNode(world, event.scope);
-      if (!node) return world;
-      const { unopened: _, ...opened } = node;
-      return { ...world, chats: { ...world.chats, [event.scope]: opened } };
-    }
-    default:
-      return world;
-  }
 }
 
 /**
@@ -286,13 +267,13 @@ export function joinCost(world: View<"chats">, now: number): number {
 }
 
 /** 私聊里一共不到这么多条（没有更早的记录）时，还算刚开始私聊，写明你们是在哪认识的。 */
-export const YOUNG_PRIVATE_LINES = 10;
+const YOUNG_PRIVATE_LINES = 10;
 
 /**
  * 刚开始的私聊里，她和对方是在哪认识的：群名和对方在那个群里说过的几句（只有对方本人公开说的话）。
  * lines 是这个私聊至今的条数（有更早的记录时为 null，不再写）。
  */
-export function metText(
+function metText(
   world: Reachable,
   scope: string,
   now: number,
@@ -323,7 +304,7 @@ function people(n: number | null, kind: FoundPlace["kind"]): string {
 }
 
 /** 一个群或频道的预览写成一段（找群的结果、去那个群看看时的事实都用它）。 */
-export function placeLines(p: FoundPlace): string[] {
+function placeLines(p: FoundPlace): string[] {
   const head = `${p.kind === "channel" ? "频道" : "群"}「${p.title}」${people(p.members, p.kind)}`;
   return [
     p.about ? `${head}。简介：${clip(p.about, 120)}` : `${head}。`,
@@ -331,7 +312,7 @@ export function placeLines(p: FoundPlace): string[] {
   ];
 }
 
-/** 找群看到的东西写给她看（外壳和回放的桩都用它）。 */
+/** 找群看到的东西写给她看（外壳和回放的 stub 都用它）。 */
 export function foundText(query: string, found: readonly FoundPlace[]): string {
   if (found.length === 0) return `想找的“${query}”，没找到公开的群和频道。`;
   const lines = found.flatMap((p) => placeLines(p).map((l, i) => (i === 0 ? `- ${l}` : `  ${l}`)));
@@ -340,11 +321,7 @@ export function foundText(query: string, found: readonly FoundPlace[]): string {
 }
 
 /** 她还没加入、只看过预览的群：去那里看看时，提示词里写她看到过的预览。 */
-export function placeText(
-  world: View<"reach" | "chats">,
-  scope: string,
-  now: number,
-): string | null {
+function placeText(world: View<"reach" | "chats">, scope: string, now: number): string | null {
   const place = world.reach.places[scope];
   if (!place || world.chats[scope]?.member === true) return null;
   return [
@@ -354,7 +331,7 @@ export function placeText(
 }
 
 /** 候选 reach 提供的对外能力：找群（看了才知道）、转发看过的公开内容。 */
-export const REACH_AFFORDANCES = ["chat-search", "forward"] as const satisfies readonly ActKind[];
+const REACH_AFFORDANCES = ["chat-search", "forward"] as const satisfies readonly ActKind[];
 
 /** 去一个只看过预览的群看看时的此刻。 */
 const PLACE_MOMENT = "你还不在这里面。想加入就加入，不想就算了。";
@@ -362,44 +339,55 @@ const PLACE_MOMENT = "你还不在这里面。想加入就加入，不想就算�
 /**
  * 她够得着的地方（候选 A10、A18）：还没开过的私聊、看过预览的群作为还不存在的会话进意愿的候选；选中时在那里
  * 叫醒她。提示词里写你们是在哪个群认识的、他在那里说过的几句、她看过的预览和频道里看到的东西；转发只在有可转的
- * 东西时出现（这个私聊里摆着频道里看到的帖子）。
+ * 东西时出现（私聊摆着频道里看到的帖子，groupForward 时群聊也可转发当前想分享的频道帖）。
  */
-export const reach: PressureFeature = feature({
-  name: "reach",
-  provides: ["reach", "chats.place"],
-  requires: ["relations", "willingness"],
-  affordances: REACH_AFFORDANCES,
-  offers: (kind, scope, world, now) => {
-    if (kind !== "forward") return true;
-    const partner = world.chats[scope]?.partner;
-    return partner ? infoShown(world, partner, now).length > 0 : false;
-  },
-  reduce: (_before, after, event) => noteReach(after, event),
-  view: withOne,
-  away: (world, chat, now) => !chat.member && placeText(world, chat.scope, now) !== null,
-  outside: true,
-  contribute: ({ world, chat, now, outside }) => {
-    if (outside) {
-      return [
-        {
-          mechanism: "pressure-reach",
-          kind: "scene",
-          text: placeText(world, chat.scope, now) ?? "",
-        },
-        { mechanism: "pressure-reach", kind: "turn", text: PLACE_MOMENT },
-      ];
-    }
-    const c = world.chats[chat.scope];
-    const met = metText(world, chat.scope, now, chat.earlier?.length ? null : chat.timeline.length);
-    const seen = c?.partner ? infoText(world, c.partner, now) : null;
-    return [met, seen].flatMap((text) =>
-      text ? [{ mechanism: "pressure-reach", kind: "scene" as const, text }] : [],
-    );
-  },
-  opens: openingOf,
-  // 不收她私聊的人：和他的私聊不在她眼前，直到他先来找她。
-  will: { candidates: withUnopened, visible: (world, scope) => !closedTo(world, scope) },
-});
+export function createReach(o: { groupForward?: boolean } = {}): PressureFeature {
+  const groupForward = o.groupForward ?? false;
+  return feature({
+    name: "reach",
+    provides: ["reach", "chats.place"],
+    requires: ["relations", "willingness"],
+    affordances: REACH_AFFORDANCES,
+    offers: (kind, scope, world, now) => {
+      if (kind !== "forward") return true;
+      const chat = world.chats[scope];
+      if (chat?.partner) return infoShown(world, chat.partner, now).length > 0;
+      return groupForward && chat?.chatType === "group";
+    },
+    reduce: (_before, after, event) => noteReach(after, event),
+    view: withOne,
+    away: (world, chat, now) => !chat.member && placeText(world, chat.scope, now) !== null,
+    outside: true,
+    contribute: ({ world, chat, now, outside }) => {
+      if (outside) {
+        return [
+          {
+            mechanism: "pressure-reach",
+            kind: "scene",
+            text: placeText(world, chat.scope, now) ?? "",
+          },
+          { mechanism: "pressure-reach", kind: "turn", text: PLACE_MOMENT },
+        ];
+      }
+      const c = world.chats[chat.scope];
+      const met = metText(
+        world,
+        chat.scope,
+        now,
+        chat.earlier?.length ? null : chat.timeline.length,
+      );
+      const seen = c?.partner ? infoText(world, c.partner, now) : null;
+      return [met, seen].flatMap((text) =>
+        text ? [{ mechanism: "pressure-reach", kind: "scene" as const, text }] : [],
+      );
+    },
+    opens: openingOf,
+    // 不收她私聊的人：和他的私聊不在她眼前，直到他先来找她。
+    will: { candidates: withUnopened, visible: (world, scope) => !closedTo(world, scope) },
+  });
+}
+
+export const reach: PressureFeature = createReach();
 
 // ── 频道里看到的东西（P02、M03、B04）────────────────────────────────
 
@@ -438,7 +426,7 @@ function noteInfo<W extends View<"reach" | "chats">>(world: W, event: AliceEvent
 }
 
 /** 此刻在和这个人的私聊里摆在她面前的：还新鲜、还没跟他想过的几条，新的在前。 */
-export function infoShown(world: View<"reach">, partner: string, now: number): InfoItem[] {
+function infoShown(world: View<"reach">, partner: string, now: number): InfoItem[] {
   return world.reach.info
     .filter((i) => i.at <= now && now - i.at < INFO.shownWithin && !i.offered.includes(partner))
     .sort((a, b) => b.at - a.at)
@@ -467,7 +455,7 @@ export function infoPressure(
 }
 
 /** 私聊的提示词里：她最近在频道里看到、还没跟对方说过的几条（编号用来转发）。 */
-export function infoText(world: View<"reach">, partner: string, now: number): string | null {
+function infoText(world: View<"reach">, partner: string, now: number): string | null {
   const items = infoShown(world, partner, now);
   if (items.length === 0) return null;
   const lines = items.map(

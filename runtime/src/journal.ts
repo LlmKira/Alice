@@ -1,6 +1,6 @@
 /**
  * Journal：唯一的事实来源，也是唯一写库的地方。送进 step() 的每个事件按顺序写一行
- * （payload 是完整的事件，ts 是事件的 at），启动时按同样顺序读回、折叠成状态。
+ * （payload 是完整的事件，ts 是事件的 at），启动时按同样顺序读回、fold 成状态。
  * 另外只写一张贴纸库（sticker_palette），它是外壳查 file_id 用的表，不是事件。
  *
  * 读回按事件类型查 zod schema。schema 和 mind/events.ts 的类型绑在一起（SCHEMAS 的类型约束）：events.ts
@@ -15,12 +15,12 @@ import { SELF_SCOPE } from "./mind/effects.js";
 import { type AliceEvent, type ClockTick, TONES } from "./mind/events.js";
 import { FAILURES, type FailureCode } from "./mind/failure.js";
 
-/** 引起了副作用的时钟格：scope 记第一个副作用所在的会话（只是日志行的键，折叠时按普通时钟格处理）。 */
-export type WokenTick = ClockTick & { scope: string };
+/** 引起了副作用的时钟格：scope 记第一个副作用所在的会话（只是日志行的键，fold 时按普通时钟格处理）。 */
+type WokenTick = ClockTick & { scope: string };
 
 /**
  * 时钟格只在它真的引起了什么（叫醒某个会话、请求想一想）时写进来（每 10 秒一格全写太多；
- * 只写这些格就足以在折叠和回放里复现她那一刻为什么去找人）。
+ * 只写这些格就足以在 fold 和回放里复现她那一刻为什么去找人）。
  */
 export type JournaledEvent = Exclude<AliceEvent, ClockTick> | WokenTick;
 type JournaledType = JournaledEvent["type"];
@@ -186,6 +186,7 @@ const SCHEMAS: {
     media: text.optional(),
     replyToMessageId: textOrNull,
     directed: z.boolean(),
+    mentionsOther: z.literal(true).optional(),
     chatTitle: text.optional(),
     isBot: z.literal(true).optional(),
     forwardedFrom: text.optional(),
@@ -296,7 +297,6 @@ const SCHEMAS: {
     draws: z.record(z.number()),
   }),
   "member.joined": event("member.joined", { userId: text }),
-  "chat.glanced": event("chat.glanced", {}),
   "arm.switched": event("arm.switched", {
     arm: z.enum(["production", "candidate"]).nullable(),
     candidate: text,
@@ -322,16 +322,17 @@ const EVENT_TYPES = Object.keys(SCHEMAS) as JournaledType[];
  * 它们的 payload 里没有 type 字段（或类型、会话和行对不上），在这里返回 null。
  */
 export function decodeEvent(type: string, scope: string, payload: unknown): AliceEvent | null {
+  // 库里的 type 是外来字符串："toString" 这类原型上的名字也要当成认不出。
+  if (!Object.hasOwn(SCHEMAS, type)) return null;
   const schema = SCHEMAS[type as JournaledType];
-  if (!schema) return null;
   const parsed = schema.safeParse(payload);
   if (!parsed.success || parsed.data.type !== type || parsed.data.scope !== scope) return null;
-  return parsed.data as AliceEvent;
+  return parsed.data;
 }
 
 export function appendEvent(event: JournaledEvent): number {
   if (!event.scope.trim()) throw new Error("Journal event scope must not be empty");
-  if (!Number.isFinite(event.at)) throw new Error("Journal event at must be a finite epoch ms");
+  if (!Number.isFinite(event.at)) throw new TypeError("Journal event at must be a finite epoch ms");
   const result = getSqlite()
     .prepare("INSERT INTO journal_events (type, scope, payload, ts) VALUES (?, ?, ?, ?)")
     .run(event.type, event.scope, JSON.stringify(event), event.at);
@@ -363,7 +364,7 @@ export function forEachEvent(visit: (event: AliceEvent) => void): {
   return { read, skipped };
 }
 
-/** 贴纸库里的一行（sticker_palette）。外壳发贴纸时按它找 file_id；它不是事件，不进折叠。 */
+/** 贴纸库里的一行（sticker_palette）。外壳发贴纸时按它找 file_id；它不是事件，不进 fold。 */
 export interface StickerRow {
   fileId: string;
   fileUniqueId: string;
@@ -374,6 +375,7 @@ export interface StickerRow {
   action: string;
 }
 
+/** 各平台的贴纸各占一份（platform 列）：同一个 file_unique_id 在 Telegram 和 QQ 上是两张贴纸。 */
 const STICKER_TABLE = `CREATE TABLE IF NOT EXISTS sticker_palette (
   id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
   label text NOT NULL,
@@ -384,25 +386,55 @@ const STICKER_TABLE = `CREATE TABLE IF NOT EXISTS sticker_palette (
   emotion text,
   action text,
   intensity text,
-  created_at integer NOT NULL
+  created_at integer NOT NULL,
+  platform text NOT NULL DEFAULT 'telegram'
 )`;
 
-/** 看懂一张贴纸后记进贴纸库：已有这张就换说明，没有就新加一行。 */
-export function putSticker(row: StickerRow, at: number): void {
+/** 旧库的贴纸库没有 platform 列：补上，已有的行都是 Telegram 的。 */
+function migrateStickerTable(): void {
+  const db = getSqlite();
+  const columns = db.pragma("table_info(sticker_palette)") as Array<{ name: string }>;
+  if (columns.length > 0 && !columns.some((c) => c.name === "platform")) {
+    db.exec("ALTER TABLE sticker_palette ADD COLUMN platform TEXT NOT NULL DEFAULT 'telegram'");
+  }
+}
+
+/** 库里有没有贴纸库（有就顺带补齐 platform 列，读的一方才能按平台筛）。 */
+export function hasStickerTable(): boolean {
+  const exists =
+    getSqlite()
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sticker_palette'")
+      .get() !== undefined;
+  if (exists) migrateStickerTable();
+  return exists;
+}
+
+/** 看懂一张贴纸后记进这个平台的贴纸库：已有这张就换说明，没有就新加一行。 */
+export function putSticker(row: StickerRow, at: number, platform = "telegram"): void {
   const db = getSqlite();
   db.exec(STICKER_TABLE);
+  migrateStickerTable();
   const updated = db
     .prepare(
       `UPDATE sticker_palette
           SET file_id = ?, label = ?, emoji = COALESCE(?, emoji), set_name = COALESCE(?, set_name),
               emotion = ?, action = ?
-        WHERE file_unique_id = ?`,
+        WHERE file_unique_id = ? AND platform = ?`,
     )
-    .run(row.fileId, row.label, row.emoji, row.setName, row.emotion, row.action, row.fileUniqueId);
+    .run(
+      row.fileId,
+      row.label,
+      row.emoji,
+      row.setName,
+      row.emotion,
+      row.action,
+      row.fileUniqueId,
+      platform,
+    );
   if (updated.changes > 0) return;
   db.prepare(
-    `INSERT INTO sticker_palette (label, file_id, file_unique_id, emoji, set_name, emotion, action, intensity, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'medium', ?)`,
+    `INSERT INTO sticker_palette (label, file_id, file_unique_id, emoji, set_name, emotion, action, intensity, created_at, platform)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'medium', ?, ?)`,
   ).run(
     row.label,
     row.fileId,
@@ -412,19 +444,22 @@ export function putSticker(row: StickerRow, at: number): void {
     row.emotion,
     row.action,
     at,
+    platform,
   );
 }
 
-/** 换掉贴纸库里一张贴纸的说明（启动时按看图缓存补全）。 */
+/** 换掉这个平台贴纸库里一张贴纸的说明（启动时按看图缓存补全）。 */
 export function relabelSticker(
   fileUniqueId: string,
   label: string,
   emotion: string,
   action: string,
+  platform = "telegram",
 ): void {
+  migrateStickerTable();
   getSqlite()
     .prepare(
-      "UPDATE sticker_palette SET label = ?, emotion = ?, action = ? WHERE file_unique_id = ?",
+      "UPDATE sticker_palette SET label = ?, emotion = ?, action = ? WHERE file_unique_id = ? AND platform = ?",
     )
-    .run(label, emotion, action, fileUniqueId);
+    .run(label, emotion, action, fileUniqueId, platform);
 }

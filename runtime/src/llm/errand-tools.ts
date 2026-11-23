@@ -271,7 +271,7 @@ const WEATHER: Record<number, string> = {
   96: "雷雨伴冰雹",
   99: "强雷雨伴冰雹",
 };
-export const WEATHER_SOURCE = "https://open-meteo.com/";
+const WEATHER_SOURCE = "https://open-meteo.com/";
 
 async function getJson(url: string, deps: ToolDeps): Promise<Record<string, unknown>> {
   const response = await deps.fetch(url, { signal: AbortSignal.timeout(deps.timeoutMs) });
@@ -373,7 +373,7 @@ export async function runTool(
   args: Record<string, unknown>,
   deps: ToolDeps,
 ): Promise<ToolOutput> {
-  const text = (k: string) => (typeof args[k] === "string" ? (args[k] as string).trim() : "");
+  const text = (k: string) => (typeof args[k] === "string" ? args[k].trim() : "");
   switch (name) {
     case "search":
       return text("query") ? search(text("query"), deps) : { text: "要搜什么？", urls: [], usd: 0 };

@@ -11,6 +11,17 @@ const signal = new AbortController().signal;
 const prompt = { system: "PERSONA", user: "聊天记录" };
 const call = { scope: "telegram:1", callId: "c1", kind: "speech" as const };
 
+/** 日志里一行里这些测试读的字段。 */
+interface LoggedCall {
+  scope: string;
+  callId: string;
+  system: string;
+  raw?: string;
+  error?: string;
+  sha: string;
+  model: string;
+}
+
 describe("prompt log", () => {
   it("records each call's prompt and raw output, and failures, one JSON line each", async () => {
     const dir = mkdtempSync(join(tmpdir(), "alice-plog-"));
@@ -34,12 +45,12 @@ describe("prompt log", () => {
     const rows = readFileSync(join(dir, file as string), "utf8")
       .trim()
       .split("\n")
-      .map((l) => JSON.parse(l));
+      .map((l) => JSON.parse(l) as LoggedCall);
     expect(rows.map((r) => [r.scope, r.callId, r.raw ?? null, r.error ?? null])).toEqual([
       ["telegram:1", "c1", "好呀", null],
       ["telegram:1", "c1", null, "Error: 502"],
     ]);
-    expect(rows[0].system).toBe("PERSONA");
+    expect(rows[0]?.system).toBe("PERSONA");
     // 每行带着代码版本和发言模型：以后按它取同一版代码重放、分得开换模型前后。
     expect(rows.map((r) => [r.sha, r.model])).toEqual([
       [STAMP.sha, STAMP.model],
@@ -60,6 +71,27 @@ describe("prompt log", () => {
     expect(await logged(prompt, call, signal)).toBe("嗯");
     expect(await logged(prompt, call, signal)).toBe("嗯");
     expect(warnings).toHaveLength(1);
+  });
+
+  it("evaluates dynamic model stamp after callModel finishes so fallbacks log the actual model", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "alice-plog-fallback-"));
+    let used = "secondary-model";
+    const logged = withPromptLog(
+      async () => {
+        used = "primary-fallback-model";
+        return "好呀";
+      },
+      dir,
+      { sha: SHA, model: () => used },
+      () => {},
+    );
+    expect(await logged(prompt, call, signal)).toBe("好呀");
+    const [file] = readdirSync(dir);
+    const [row] = readFileSync(join(dir, file as string), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as LoggedCall);
+    expect(row?.model).toBe("primary-fallback-model");
   });
 });
 
@@ -91,7 +123,7 @@ describe("code version of a run", () => {
     const rows = readFileSync(path, "utf8")
       .trim()
       .split("\n")
-      .map((l) => JSON.parse(l));
+      .map((l) => JSON.parse(l) as unknown);
     expect(rows).toEqual([run, { ...run, at: 2 }]);
     const warnings: unknown[] = [];
     const blocked = join(dir, "file");

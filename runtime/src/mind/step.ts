@@ -53,73 +53,33 @@ export interface StepResult {
 /**
  * Alice 唯一的状态转换。纯函数：不读时钟、不读库、不发请求；时间只来自 event.at。
  * 所有对外动作都以 Effect 返回，由外壳执行，执行结果再作为事件送回来。
- * mind 是一套机制，或者生产和候选两套轮换（rotation.ts）：两套都折叠每个事件，每个会话里的决定用它眼下那一组。
+ * mind 是一套机制，或者生产和候选两套轮换（rotation.ts）：两套都 fold 每个事件，每个会话里的决定用它眼下那一组。
  */
 export function step(previous: AliceState, received: AliceEvent, mind: Mind): StepResult {
   const event = towardHer(previous, received);
-  // 换组只是一条记录，不是她经历的事：机制不折叠它。
+  // 换组只是一条记录，不是她经历的事：机制不 fold 它。
   if (event.type === "arm.switched") return { state: switchArm(previous, event), effects: [] };
   const state = foldMechanisms(previous, event, foldedOf(mind));
   const mechanisms = mechanismsIn(mind, state, "scope" in event ? event.scope : null);
   switch (event.type) {
     case "message.received":
       return onMessage(state, event, mechanisms);
-    case "message.sent": {
-      const chat = state.chats[event.scope];
-      if (!chat) return { state, effects: [] };
-      const sentIds = [...chat.sentIds, event.messageId].slice(-SENT_IDS_KEPT);
-      return {
-        state: put(state, {
-          ...chat,
-          ...appendTo(chat, sentEntry(event)),
-          sentIds,
-          // 她在这里真的说出去了：刚才没发出去的那几条不再是"此刻的事实"。
-          droppedSends: [],
-        }),
-        effects: [],
-      };
-    }
-    case "message.perceived": {
-      // 只有口气的感知不改时间线（机制各自折叠它）。
-      const chat = state.chats[event.scope];
-      const media = event.media;
-      if (
-        media === undefined ||
-        !chat?.timeline.some((e) => e.messageId === event.messageId && e.sender)
-      ) {
-        return { state, effects: [] };
-      }
-      const timeline = chat.timeline.map((e) =>
-        e.messageId === event.messageId && e.sender ? { ...e, media } : e,
-      );
-      return { state: put(state, { ...chat, timeline }), effects: [] };
-    }
+    case "message.sent":
+      return onSent(state, event);
+    case "message.perceived":
+      return onPerceived(state, event);
     case "speech.decided":
       return onDecision(state, event.scope, event.callId, event.at, event.decision, mechanisms);
-    case "speech.failed": {
-      const chat = state.chats[event.scope];
-      if (!chat || chat.mind.mode !== "deciding" || chat.mind.callId !== event.callId) {
-        return { state, effects: [] };
-      }
-      // 失败不自动重试：重试由发言层在一次调用内部完成，这里再起调用会形成循环。
-      return { state: put(state, { ...chat, mind: { mode: "idle" } }), effects: [] };
-    }
+    case "speech.failed":
+      return onSpeechFailed(state, event);
     case "ponder.done":
     case "ponder.failed":
-      // 结果（不论成败）已经由各机制的 reduce 折进去了；这里只结束这次想一想。失败不重试。
+      // 结果（不论成败）已经由各机制的 reduce fold 进去了；这里只结束这次想一想。失败不重试。
       return state.pondering?.callId === event.callId
         ? { state: { ...state, pondering: null }, effects: [] }
         : { state, effects: [] };
-    case "timer.fired": {
-      const chat = state.chats[event.scope];
-      if (!chat || chat.mind.mode !== "waiting" || chat.mind.timerId !== event.timerId) {
-        return { state, effects: [] };
-      }
-      if (!stillWakes(state, chat, chat.mind.waking, event.at, mechanisms)) {
-        return { state: put(state, { ...chat, mind: { mode: "idle" } }), effects: [] };
-      }
-      return startCall(state, chat, event.at, chat.mind.triggerMessageId, mechanisms);
-    }
+    case "timer.fired":
+      return onTimer(state, event, mechanisms);
     case "act.started": {
       const chat = state.chats[event.scope];
       if (!chat) return { state, effects: [] };
@@ -128,44 +88,18 @@ export function step(previous: AliceState, received: AliceEvent, mind: Mind): St
     }
     case "act.done":
       return onDone(state, event, mechanisms);
-    case "act.failed": {
-      // 交出去的事没办成：她也会知道（和办成一样回到这个会话、叫醒她）；其他动作失败不改状态。
-      const chat = state.chats[event.scope];
-      const row = affordanceOf(event.act.kind);
-      if (!chat || row.via !== "errand") return { state, effects: [] };
-      const seen = {
-        at: event.at,
-        kind: event.act.kind,
-        text: `${row.after.as}，没结果（${failureText(event)}）`,
-      };
-      return onLooked(state, finished(chat, event.act), seen, mechanisms, Boolean(event.inline));
-    }
+    case "act.failed":
+      return onActFailed(state, event, mechanisms);
     case "reaction.received":
-    // 频道的新帖只是她看得到的东西（压力场折叠它），不进会话、不叫醒她。
+    // 频道的新帖只是她看得到的东西（压力场 fold 它），不进会话、不叫醒她。
     case "post.received":
-    // 消息后来的样子（改过、表情合计、贴纸那套）、群的样子与已读回执只折进机制，不叫醒她。
+    // 消息后来的样子（改过、表情合计、贴纸那套）、群的样子与已读回执只 fold 进机制，不叫醒她。
     case "message.updated":
     case "chat.described":
     case "history.read":
       return { state, effects: [] };
-    case "typing.received": {
-      const chat = state.chats[event.scope];
-      if (!chat || chat.mind.mode !== "waiting" || event.status === "cancel") {
-        return { state, effects: [] };
-      }
-      const extra = Math.max(
-        0,
-        ...mechanisms.map(
-          (m) => m.patience?.(chat, event, event.at, mechanismState(state, m)) ?? 0,
-        ),
-      );
-      if (extra <= 0) return { state, effects: [] };
-      const currentUntil =
-        Number(chat.mind.timerId.split("~").at(-1)) || chat.mind.since + chat.mind.wait;
-      const until = Math.min(event.at + extra, chat.mind.since + PATIENCE_CAP_MS);
-      if (until <= currentUntil) return { state, effects: [] };
-      return startWaiting(state, chat, chat.mind.since, chat.mind.wait, until, chat.mind.waking);
-    }
+    case "typing.received":
+      return onTyping(state, event, mechanisms);
     case "membership.changed": {
       const chat = state.chats[event.scope];
       if (!chat || chat.member === event.member) return { state, effects: [] };
@@ -174,41 +108,133 @@ export function step(previous: AliceState, received: AliceEvent, mind: Mind): St
     case "clock.tick":
       return onTick(state, event, mind);
     case "noise.drawn":
-      // 随机数只经各机制的 reduce 折进它们自己的状态；它本身不叫醒谁，下一个时钟格才看得出变化。
+      // 随机数只经各机制的 reduce fold 进它们自己的状态；它本身不叫醒谁，下一个时钟格才看得出变化。
       return { state, effects: [] };
     case "member.joined":
-      // 别人进群只折进机制的状态（谁是刚来的），不叫醒她。
+      // 别人进群只 fold 进机制的状态（谁是刚来的），不叫醒她。
       return { state, effects: [] };
-    case "chat.glanced": {
-      // 看过了由各机制的 reduce 折进去；看一眼就是打开了这个会话，Telegram 那边也标成已读。
-      const chat = state.chats[event.scope];
-      if (!chat?.member) return { state, effects: [] };
-      return { state, effects: [{ type: "act", scope: chat.scope, act: { kind: "mark-read" } }] };
-    }
   }
 }
 
+type EventOf<T extends AliceEvent["type"]> = Extract<AliceEvent, { type: T }>;
+
+function onSent(state: AliceState, event: MessageSent): StepResult {
+  const chat = state.chats[event.scope];
+  if (!chat) return { state, effects: [] };
+  const sentIds = [...chat.sentIds, event.messageId].slice(-SENT_IDS_KEPT);
+  return {
+    state: put(state, {
+      ...chat,
+      ...appendTo(chat, sentEntry(event)),
+      sentIds,
+      // 她在这里真的说出去了：刚才没发出去的那几条不再是"此刻的事实"。
+      droppedSends: [],
+    }),
+    effects: [],
+  };
+}
+
+/** 感知带着 media 时写回时间线上别人发的那一条；只有口气的感知不改时间线（机制各自 fold 它）。 */
+function onPerceived(state: AliceState, event: EventOf<"message.perceived">): StepResult {
+  const chat = state.chats[event.scope];
+  const media = event.media;
+  if (
+    media === undefined ||
+    !chat?.timeline.some((e) => e.messageId === event.messageId && e.sender !== null)
+  ) {
+    return { state, effects: [] };
+  }
+  const timeline = chat.timeline.map((e) =>
+    e.messageId === event.messageId && e.sender ? { ...e, media } : e,
+  );
+  return { state: put(state, { ...chat, timeline }), effects: [] };
+}
+
+function onSpeechFailed(state: AliceState, event: EventOf<"speech.failed">): StepResult {
+  const chat = state.chats[event.scope];
+  if (!chat || chat.mind.mode !== "deciding" || chat.mind.callId !== event.callId) {
+    return { state, effects: [] };
+  }
+  // 失败不自动重试：重试由发言层在一次调用内部完成，这里再起调用会形成循环。
+  return { state: put(state, { ...chat, mind: { mode: "idle" } }), effects: [] };
+}
+
+/** 等对方说完的时间到了：叫醒她的理由此刻还成立就开口，否则回到空闲。 */
+function onTimer(
+  state: AliceState,
+  event: EventOf<"timer.fired">,
+  mechanisms: readonly Mechanism[],
+): StepResult {
+  const chat = state.chats[event.scope];
+  if (!chat || chat.mind.mode !== "waiting" || chat.mind.timerId !== event.timerId) {
+    return { state, effects: [] };
+  }
+  if (!stillWakes(state, chat, chat.mind.waking, event.at, mechanisms)) {
+    return { state: put(state, { ...chat, mind: { mode: "idle" } }), effects: [] };
+  }
+  return startCall(state, chat, event.at, chat.mind.triggerMessageId, mechanisms);
+}
+
+/** 交出去的事没办成：她也会知道（和办成一样回到这个会话、叫醒她）；其他动作失败不改状态。 */
+function onActFailed(
+  state: AliceState,
+  event: EventOf<"act.failed">,
+  mechanisms: readonly Mechanism[],
+): StepResult {
+  const chat = state.chats[event.scope];
+  const row = affordanceOf(event.act.kind);
+  if (!chat || row.via !== "errand") return { state, effects: [] };
+  const seen = {
+    at: event.at,
+    kind: event.act.kind,
+    text: `${row.after.as}，没结果（${failureText(event)}）`,
+  };
+  return onLooked(state, finished(chat, event.act), seen, mechanisms, Boolean(event.inline));
+}
+
+/** 等着时对方在输入：各机制给的耐心里最长的那一段，比原来等到的更晚就延后（不超过上限）。 */
+function onTyping(
+  state: AliceState,
+  event: EventOf<"typing.received">,
+  mechanisms: readonly Mechanism[],
+): StepResult {
+  const chat = state.chats[event.scope];
+  if (!chat || chat.mind.mode !== "waiting" || event.status === "cancel") {
+    return { state, effects: [] };
+  }
+  const extra = Math.max(
+    0,
+    ...mechanisms.map((m) => m.patience?.(chat, event, event.at, mechanismState(state, m)) ?? 0),
+  );
+  if (extra <= 0) return { state, effects: [] };
+  const currentUntil =
+    Number(chat.mind.timerId.split("~").at(-1)) || chat.mind.since + chat.mind.wait;
+  const until = Math.min(event.at + extra, chat.mind.since + PATIENCE_CAP_MS);
+  if (until <= currentUntil) return { state, effects: [] };
+  return startWaiting(state, chat, chat.mind.since, chat.mind.wait, until, chat.mind.waking);
+}
+
 /** 这条消息回复的是她发过的某一条（编号在会话状态里，sentIds）。 */
-export function repliesToHer(state: AliceState, event: AliceEvent): boolean {
+function repliesToHer(state: AliceState, event: AliceEvent): boolean {
   if (event.type !== "message.received" || event.replyToMessageId === null) return false;
   return state.chats[event.scope]?.sentIds.includes(event.replyToMessageId) ?? false;
 }
 
 /**
- * 一条消息是不是冲着她的，只在这里定。Journal 记的是事实（私聊、点名，Telegram 说了被回复的是她）；回复她发过的
+ * 一条消息是不是冲着她的，只在这里定。Journal 记的是事实（私聊、点名，平台说了被回复的是她）；回复她发过的
  * 某一条，就是在找她，和点名一样算 directed。所以外壳认不出的回复也算，以前的 Journal 回放也一样。
- * 读 Journal 的工具没有心智状态时用 towardHerReader。
+ * 平台标了 isBot 的账号不算冲着她说话。读 Journal 的工具没有心智状态时用 towardHerReader。
  */
 export function towardHer(state: AliceState, event: AliceEvent): AliceEvent {
-  if (event.type !== "message.received" || event.directed || !repliesToHer(state, event)) {
-    return event;
-  }
+  if (event.type !== "message.received") return event;
+  if (event.isBot === true) return event.directed ? { ...event, directed: false } : event;
+  if (event.directed || !repliesToHer(state, event)) return event;
   return { ...event, directed: true };
 }
 
 /**
  * 给只读 Journal 的工具（北极星）：按日志顺序送进每个事件，得到心智眼里的那个事件，和它是不是回复她的。
- * 只折叠会话（不带机制），所以和心智用的是同一份编号、同一个判断。
+ * 只 fold 会话（不带机制），所以和心智用的是同一份编号、同一个判断。
  */
 export function towardHerReader(): (event: AliceEvent) => { event: AliceEvent; reply: boolean } {
   let state: AliceState = emptyState;
@@ -294,54 +320,65 @@ function onMessage(
 /**
  * 时钟走了一格：没有新消息，但随时间变化的机制（比如压力随沉默增长）可能想醒。
  * 按会话依次问一遍，只叫醒空闲的会话；没有消息可等，所以不经 patience，直接开口。
- * 没有机制要叫醒、但有机制说这里只要看一眼的会话：发 glance（不调模型），外壳写成 chat.glanced。
  */
 function onTick(state: AliceState, event: ClockTick, mind: Mind): StepResult {
-  let next = state;
-  const effects: Effect[] = [];
   // 她自己的事（开新会话、扫一眼、想一想）用她的那一组；每个会话里的叫醒用那个会话的。
   const self = mechanismsIn(mind, state, null);
-  // 她想去的、还没有的会话（没开过的私聊、只看过预览的群）：先建成空会话，下面照常问要不要醒。
-  for (const m of self) {
-    const o = m.opens?.(event.at, mechanismState(state, m));
-    if (o && !next.chats[o.scope]) next = put(next, emptyChat(o.scope, o.chatType, o.member));
-  }
+  let next = openWanted(state, event.at, self);
+  const effects: Effect[] = [];
   // 她在看手机（Mechanism.scans）：时钟格没叫醒的会话里，有别人新说的话的，拿最新那条再问一次。
   const scanning = self.some((m) => m.scans?.(event.at, mechanismState(state, m)) ?? false);
   for (const chat of Object.values(next.chats)) {
     if (chat.mind.mode !== "idle") continue;
-    const mechanisms = mechanismsIn(mind, state, chat.scope);
-    if (!wakesOn(state, chat, event, mechanisms)) {
-      const unseen = scanning ? newest(chat) : null;
-      if (unseen && stillWakes(state, chat, unseen, event.at, mechanisms)) {
-        const r = startCall(next, chat, event.at, unseen.messageId, mechanisms);
-        next = r.state;
-        effects.push(...r.effects);
-        continue;
-      }
-      if (glancesAt(state, chat, event, mechanisms))
-        effects.push({ type: "glance", scope: chat.scope });
-      continue;
-    }
-    const r = startCall(next, chat, event.at, null, mechanisms);
+    const r = tickChat(state, next, chat, event, mechanismsIn(mind, state, chat.scope), scanning);
     next = r.state;
     effects.push(...r.effects);
   }
-  // 想一想：没有正在进行的，就问各机制要不要想（醒来想想自己、心情变了之后写日记；由机制决定）。
-  if (next.pondering === null) {
-    const ask = firstPonder(next, event.at, self);
-    if (ask) {
-      const callId = `${SELF_SCOPE}~${ask.kind}@${event.at}`;
-      next = { ...next, pondering: { callId, ...ponderTarget(ask) } };
-      effects.push({
-        type: "call-ponder",
-        scope: SELF_SCOPE,
-        callId,
-        request: { ...ask, at: event.at },
-      });
-    }
+  const pondered = withPonder(next, event.at, self);
+  return { state: pondered.state, effects: [...effects, ...pondered.effects] };
+}
+
+/** 她想去的、还没有的会话（没开过的私聊、只看过预览的群）：先建成空会话，之后照常问要不要醒。 */
+function openWanted(state: AliceState, at: number, self: readonly Mechanism[]): AliceState {
+  let next = state;
+  for (const m of self) {
+    const o = m.opens?.(at, mechanismState(state, m));
+    if (o && !next.chats[o.scope]) next = put(next, emptyChat(o.scope, o.chatType, o.member));
   }
-  return { state: next, effects };
+  return next;
+}
+
+/**
+ * 时钟格问一个空闲的会话：要醒就开口；不醒但她在看手机（scanning），按别人最新说的那条再问一次。state 是这一格各机制的状态，next 是已经叫醒了前面几个会话的状态。
+ */
+function tickChat(
+  state: AliceState,
+  next: AliceState,
+  chat: ChatState,
+  event: ClockTick,
+  mechanisms: readonly Mechanism[],
+  scanning: boolean,
+): StepResult {
+  if (wakesOn(state, chat, event, mechanisms)) {
+    return startCall(next, chat, event.at, null, mechanisms);
+  }
+  const unseen = scanning ? newest(chat) : null;
+  if (unseen && stillWakes(state, chat, unseen, event.at, mechanisms)) {
+    return startCall(next, chat, event.at, unseen.messageId, mechanisms);
+  }
+  return { state: next, effects: [] };
+}
+
+/** 想一想：没有正在进行的，就问各机制要不要想（醒来想想自己、心情变了之后写日记；由机制决定）。 */
+function withPonder(next: AliceState, at: number, self: readonly Mechanism[]): StepResult {
+  if (next.pondering !== null) return { state: next, effects: [] };
+  const ask = firstPonder(next, at, self);
+  if (!ask) return { state: next, effects: [] };
+  const callId = `${SELF_SCOPE}~${ask.kind}@${at}`;
+  return {
+    state: { ...next, pondering: { callId, ...ponderTarget(ask) } },
+    effects: [{ type: "call-ponder", scope: SELF_SCOPE, callId, request: { ...ask, at } }],
+  };
 }
 
 function firstPonder(
@@ -385,7 +422,7 @@ function stillWakes(
 
 /**
  * 她最后一次在这里说话之后别人说的，一眼看到的那一条（按收到时的样子）：有冲着她的（点名、回复她、私聊）就是
- * 其中最新的一条——Telegram 把提到她、回复她的单独标出来，不混在未读数里；没有就是最新的一条。她自己的话
+ * 其中最新的一条——平台把提到她、回复她的单独标出来，不混在未读数里；没有就是最新的一条。她自己的话
  * 是最新的一条时是 null。
  */
 function newest(chat: ChatState): MessageReceived | null {
@@ -407,17 +444,6 @@ function newest(chat: ChatState): MessageReceived | null {
     replyToMessageId: last.replyToMessageId,
     directed: last.directed === true,
   };
-}
-
-function glancesAt(
-  state: AliceState,
-  chat: ChatState,
-  event: AliceEvent,
-  mechanisms: readonly Mechanism[],
-): boolean {
-  return mechanisms.some(
-    (m) => m.glance?.(chat, event, event.at, mechanismState(state, m)) ?? false,
-  );
 }
 
 function onDecision(
@@ -469,6 +495,10 @@ function onDone(state: AliceState, event: ActDone, mechanisms: readonly Mechanis
       const revised = revise(chat, argOf(act, "own"), argOf(act, "text"), after.note);
       return { state: put(state, revised), effects: [] };
     }
+    case "remove": {
+      const removed = removeEntry(chat, argOf(act, "recent"), after.note);
+      return { state: put(state, removed), effects: [] };
+    }
     case "member":
       return { state: put(state, { ...chat, member: after.member }), effects: [] };
   }
@@ -517,7 +547,16 @@ function revise(chat: ChatState, id: string | null, text: string | null, note: s
   };
 }
 
-/** 交出去的那件事办完了（成或不成）：从"还没好"里拿掉。同样内容的只拿掉最早的一件。 */
+/** 她撤回了自己的一条消息：记录里那一行清空原话、带上注，不再当成可编辑/可撤回的发言。 */
+function removeEntry(chat: ChatState, id: string | null, note: string): ChatState {
+  if (!id || !chat.timeline.some((e) => e.messageId === id)) return chat;
+  return {
+    ...chat,
+    timeline: chat.timeline.map((e) => (e.messageId === id ? { ...e, text: null, note } : e)),
+  };
+}
+
+/** 交出去的那件事办完了（成或不成）：从"还没好"里删掉。内容相同的只删最早的一件。 */
 function finished(chat: ChatState, act: Act): ChatState {
   const { running } = chat;
   const i = running.findIndex((r) => JSON.stringify(r.act) === JSON.stringify(act));
@@ -642,7 +681,7 @@ function mechanismState(state: AliceState, m: Mechanism): unknown {
   return m.name in state.mechanisms ? state.mechanisms[m.name] : m.initial;
 }
 
-/** 加一条进时间线；从前面挤出去的折进"更早的聊天"分段。 */
+/** 加一条进时间线；从前面挤出去的 fold 进"更早的聊天"分段。 */
 function appendTo(chat: ChatState, entry: TimelineEntry): Pick<ChatState, "timeline" | "earlier"> {
   const all = [...chat.timeline, entry];
   const timeline = all.slice(-TIMELINE_LIMIT);

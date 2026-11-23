@@ -22,7 +22,7 @@ export interface HnStory {
 async function getJson(url: string, timeoutMs: number): Promise<unknown> {
   const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
   if (!response.ok) throw new Error(`${new URL(url).host}: ${response.status}`);
-  return await response.json();
+  return response.json();
 }
 
 function storyOf(id: string, item: unknown): HnStory | null {

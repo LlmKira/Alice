@@ -3,7 +3,9 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { executeToolReply, type QueryKind } from "../llm/ptc.js";
 import { SPEECH_MODEL } from "../llm/speech-model.js";
 import type { SpeechRequest } from "../mind/effects.js";
+import type { SpeechFormat } from "../speech/decision.js";
 import { parseDecision } from "../speech/decision.js";
+import { executeNativeTurn } from "../speech/native.js";
 import { renderSpeechPrompt, type SpeechPrompt } from "../speech/prompt.js";
 import type { SpeechOracle } from "./replay.js";
 
@@ -17,7 +19,11 @@ export function cachedSpeechOracle(options: {
   call: (prompt: SpeechPrompt) => Promise<string>;
   /** 缓存键里的模型 id（默认生产模型；换模型就是另一份缓存）。 */
   model?: string;
-  /** 可选 PTC 轮内查询执行器（提供时用 executeToolReply 执行 run_code 里的查询串联）。 */
+  /** 可选实验提示词选项；不传则与生产逐字节一致。 */
+  promptOptions?: {
+    format?: SpeechFormat;
+  };
+  /** 可选轮内查询执行器（提供时执行查询串联并返回结果给模型）。 */
   onQuery?: (
     request: SpeechRequest,
     kind: QueryKind,
@@ -35,24 +41,50 @@ export function cachedSpeechOracle(options: {
   }
   let misses = 0;
   let failures = 0;
-  const oracle = async (request: Parameters<SpeechOracle>[0]) => {
-    const prompt = renderSpeechPrompt(options.persona, request);
-    const key = createHash("sha256")
-      .update(`${options.model ?? SPEECH_MODEL}\n${prompt.system}\n${prompt.user}`)
-      .digest("hex");
+  const cachedCall = async (prompt: SpeechPrompt): Promise<string> => {
+    const keyPayload =
+      options.promptOptions?.format === "native" || prompt.messages
+        ? `${options.model ?? SPEECH_MODEL}\n${prompt.system}\n${prompt.user}\n${JSON.stringify(prompt.tools ?? null)}\n${JSON.stringify(prompt.messages ?? null)}`
+        : `${options.model ?? SPEECH_MODEL}\n${prompt.system}\n${prompt.user}`;
+    const key = createHash("sha256").update(keyPayload).digest("hex");
     let raw = cache.get(key);
     if (raw === undefined) {
       misses++;
+      raw = await options.call(prompt);
+      cache.set(key, raw);
+      appendFileSync(options.cacheFile, `${JSON.stringify({ key, raw })}\n`);
+    }
+    return raw;
+  };
+
+  const oracle = async (request: Parameters<SpeechOracle>[0]) => {
+    if (options.promptOptions?.format === "native") {
       try {
-        raw = await options.call(prompt);
+        const query = options.onQuery;
+        const res = await executeNativeTurn({
+          persona: options.persona,
+          request,
+          callModel: cachedCall,
+          ...(query ? { onQuery: (kind, args, signal) => query(request, kind, args, signal) } : {}),
+        });
+        return res.decision;
       } catch (error) {
-        // 失败不能悄悄算成沉默：计数，并打印前几条原因。
         failures++;
         if (failures <= 3) console.error(`speech call failed: ${String(error).slice(0, 300)}`);
         return null;
       }
-      cache.set(key, raw);
-      appendFileSync(options.cacheFile, `${JSON.stringify({ key, raw })}\n`);
+    }
+    const prompt = options.promptOptions
+      ? renderSpeechPrompt(options.persona, request, options.promptOptions)
+      : renderSpeechPrompt(options.persona, request);
+    let raw: string;
+    try {
+      raw = await cachedCall(prompt);
+    } catch (error) {
+      // 失败不能悄悄算成沉默：计数，并打印前几条原因。
+      failures++;
+      if (failures <= 3) console.error(`speech call failed: ${String(error).slice(0, 300)}`);
+      return null;
     }
     if (!options.onQuery) return parseDecision(raw, request);
     const query = options.onQuery;

@@ -1,6 +1,6 @@
 /**
  * 她看过的、可以转发的东西（A14）：频道帖子和群消息，按 reach.ts itemId 编号；也认这个群里消息本来的编号。
- * 和相册一样是 Journal 的投影：只从写进了日志的事件更新（index.ts onJournaled），所以日志里没有的消息
+ * 和相册一样是 Journal 的投影：只从写进了日志的事件更新（platform.ts observe），所以日志里没有的消息
  * 这里也不会有。转发前按受众规则（reach.ts mayForward）检查，不合规则就拒绝（带类型的失败 not_shareable）：
  * 这是隐私不变量，执行器这一层守住，不靠模型自觉。群消息"当时在场"的人取那一刻她心里的状态
  * （mind/presence.ts，和日记、心情的受众规则同一个定义）。

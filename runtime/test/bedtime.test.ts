@@ -17,22 +17,15 @@ import {
   willOf,
 } from "../src/mechanisms/pressure/index.js";
 import { life } from "../src/mechanisms/pressure/life.js";
-import {
-  awakeBetween,
-  isAsleep,
-  SLEEP_WINDOW,
-  sleep,
-  sleepDepth,
-} from "../src/mechanisms/pressure/sleep.js";
+import { isAsleep, SLEEP_WINDOW, sleepDepth } from "../src/mechanisms/pressure/sleep.js";
 import { intentionsFor } from "../src/mechanisms/pressure/will.js";
 import { emptyWorld, reduceWorld, type World } from "../src/mechanisms/pressure/world.js";
-import { affordanceOf, affordances } from "../src/mind/affordances.js";
+import { affordances } from "../src/mind/affordances.js";
 import { isAct } from "../src/mind/args.js";
 import type { AliceEvent } from "../src/mind/events.js";
 import type { Mechanism } from "../src/mind/mechanism.js";
 import { type AliceState, emptyState } from "../src/mind/state.js";
 import { speechRequest, step } from "../src/mind/step.js";
-import { arms } from "../src/sim/will-arms.js";
 import { codeMode } from "../src/speech/decision.js";
 import { renderSpeechPrompt } from "../src/speech/prompt.js";
 import { program as reply } from "./model-reply.js";
@@ -90,11 +83,11 @@ const userAt = (state: AliceState, at: number, mechanisms: readonly Mechanism[])
   return renderSpeechPrompt("P", speechRequest(state, chat, at, null, mechanisms)).user;
 };
 
-/** 压力场的世界：生产的折叠加上 bedtime 那一样的折叠。 */
+/** 压力场的世界：生产的 fold 加上 bedtime 那一样的 fold。 */
 const BED_COMP = {
   ...PRODUCTION,
   sleep: withMissed(bedtime),
-  life: life({ occupies: true, warm: true }),
+  life: life({ warm: true }),
 };
 const withBedtime = createPressure(affordances, BED_COMP);
 
@@ -137,15 +130,6 @@ describe("bedtime: saying she goes to sleep is folded into her being asleep", ()
     expect(prodAfternoon.affordances).toContain("bed");
     // 它是一个可以写进 Journal、再读回来的动作。
     expect(isAct({ kind: "bed" })).toBe(true);
-    // 说明告诉她：道晚安就是去睡了（第一轮剩下的宣布都在她选它之前）。
-    const rules = codeMode.rules(night.affordances.map(affordanceOf));
-    expect(rules).toMatch(
-      /\/\*\* （只有你自己看得到，不会发出去）道晚安、要去睡觉的时候：说了晚安，你就是去睡了 \*\/\n {2}go_to_bed: /,
-    );
-    // 消融组 no-bedtime 没有这个动作。
-    const has = (arm: string) => arms({})[arm]?.some((m) => m.affordances?.includes("bed"));
-    expect(has("production")).toBe(true);
-    expect(has("no-bedtime")).toBe(false);
   });
 
   it("keeps her asleep from the act until the schedule's next wake", () => {
@@ -178,14 +162,6 @@ describe("bedtime: saying she goes to sleep is folded into her being asleep", ()
     // 只说了"晚安"、没选 [去睡了]：照作息她醒着。
     const said = run([...evening(), msg(local(0, 34))], mechanisms);
     expect(userAt(said, local(0, 34), mechanisms)).not.toContain("在睡觉");
-  });
-
-  it("is the schedule in everything else", () => {
-    expect(BED_COMP.sleep?.will).toBe(bedtime.will);
-    expect(BED_COMP.sleep?.affordances).toBe(bedtime.affordances);
-    expect(BED_COMP.sleep?.offers).toBe(bedtime.offers);
-    expect(bedtime.outside).toBe(sleep.outside);
-    expect(willOf(BED_COMP).age).toBe(awakeBetween);
   });
 });
 

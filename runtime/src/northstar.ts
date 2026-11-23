@@ -35,6 +35,7 @@
  */
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { parseArgs } from "node:util";
 import Database from "better-sqlite3";
 import { decodeEvent } from "./journal.js";
 import { type AliceEvent, type MessageReceived, NEGATIVE_REACTIONS } from "./mind/events.js";
@@ -52,6 +53,13 @@ const TURN_MS = 90_000;
 const LINK_MS = 129_000;
 /** 往回找接在哪条上，最多走这么多步。 */
 const MAX_HOPS = 200;
+
+/** 平行数组按下标互相引用，越界说明计算本身错了，直接报错。 */
+function nth<T>(xs: readonly T[], i: number): T {
+  const x = xs[i];
+  if (x === undefined) throw new RangeError(`index ${i} out of ${xs.length}`);
+  return x;
+}
 /** 精力的对照至少要这么多跨会话的真人，才说得上"最活跃的那个"。 */
 const MIN_CROSS_CHAT = 4;
 
@@ -87,7 +95,7 @@ const POSITIVE = new Set([
   "🥳",
   "😊",
 ]);
-/** 负面的表情：世界折叠记成一次轻的拒绝的同一张表（mind/events.ts）。 */
+/** 负面的表情：世界 fold 记成一次轻的拒绝的同一张表（mind/events.ts）。 */
 const NEGATIVE = NEGATIVE_REACTIONS;
 
 export interface NorthstarOptions {
@@ -303,7 +311,7 @@ function say(
   const prev = t.lines[i - 1];
   const own = t.last.get(by);
   let parent = replyTo === null ? null : (t.ids.get(replyTo) ?? null);
-  if (parent === null && own !== undefined && at - t.lines[own].at <= LINK_MS) parent = own;
+  if (parent === null && own !== undefined && at - nth(t.lines, own).at <= LINK_MS) parent = own;
   if (parent === null && prev && at - prev.at <= LINK_MS) parent = i - 1;
   const turn = t.turns.at(-1);
   if (turn && prev && prev.by === by && at - prev.at <= TURN_MS) turn.end = at;
@@ -328,9 +336,9 @@ function uptake(t: Talk, windowMs: number): Uptake[] {
   const hanging = new Map<number, number[]>();
   const next = t.turns.map(() => -1);
   t.turns.forEach((turn, k) => {
-    const p = t.lines[turn.first].parent;
+    const p = nth(t.lines, turn.first).parent;
     if (p === null) return;
-    if (t.lines[p].by === turn.by) next[t.lines[p].turn] = k;
+    if (nth(t.lines, p).by === turn.by) next[nth(t.lines, p).turn] = k;
     else hanging.set(p, [...(hanging.get(p) ?? []), k]);
   });
   t.lines.forEach((m, i) => {
@@ -338,24 +346,24 @@ function uptake(t: Talk, windowMs: number): Uptake[] {
     if (by === null || m.bot) return;
     const seen = new Set<string | null>([by]);
     const credit = (found: number) => {
-      if (seen.has(t.turns[found].by)) return;
-      seen.add(t.turns[found].by);
+      if (seen.has(nth(t.turns, found).by)) return;
+      seen.add(nth(t.turns, found).by);
       let k = found;
-      while (next[k] >= 0 && t.turns[next[k]].first < i) k = next[k];
-      if (m.at - t.turns[k].end > windowMs) return;
-      people[k].add(by);
-      turns[k].add(m.turn);
+      while (nth(next, k) >= 0 && nth(t.turns, nth(next, k)).first < i) k = nth(next, k);
+      if (m.at - nth(t.turns, k).end > windowMs) return;
+      nth(people, k).add(by);
+      nth(turns, k).add(m.turn);
     };
     let child = i;
     for (let x = m.parent, hops = 0; x !== null && hops < MAX_HOPS; hops++) {
-      credit(t.lines[x].turn);
+      credit(nth(t.lines, x).turn);
       for (const k of [...(hanging.get(x) ?? [])].reverse())
-        if (t.turns[k].first < child) credit(k);
+        if (nth(t.turns, k).first < child) credit(k);
       child = x;
-      x = t.lines[x].parent;
+      x = nth(t.lines, x).parent;
     }
   });
-  return t.turns.map((_, k) => ({ people: people[k].size, turns: turns[k].size }));
+  return t.turns.map((_, k) => ({ people: nth(people, k).size, turns: nth(turns, k).size }));
 }
 
 interface Chat {
@@ -382,36 +390,124 @@ export function northstar(
   events: Iterable<AliceEvent>,
   options: Partial<NorthstarOptions> = {},
 ): { days: DayRow[]; stopCandidates: StopCandidate[] } {
-  const o = { ...DEFAULTS, ...options };
-  const days = new Map<string, Bucket>();
-  const onDay = (key: string) => {
-    let b = days.get(key);
+  const reading = new Reading({ ...DEFAULTS, ...options });
+  // 冲着她、回复她，和心智同一个判断（mind/step.ts towardHer）：回复她的那条在 Journal 里可能没标 directed。
+  const toward = towardHerReader();
+  for (const logged of events) {
+    const { event, reply } = toward(logged);
+    reading.read(event, reply);
+  }
+  return reading.finish();
+}
+
+type EventOf<T extends AliceEvent["type"]> = Extract<AliceEvent, { type: T }>;
+
+/** 按时间顺序读一遍 Journal，边读边把读数记进每天（--by-arm 时每天每组）的桶。 */
+class Reading {
+  private readonly days = new Map<string, Bucket>();
+  /** 每个分组单位（会话，或 "self"）的换组记录，按时间。 */
+  private readonly arms = new Map<string, Array<{ at: number; arm: string }>>();
+  private readonly chats = new Map<string, Chat>();
+  private readonly people = new Map<string, { days: Set<string>; lastAt: number; scope: string }>();
+  /** 每个人第一次冲着她说话的时刻（和会话），和每次主动找她的时刻。 */
+  private readonly firstContact = new Map<string, { at: number; scope: string }>();
+  private readonly initiatedAt = new Map<string, number[]>();
+  private readonly stopCandidates: StopCandidate[] = [];
+  private end = Number.NEGATIVE_INFINITY;
+
+  constructor(private readonly o: NorthstarOptions) {}
+
+  read(event: AliceEvent, repliesToHer: boolean): void {
+    this.end = Math.max(this.end, event.at);
+    switch (event.type) {
+      case "arm.switched": {
+        const arm = event.arm === "candidate" ? event.candidate : (event.arm ?? UNASSIGNED);
+        this.arms.set(event.scope, [...(this.arms.get(event.scope) ?? []), { at: event.at, arm }]);
+        return;
+      }
+      case "message.received":
+        this.received(event, repliesToHer);
+        return;
+      case "speech.decided": {
+        const c = this.chatOf(event.scope);
+        const sends = event.decision.acts.flatMap((a) =>
+          a.kind === "send" ? [{ text: a.text, replyTo: a.replyTo ?? null }] : [],
+        );
+        c.deciding = [...c.deciding, ...sends].slice(-20);
+        return;
+      }
+      case "message.sent":
+        this.sent(event);
+        return;
+      case "reaction.received":
+        this.reacted(event);
+        return;
+      case "act.failed": {
+        const delivery = FAILURES[event.reason].delivery;
+        if (delivery === "refused") this.at(event.at, event.scope).refused.add(event.scope);
+        if (delivery === "unreachable") this.at(event.at, event.scope).unreachable.add(event.scope);
+        return;
+      }
+      case "membership.changed":
+        if (event.reason === "kicked") this.at(event.at, event.scope).kicked.add(event.scope);
+        return;
+      case "speech.failed":
+        if (event.reason === "paused") this.at(event.at, event.scope).pausedCalls++;
+        return;
+      default:
+    }
+  }
+
+  finish(): { days: DayRow[]; stopCandidates: StopCandidate[] } {
+    this.closeOpenChats();
+    this.countLapsed();
+    this.countReturns();
+    const dayOf = (t: number) => this.dayOf(t);
+    const keyOf = (t: number, scope: string) => this.keyOf(t, scope);
+    const onDay = (key: string) => this.onDay(key);
+    readGroups(this.chats, this.o.uptakeMs, this.end, dayOf, keyOf, onDay);
+    readAttention(this.chats, keyOf, onDay);
+    const rows = [...this.days.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, b]) => dayRow(key, b));
+    return { days: rows, stopCandidates: this.stopCandidates };
+  }
+
+  private onDay(key: string): Bucket {
+    let b = this.days.get(key);
     if (!b) {
       b = bucket();
-      days.set(key, b);
+      this.days.set(key, b);
     }
     return b;
-  };
-  /** 每个分组单位（会话，或 "self"）的换组记录，按时间。 */
-  const arms = new Map<string, Array<{ at: number; arm: string }>>();
+  }
+
   /** 这一刻这个会话在哪一组：它自己的记录和她这个人（self）的记录里，最近的那一条。 */
-  const armAt = (scope: string, t: number): string => {
+  private armAt(scope: string, t: number): string {
     let best: { at: number; arm: string } | null = null;
     for (const key of [scope, "self"]) {
-      for (const s of arms.get(key) ?? []) {
+      for (const s of this.arms.get(key) ?? []) {
         if (s.at > t) break;
         if (best === null || s.at >= best.at) best = s;
       }
     }
     return best?.arm ?? UNASSIGNED;
-  };
-  const dayOf = (t: number) => dayKey(o.byArm ? t - DAY_START_HOUR * H : t);
-  const keyOf = (t: number, scope: string) =>
-    o.byArm ? `${dayOf(t)}|${armAt(scope, t)}` : dayOf(t);
-  const at = (t: number, scope: string) => onDay(keyOf(t, scope));
-  const chats = new Map<string, Chat>();
-  const chatOf = (scope: string): Chat => {
-    let c = chats.get(scope);
+  }
+
+  private dayOf(t: number): string {
+    return dayKey(this.o.byArm ? t - DAY_START_HOUR * H : t);
+  }
+
+  private keyOf(t: number, scope: string): string {
+    return this.o.byArm ? `${this.dayOf(t)}|${this.armAt(scope, t)}` : this.dayOf(t);
+  }
+
+  private at(t: number, scope: string): Bucket {
+    return this.onDay(this.keyOf(t, scope));
+  }
+
+  private chatOf(scope: string): Chat {
+    let c = this.chats.get(scope);
     if (!c) {
       c = {
         chatType: null,
@@ -427,212 +523,201 @@ export function northstar(
         talk: { lines: [], turns: [], ids: new Map(), last: new Map() },
         deciding: [],
       };
-      chats.set(scope, c);
+      this.chats.set(scope, c);
     }
     return c;
-  };
-  const people = new Map<string, { days: Set<string>; lastAt: number; scope: string }>();
-  /** 每个人第一次冲着她说话的时刻（和会话），和每次主动找她的时刻。 */
-  const firstContact = new Map<string, { at: number; scope: string }>();
-  const initiatedAt = new Map<string, number[]>();
-  const stopCandidates: StopCandidate[] = [];
-  let end = Number.NEGATIVE_INFINITY;
+  }
 
-  const unanswered = (scope: string, c: Chat) => {
+  private unanswered(scope: string, c: Chat): void {
     if (c.open === null) return;
-    const b = at(c.open, scope);
+    const b = this.at(c.open, scope);
     b.dmUnanswered++;
     b.dmUnansweredPeople.add(scope);
     c.open = null;
-  };
-  const closeApproach = (scope: string, c: Chat, answered: boolean) => {
+  }
+
+  private closeApproach(scope: string, c: Chat, answered: boolean): void {
     if (c.approach === null) return;
     if (c.approach.topic) {
       c.ignored = answered ? 0 : c.ignored + 1;
-      if (c.ignored === o.ignoredRun) at(c.approach.last, scope).dmIgnored.add(scope);
+      if (c.ignored === this.o.ignoredRun) this.at(c.approach.last, scope).dmIgnored.add(scope);
     }
     c.approach = null;
-  };
+  }
 
-  // 冲着她、回复她，和心智同一个判断（mind/step.ts towardHer）：回复她的那条在 Journal 里可能没标 directed。
-  const toward = towardHerReader();
-  for (const logged of events) {
-    const { event, reply: repliesToHer } = toward(logged);
-    end = Math.max(end, event.at);
-    if (event.type === "arm.switched") {
-      const arm = event.arm === "candidate" ? event.candidate : (event.arm ?? UNASSIGNED);
-      arms.set(event.scope, [...(arms.get(event.scope) ?? []), { at: event.at, arm }]);
-      continue;
+  private received(event: MessageReceived, repliesToHer: boolean): void {
+    if (this.o.exclude.has(event.senderId)) return;
+    const c = this.chatOf(event.scope);
+    c.chatType = event.chatType;
+    const bot = event.isBot === true;
+    say(c.talk, event.messageId, event.at, event.senderId, bot, event.replyToMessageId);
+    const b = this.at(event.at, event.scope);
+    b.inbound++;
+    this.notePerson(event, bot);
+    const answersHer = this.answersInPrivate(event, c);
+    const reply = repliesToHer || answersHer;
+    if (reply) {
+      b.repliers.add(event.senderId);
+      this.stopCandidates.push(candidate(event, c));
     }
-    if (event.type === "message.received") {
-      if (o.exclude.has(event.senderId)) continue;
-      const c = chatOf(event.scope);
-      c.chatType = event.chatType;
-      const bot = event.isBot === true;
-      say(c.talk, event.messageId, event.at, event.senderId, bot, event.replyToMessageId);
-      const b = at(event.at, event.scope);
-      b.inbound++;
-      const person = people.get(event.senderId) ?? {
-        days: new Set(),
-        lastAt: event.at,
-        scope: event.scope,
-      };
-      person.days.add(dayOf(event.at));
-      person.lastAt = event.at;
-      person.scope = event.scope;
-      people.set(event.senderId, person);
-      const towardHer = event.chatType === "private" || event.directed;
-      if (towardHer && !bot && !firstContact.has(event.senderId))
-        firstContact.set(event.senderId, { at: event.at, scope: event.scope });
-
-      // 私聊里她说完、窗口还开着：这是在回她。
-      const answersHer =
-        event.chatType === "private" && c.open !== null && event.at - c.open <= o.unansweredMs;
-      if (event.chatType === "private" && c.open !== null && !answersHer)
-        unanswered(event.scope, c);
-      const reply = repliesToHer || answersHer;
-      if (reply) {
-        b.repliers.add(event.senderId);
-        stopCandidates.push(candidate(event, c));
-      }
-      if (event.chatType === "private") {
-        c.open = null;
-        if (c.approach !== null)
-          closeApproach(event.scope, c, event.at - c.approach.last <= o.unansweredMs);
-        c.ignored = 0;
-      }
-
-      if (!reply && initiates(event, c, o)) {
-        b.initiations++;
-        b.initiators.add(event.senderId);
-        initiatedAt.set(event.senderId, [...(initiatedAt.get(event.senderId) ?? []), event.at]);
-      }
-      if (event.directed) c.directedAt.set(event.senderId, event.at);
-      c.lastAt = event.at;
-      c.lastWasHers = false;
-      continue;
+    if (event.chatType === "private") {
+      c.open = null;
+      if (c.approach !== null)
+        this.closeApproach(event.scope, c, event.at - c.approach.last <= this.o.unansweredMs);
+      c.ignored = 0;
     }
-    if (event.type === "speech.decided") {
-      const c = chatOf(event.scope);
-      const sends = event.decision.acts.flatMap((a) =>
-        a.kind === "send" ? [{ text: a.text, replyTo: a.replyTo ?? null }] : [],
+    if (!reply && initiates(event, c, this.o)) {
+      b.initiations++;
+      b.initiators.add(event.senderId);
+      this.initiatedAt.set(event.senderId, [
+        ...(this.initiatedAt.get(event.senderId) ?? []),
+        event.at,
+      ]);
+    }
+    if (event.directed) c.directedAt.set(event.senderId, event.at);
+    c.lastAt = event.at;
+    c.lastWasHers = false;
+  }
+
+  /** 记下这个人哪几天说过话、最后出现在哪，和第一次冲着她说话的时刻。 */
+  private notePerson(event: MessageReceived, bot: boolean): void {
+    const person = this.people.get(event.senderId) ?? {
+      days: new Set(),
+      lastAt: event.at,
+      scope: event.scope,
+    };
+    person.days.add(this.dayOf(event.at));
+    person.lastAt = event.at;
+    person.scope = event.scope;
+    this.people.set(event.senderId, person);
+    const towardHer = event.chatType === "private" || event.directed;
+    if (towardHer && !bot && !this.firstContact.has(event.senderId))
+      this.firstContact.set(event.senderId, { at: event.at, scope: event.scope });
+  }
+
+  /**
+   * 私聊里她说完、窗口还开着：这是在回她。窗口已经过了的那一段先记为没回（旧口径）。
+   */
+  private answersInPrivate(event: MessageReceived, c: Chat): boolean {
+    if (event.chatType !== "private" || c.open === null) return false;
+    if (event.at - c.open <= this.o.unansweredMs) return true;
+    this.unanswered(event.scope, c);
+    return false;
+  }
+
+  private sent(event: EventOf<"message.sent">): void {
+    const c = this.chatOf(event.scope);
+    this.at(event.at, event.scope).herMessages++;
+    c.herIds.add(event.messageId);
+    if (event.kind === "text") c.herLines = [...c.herLines, event.text].slice(-3);
+    say(c.talk, event.messageId, event.at, null, false, takeDecided(c, event));
+    // 上一段话过了窗口还没人回：那一段记为没回，从这句起是新的一段。
+    if (c.open !== null && event.at - c.open > this.o.unansweredMs) this.unanswered(event.scope, c);
+    if (c.chatType !== "group") this.sentInPrivate(event, c);
+    c.lastAt = event.at;
+    c.lastWasHers = true;
+    c.herLastAt = event.at;
+  }
+
+  /** 私聊里她说了一句：开一段等回音的窗口，接上或开始一段带着话头去找。 */
+  private sentInPrivate(event: EventOf<"message.sent">, c: Chat): void {
+    c.open = event.at;
+    if (c.approach !== null && event.at - c.approach.last > this.o.unansweredMs)
+      this.closeApproach(event.scope, c, false);
+    const topic = event.kind !== "sticker";
+    if (c.approach !== null) c.approach = { last: event.at, topic: c.approach.topic || topic };
+    else if (opens(c, event.at, this.o)) c.approach = { last: event.at, topic };
+  }
+
+  private reacted(event: EventOf<"reaction.received">): void {
+    if (event.senderId === null || this.o.exclude.has(event.senderId)) return;
+    const c = this.chatOf(event.scope);
+    if (!c.herIds.has(event.messageId)) return;
+    if (POSITIVE.has(event.emoji)) this.at(event.at, event.scope).reactors.add(event.senderId);
+    if (NEGATIVE.has(event.emoji)) this.at(event.at, event.scope).negative.add(event.senderId);
+  }
+
+  /** 日志结束时还开着的私聊：窗口已过完的算没回，没过完的记为待定。 */
+  private closeOpenChats(): void {
+    for (const [scope, c] of this.chats) {
+      if (c.open !== null) {
+        if (this.end - c.open > this.o.unansweredMs) this.unanswered(scope, c);
+        else this.at(c.open, scope).dmPending++;
+      }
+      if (c.approach !== null) {
+        if (this.end - c.approach.last > this.o.unansweredMs) this.closeApproach(scope, c, false);
+        else if (c.approach.topic) this.at(c.approach.last, scope).dmApproachPending++;
+      }
+    }
+  }
+
+  /** 不再出现的人：记在满 lapse 的那天，那天要在日志范围内。 */
+  private countLapsed(): void {
+    for (const person of this.people.values()) {
+      if (person.days.size < this.o.activeDays) continue;
+      const lapsedAt = person.lastAt + this.o.lapseMs;
+      if (lapsedAt <= this.end) this.at(lapsedAt, person.scope).lapsed++;
+    }
+  }
+
+  /** 回来的人：第 returnDays 天还没过完，这一天就是待定。 */
+  private countReturns(): void {
+    for (const [id, first] of this.firstContact) {
+      const day = this.dayOf(first.at);
+      const last = addDays(day, this.o.returnDays);
+      const b = this.onDay(this.keyOf(first.at, first.scope));
+      b.newPeople++;
+      if (this.dayOf(this.end) <= last) b.returnPending = true;
+      const back = (this.initiatedAt.get(id) ?? []).some(
+        (t) => this.dayOf(t) > day && this.dayOf(t) <= last,
       );
-      c.deciding = [...c.deciding, ...sends].slice(-20);
-      continue;
+      if (back) b.returned++;
     }
-    if (event.type === "message.sent") {
-      const c = chatOf(event.scope);
-      at(event.at, event.scope).herMessages++;
-      c.herIds.add(event.messageId);
-      if (event.kind === "text") c.herLines = [...c.herLines, event.text].slice(-3);
-      const k = event.kind === "text" ? c.deciding.findIndex((d) => d.text === event.text) : -1;
-      const replyTo = k < 0 ? null : c.deciding[k].replyTo;
-      if (k >= 0) c.deciding = c.deciding.filter((_, i) => i !== k);
-      say(c.talk, event.messageId, event.at, null, false, replyTo);
-      // 上一段话过了窗口还没人回：那一段记为没回，从这句起是新的一段。
-      if (c.open !== null && event.at - c.open > o.unansweredMs) unanswered(event.scope, c);
-      if (c.chatType !== "group") {
-        c.open = event.at;
-        if (c.approach !== null && event.at - c.approach.last > o.unansweredMs)
-          closeApproach(event.scope, c, false);
-        const topic = event.kind !== "sticker";
-        if (c.approach !== null) c.approach = { last: event.at, topic: c.approach.topic || topic };
-        else if (opens(c, event.at, o)) c.approach = { last: event.at, topic };
-      }
-      c.lastAt = event.at;
-      c.lastWasHers = true;
-      c.herLastAt = event.at;
-      continue;
-    }
-    if (event.type === "reaction.received") {
-      if (event.senderId === null || o.exclude.has(event.senderId)) continue;
-      const c = chatOf(event.scope);
-      if (!c.herIds.has(event.messageId)) continue;
-      if (POSITIVE.has(event.emoji)) at(event.at, event.scope).reactors.add(event.senderId);
-      if (NEGATIVE.has(event.emoji)) at(event.at, event.scope).negative.add(event.senderId);
-      continue;
-    }
-    if (event.type === "act.failed") {
-      const delivery = FAILURES[event.reason].delivery;
-      if (delivery === "refused") at(event.at, event.scope).refused.add(event.scope);
-      if (delivery === "unreachable") at(event.at, event.scope).unreachable.add(event.scope);
-      continue;
-    }
-    if (event.type === "membership.changed") {
-      if (event.reason === "kicked") at(event.at, event.scope).kicked.add(event.scope);
-      continue;
-    }
-    if (event.type === "speech.failed" && event.reason === "paused")
-      at(event.at, event.scope).pausedCalls++;
   }
+}
 
-  // 日志结束时还开着的私聊：窗口已过完的算没回，没过完的记为待定。
-  for (const [scope, c] of chats) {
-    if (c.open !== null) {
-      if (end - c.open > o.unansweredMs) unanswered(scope, c);
-      else at(c.open, scope).dmPending++;
-    }
-    if (c.approach !== null) {
-      if (end - c.approach.last > o.unansweredMs) closeApproach(scope, c, false);
-      else if (c.approach.topic) at(c.approach.last, scope).dmApproachPending++;
-    }
-  }
-  // 不再出现的人：记在满 lapse 的那天，那天要在日志范围内。
-  for (const person of people.values()) {
-    if (person.days.size < o.activeDays) continue;
-    const lapsedAt = person.lastAt + o.lapseMs;
-    if (lapsedAt <= end) at(lapsedAt, person.scope).lapsed++;
-  }
-  // 回来的人：第 returnDays 天还没过完，这一天就是待定。
-  for (const [id, first] of firstContact) {
-    const day = dayOf(first.at);
-    const last = addDays(day, o.returnDays);
-    const b = onDay(keyOf(first.at, first.scope));
-    b.newPeople++;
-    if (dayOf(end) <= last) b.returnPending = true;
-    const back = (initiatedAt.get(id) ?? []).some((t) => dayOf(t) > day && dayOf(t) <= last);
-    if (back) b.returned++;
-  }
-  readGroups(chats, o.uptakeMs, end, dayOf, keyOf, onDay);
-  readAttention(chats, keyOf, onDay);
+/** 她发出的这条是哪次决定里的话：认出它引用回复了哪条，并从待发的话里拿掉。 */
+function takeDecided(c: Chat, event: EventOf<"message.sent">): string | null {
+  const k = event.kind === "text" ? c.deciding.findIndex((d) => d.text === event.text) : -1;
+  if (k < 0) return null;
+  const replyTo = nth(c.deciding, k).replyTo;
+  c.deciding = c.deciding.filter((_, i) => i !== k);
+  return replyTo;
+}
 
-  const rows = [...days.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(
-      ([key, b]): DayRow => ({
-        ...dayAndArm(key),
-        inbound: b.inbound,
-        herMessages: b.herMessages,
-        initiations: b.initiations,
-        initiators: b.initiators.size,
-        newPeople: b.newPeople,
-        returned: b.returned,
-        returnPending: b.returnPending,
-        warmPeople: new Set([...b.reactors, ...b.repliers]).size,
-        positiveReactors: b.reactors.size,
-        repliers: b.repliers.size,
-        refusedChats: b.refused.size,
-        unreachableChats: b.unreachable.size,
-        kickedChats: b.kicked.size,
-        negativeReactors: b.negative.size,
-        dmIgnored: b.dmIgnored.size,
-        dmApproachPending: b.dmApproachPending,
-        dmUnanswered: b.dmUnanswered,
-        dmUnansweredPeople: b.dmUnansweredPeople.size,
-        dmPending: b.dmPending,
-        lapsedPeople: b.lapsed,
-        groupTurns: b.uptakeHer.length,
-        uptakePeople: mean(b.uptakeHer.map((u) => u.people)),
-        uptakeTurns: mean(b.uptakeHer.map((u) => u.turns)),
-        bandPeople: spread(b.uptakeBand.map((u) => u.people)),
-        bandTurns: spread(b.uptakeBand.map((u) => u.turns)),
-        herTurns: b.herTurns,
-        crossChatPeople: b.crossChat.length,
-        crossChatTop: b.crossChat.length >= MIN_CROSS_CHAT ? Math.max(...b.crossChat) : null,
-        pausedCalls: b.pausedCalls,
-      }),
-    );
-  return { days: rows, stopCandidates };
+function dayRow(key: string, b: Bucket): DayRow {
+  return {
+    ...dayAndArm(key),
+    inbound: b.inbound,
+    herMessages: b.herMessages,
+    initiations: b.initiations,
+    initiators: b.initiators.size,
+    newPeople: b.newPeople,
+    returned: b.returned,
+    returnPending: b.returnPending,
+    warmPeople: new Set([...b.reactors, ...b.repliers]).size,
+    positiveReactors: b.reactors.size,
+    repliers: b.repliers.size,
+    refusedChats: b.refused.size,
+    unreachableChats: b.unreachable.size,
+    kickedChats: b.kicked.size,
+    negativeReactors: b.negative.size,
+    dmIgnored: b.dmIgnored.size,
+    dmApproachPending: b.dmApproachPending,
+    dmUnanswered: b.dmUnanswered,
+    dmUnansweredPeople: b.dmUnansweredPeople.size,
+    dmPending: b.dmPending,
+    lapsedPeople: b.lapsed,
+    groupTurns: b.uptakeHer.length,
+    uptakePeople: mean(b.uptakeHer.map((u) => u.people)),
+    uptakeTurns: mean(b.uptakeHer.map((u) => u.turns)),
+    bandPeople: spread(b.uptakeBand.map((u) => u.people)),
+    bandTurns: spread(b.uptakeBand.map((u) => u.turns)),
+    herTurns: b.herTurns,
+    crossChatPeople: b.crossChat.length,
+    crossChatTop: b.crossChat.length >= MIN_CROSS_CHAT ? Math.max(...b.crossChat) : null,
+    pausedCalls: b.pausedCalls,
+  };
 }
 
 /**
@@ -666,17 +751,17 @@ function readGroups(
     }
     const members = new Map<string, { day: string; got: Uptake[] }>();
     t.turns.forEach((turn, k) => {
-      if (turn.end + windowMs > end || t.lines[turn.first].bot) return;
-      const first = t.lines[turn.first].at;
+      if (turn.end + windowMs > end || nth(t.lines, turn.first).bot) return;
+      const first = nth(t.lines, turn.first).at;
       const day = keyOf(first, scope);
       if (turn.by === null) {
-        onDay(day).uptakeHer.push(got[k]);
+        onDay(day).uptakeHer.push(nth(got, k));
         return;
       }
       if (!active.get(dayOf(first))?.has(turn.by)) return;
       const key = `${day}|${turn.by}`;
       const m = members.get(key) ?? { day, got: [] };
-      m.got.push(got[k]);
+      m.got.push(nth(got, k));
       members.set(key, m);
     });
     for (const m of members.values()) {
@@ -694,11 +779,25 @@ function readAttention(
   keyOf: (t: number, scope: string) => string,
   onDay: (key: string) => Bucket,
 ): void {
+  const { where, turnsOn } = countTurns(chats, keyOf);
+  for (const [day, counts] of turnsOn) {
+    const b = onDay(day);
+    b.herTurns = counts.get(null) ?? 0;
+    for (const [id, n] of counts)
+      if (id !== null && (where.get(id)?.size ?? 0) >= 2) b.crossChat.push(n);
+  }
+}
+
+/** 每个真人在哪些会话里说过话；每个桶里每个人（她是 null）说了几轮。机器人开头的轮不算。 */
+function countTurns(
+  chats: ReadonlyMap<string, Chat>,
+  keyOf: (t: number, scope: string) => string,
+): { where: Map<string, Set<string>>; turnsOn: Map<string, Map<string | null, number>> } {
   const where = new Map<string, Set<string>>();
   const turnsOn = new Map<string, Map<string | null, number>>();
   for (const [scope, c] of chats) {
     for (const turn of c.talk.turns) {
-      const first = c.talk.lines[turn.first];
+      const first = nth(c.talk.lines, turn.first);
       if (first.bot) continue;
       if (turn.by !== null) where.set(turn.by, (where.get(turn.by) ?? new Set()).add(scope));
       const day = keyOf(first.at, scope);
@@ -707,12 +806,7 @@ function readAttention(
       turnsOn.set(day, counts);
     }
   }
-  for (const [day, counts] of turnsOn) {
-    const b = onDay(day);
-    b.herTurns = counts.get(null) ?? 0;
-    for (const [id, n] of counts)
-      if (id !== null && (where.get(id)?.size ?? 0) >= 2) b.crossChat.push(n);
-  }
+  return { where, turnsOn };
 }
 
 /** 桶的键：日期，--by-arm 时后面跟着组。 */
@@ -794,7 +888,7 @@ function mean(xs: readonly number[]): number | null {
 function spread(xs: readonly number[]): Spread | null {
   if (xs.length === 0) return null;
   const s = [...xs].sort((a, b) => a - b);
-  const q = (p: number) => round2(s[Math.min(s.length - 1, Math.floor(p * s.length))]);
+  const q = (p: number) => round2(nth(s, Math.min(s.length - 1, Math.floor(p * s.length))));
   return { p25: q(0.25), p75: q(0.75) };
 }
 
@@ -805,7 +899,7 @@ function initiates(event: MessageReceived, c: Chat, o: NorthstarOptions): boolea
     const quiet = event.at - c.lastAt;
     if (quiet < o.gapMs) return false;
     // 安静之前最后一句是她的、还在等回音的窗口里：是晚到的回复（已在调用前算进回复）。
-    return !(c.lastWasHers && quiet <= o.unansweredMs);
+    return !c.lastWasHers || quiet > o.unansweredMs;
   }
   if (!event.directed) return false;
   const herQuiet = c.herLastAt === null || event.at - c.herLastAt >= o.gapMs;
@@ -912,34 +1006,40 @@ const TABLES: Column[][] = [
 ];
 
 function main(argv: string[]): void {
-  const path = argv.find((a, i) => !a.startsWith("--") && !argv[i - 1]?.startsWith("--"));
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      json: { type: "boolean" },
+      "by-arm": { type: "boolean" },
+      gap: { type: "string" },
+      unanswered: { type: "string" },
+      exclude: { type: "string" },
+      "stop-candidates": { type: "string" },
+    },
+  });
+  const path = positionals[0];
   if (!path) {
     console.error(
       "usage: pnpm northstar <journal.db> [--json] [--by-arm] [--gap 60] [--unanswered 12] [--exclude id,id] [--stop-candidates out.jsonl]",
     );
     process.exit(2);
   }
-  const flag = (name: string) => {
-    const i = argv.indexOf(name);
-    return i >= 0 ? argv[i + 1] : undefined;
-  };
-  const number = (name: string, fallback: number) => {
-    const v = flag(name);
-    return v === undefined ? fallback : Number(v);
-  };
-  const byArm = argv.includes("--by-arm");
+  const number = (v: string | undefined, fallback: number) =>
+    v === undefined ? fallback : Number(v);
+  const byArm = values["by-arm"] === true;
   const report = northstar(readJournal(path), {
     byArm,
-    gapMs: number("--gap", 60) * MIN,
-    unansweredMs: number("--unanswered", 12) * H,
-    exclude: new Set((flag("--exclude") ?? "").split(",").filter(Boolean)),
+    gapMs: number(values.gap, 60) * MIN,
+    unansweredMs: number(values.unanswered, 12) * H,
+    exclude: new Set((values.exclude ?? "").split(",").filter(Boolean)),
   });
-  const out = flag("--stop-candidates");
+  const out = values["stop-candidates"];
   if (out) {
     writeFileSync(out, `${report.stopCandidates.map((c) => JSON.stringify(c)).join("\n")}\n`);
     console.error(`${report.stopCandidates.length} stop candidates → ${out}`);
   }
-  if (argv.includes("--json")) {
+  if (values.json === true) {
     const out = byArm ? { days: report.days, arms: armSummary(report.days) } : report.days;
     console.log(JSON.stringify(out, null, 2));
     return;

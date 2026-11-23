@@ -3,7 +3,7 @@
  * 每个分组单位在每个时间段用哪一套，由种子的哈希算出；真的换组只在她不在对话里的时候。纯函数：时间只来自参数，
  * 随机只来自种子的哈希。
  *
- * - 单位：候选改动（换掉、拿掉或加上）的机制里有跨会话的钩子（叫醒、看一眼、想一想、开新会话、扫一眼——压力场
+ * - 单位：候选改动（替换、移除或新增）的机制里有跨会话的钩子（叫醒、看一眼、想一想、开新会话、扫一眼——压力场
  *   这一类，比如一部手机管所有群），就按她这个人整体切（self），所有会话同时换；只改会话里面的东西（提示词里的
  *   事实和示例、记录怎么排、给哪些能力），按会话分（chat）。按会话分时，跨会话的钩子（想一想、开新会话、扫一眼）
  *   照生产。
@@ -19,8 +19,8 @@
  *   两轮间隔的两峰之间，5.2 分钟（docs/research/phone-focus-2026-11-13.md，2 月 0、A、B 和线上）。
  *   还没换到这一段排的组时，单位留在原来的组，到点前一刻开始的对话照旧用原来那套说完。
  *
- * 换组由外壳在时钟格之前算（switchesDue），写成 arm.switched 进 Journal，再送进 step；step 只照记录换。
- * 所以折叠、回放和北极星读的是同一份分组，换了配置重启也不会改写过去。
+ * 换组由外壳在时钟格之前算（switchesDue），写成 arm.switched 进 Journal，再送进 step；step 只按记录换组。
+ * 所以 fold、回放和北极星读的是同一份分组，换了配置重启也不会改写过去。
  */
 import { hash32 } from "../mechanisms/hash.js";
 import { SELF_SCOPE } from "./effects.js";
@@ -49,7 +49,7 @@ export interface Rotating {
   readonly production: readonly Mechanism[];
   /** 候选的机制：和生产同名而不是同一个的，名字改成"名字@候选"，两套的状态各存各的。 */
   readonly candidate: readonly Mechanism[];
-  /** 每个事件都折叠的：生产的，加上候选独有的（两套的状态一直都是热的，换组那一刻不用从头攒）。 */
+  /** 每个事件都 fold 的：生产的，加上候选独有的（两套的状态一直都是热的，换组那一刻不用从头攒）。 */
   readonly folded: readonly Mechanism[];
 }
 
@@ -67,7 +67,7 @@ export function isRotating(mind: Mind): mind is Rotating {
 
 /** 有跨会话钩子的机制：它一动，别的会话里她做什么也跟着变。 */
 function personLevel(m: Mechanism): boolean {
-  return !!(m.wake || m.glance || m.ponder || m.opens || m.scans || m.asleep);
+  return !!(m.wake || m.ponder || m.opens || m.scans || m.asleep);
 }
 
 /** 候选和生产不同的机制里有跨会话的，就只能整体切。 */
@@ -124,7 +124,7 @@ export function scheduled(rotation: Rotation, unit: string, block: number): ArmN
 }
 
 /** 分组单位的键：按会话分是会话，整体切是 "self"。 */
-export function unitKey(rotation: Rotation, scope: string): string {
+function unitKey(rotation: Rotation, scope: string): string {
   return rotation.unit === "self" ? SELF_SCOPE : scope;
 }
 
@@ -189,7 +189,7 @@ export function rotationEnded(state: AliceState, at: number): ArmSwitched[] {
   }));
 }
 
-/** 照记录换组。 */
+/** 按记录换组。 */
 export function switchArm(state: AliceState, event: ArmSwitched): AliceState {
   const arms = { ...(state.arms ?? {}) };
   if (event.arm === null) delete arms[event.scope];
@@ -219,7 +219,7 @@ export function mechanismsIn(
   return armOf(mind, state, scope ?? SELF_SCOPE) === "candidate" ? mind.candidate : mind.production;
 }
 
-/** 每个事件都要折叠的机制。 */
+/** 每个事件都要 fold 的机制。 */
 export function foldedOf(mind: Mind): readonly Mechanism[] {
   return isRotating(mind) ? mind.folded : mind;
 }

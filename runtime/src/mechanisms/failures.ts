@@ -64,6 +64,8 @@ function attempted(act: Act): { what: string; done: string } | null {
       return { what: `我刚才想用语音说的「${snippet(act.text)}」`, done: "发出去" };
     case "edit":
       return { what: `我刚才想把 [${act.messageId}] 改成「${snippet(act.text)}」`, done: "改成" };
+    case "unsend":
+      return { what: `我刚才想撤回的 [${act.messageId}]`, done: "撤回" };
     case "repeat":
       return { what: `我刚才想跟着复读的 [${act.messageId}] `, done: "发出去" };
     default:

@@ -147,7 +147,7 @@ export function elevenlabsSpent(model: string, text: string, chars?: number): Sp
 
 export interface ElevenlabsClientLike {
   textToSpeech: {
-    convert(
+    convert: (
       voiceId: string,
       request: {
         text: string;
@@ -156,7 +156,7 @@ export interface ElevenlabsClientLike {
         voiceSettings?: { stability?: number; similarityBoost?: number };
       },
       requestOptions?: { abortSignal?: AbortSignal; timeoutInSeconds?: number },
-    ): AsyncIterable<Uint8Array> | Promise<AsyncIterable<Uint8Array>>;
+    ) => AsyncIterable<Uint8Array> | Promise<AsyncIterable<Uint8Array>>;
   };
 }
 
@@ -206,7 +206,7 @@ export async function synthesizeElevenlabs(
 }
 
 /** 统一语音合成入口：按配置的提供商走 ElevenLabs 或 MiniMax。 */
-export function synthesizeSpeech(
+export async function synthesizeSpeech(
   tts: TtsConfig,
   text: string,
   deps: MinimaxDeps & ElevenlabsDeps = {},
@@ -238,7 +238,7 @@ function wavOf(pcm: Uint8Array, rate: number): Uint8Array {
 }
 
 /** WAV 的时长：数据字节数 ÷ 每秒字节数（fmt 块里的 byte rate）。 */
-export function wavSeconds(wav: Uint8Array): number {
+function wavSeconds(wav: Uint8Array): number {
   const view = Buffer.from(wav.buffer, wav.byteOffset, wav.byteLength);
   const byteRate = view.readUInt32LE(28);
   let offset = 12;
@@ -252,7 +252,7 @@ export function wavSeconds(wav: Uint8Array): number {
 }
 
 /** 跑一次 ffmpeg：输入从 stdin 读、输出从 stdout 收（参数按 ffmpeg 的顺序拼好）。 */
-function ffmpeg(args: string[], input: Uint8Array): Promise<Uint8Array> {
+async function ffmpeg(args: string[], input: Uint8Array): Promise<Uint8Array> {
   const { promise, resolve, reject } = Promise.withResolvers<Uint8Array>();
   const ff = spawn("ffmpeg", args, { stdio: ["pipe", "pipe", "pipe"] });
   const out: Buffer[] = [];
@@ -269,7 +269,7 @@ function ffmpeg(args: string[], input: Uint8Array): Promise<Uint8Array> {
 }
 
 /** 别的容器（MiniMax 的 mp3）→ 裸 PCM（PCM_RATE、16 位单声道）：按字节算时长，再走同一条 OGG 转换。 */
-function toPcm(audio: Uint8Array, format: string): Promise<Uint8Array> {
+async function toPcm(audio: Uint8Array, format: string): Promise<Uint8Array> {
   return ffmpeg(
     [
       ...["-hide_banner", "-loglevel", "error", "-f", format, "-i", "pipe:0"],
@@ -280,7 +280,7 @@ function toPcm(audio: Uint8Array, format: string): Promise<Uint8Array> {
 }
 
 /** WAV → OGG/Opus（Telegram 语音的格式；48 kHz 单声道，32 kbps，语音模式）。 */
-function toOggOpus(wav: Uint8Array): Promise<Uint8Array> {
+async function toOggOpus(wav: Uint8Array): Promise<Uint8Array> {
   return ffmpeg(
     [
       ...["-hide_banner", "-loglevel", "error", "-f", "wav", "-i", "pipe:0"],

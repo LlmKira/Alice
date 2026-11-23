@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { executeProgram, executeToolReply, type PtcOptions, QUERY_KINDS } from "../src/llm/ptc.js";
+import {
+  executeProgram,
+  executePtcTurn,
+  executeToolReply,
+  type PtcOptions,
+} from "../src/llm/ptc.js";
 import type { ActKind } from "../src/mind/affordances.js";
 import type { SpeechRequest } from "../src/mind/effects.js";
 import type { TimelineEntry } from "../src/mind/state.js";
+import { moodWord, stickerWord } from "../src/mind/words.js";
 
 const NOW = Date.UTC(2026, 10, 14, 3, 0);
 
@@ -261,16 +267,6 @@ await tools.say({ text: "二" });
     const withRequire = await executeProgram('require("node:fs");', request());
     expect(withRequire.defects[0]?.text).toContain("require");
   });
-
-  it("treats the five lookups as queries", () => {
-    expect([...QUERY_KINDS].sort()).toEqual([
-      "album-search",
-      "chat-search",
-      "delegate",
-      "dm-check",
-      "recall",
-    ]);
-  });
 });
 
 describe("executeToolReply", () => {
@@ -325,6 +321,116 @@ if (found.items.length > 0) {
     expect(result.defects).toEqual([
       { kind: "unknown", text: 'search_album({"query":"猫"})' },
       { kind: "unparseable", text: "" },
+    ]);
+  });
+});
+
+describe("words and executePtcTurn error feedback", () => {
+  it("accepts Russian, English, and multi-clause Chinese mood and sticker phrases up to 48 chars", () => {
+    expect(moodWord("сонная и слегка раздраженная")).toBe("сонная и слегка раздраженная");
+    expect(moodWord("心里暖暖的，有点被治愈到！")).toBe("心里暖暖的，有点被治愈到");
+    expect(moodWord("a bit sleepy   and annoyed")).toBe("a bit sleepy and annoyed");
+    expect(stickerWord("sleepy cat lying flat on desk")).toBe("sleepy cat lying flat on desk");
+    expect(moodWord("x".repeat(49))).toBeNull();
+  });
+
+  it("feeds back an invalid-arg error once so the model naturally corrects before acting", async () => {
+    const prompts: unknown[] = [];
+    let turn = 0;
+    const result = await executePtcTurn({
+      persona: "你是 Alice。",
+      request: request({ affordances: ["send", "react", "feel"] }),
+      callModel: async (prompt) => {
+        prompts.push(prompt.messages ?? null);
+        turn += 1;
+        if (turn === 1) {
+          return JSON.stringify({
+            content: "",
+            reasoning_content: "think-sig",
+            calls: [
+              {
+                id: "call_bad",
+                name: "run_code",
+                extra_content: { google: { thought_signature: "sig-1" } },
+                arguments: JSON.stringify({
+                  code: 'await tools.feel({ mood: "" });\nawait tools.say({ text: "差点丢了这句" });',
+                }),
+              },
+            ],
+          });
+        }
+        return JSON.stringify({
+          content: "",
+          calls: [
+            {
+              id: "call_fixed",
+              name: "run_code",
+              arguments: JSON.stringify({
+                code: 'await tools.feel({ mood: "有点困" });\nawait tools.say({ text: "总算发出来了" });',
+              }),
+            },
+          ],
+        });
+      },
+    });
+    expect(turn).toBe(2);
+    expect(result.defects).toEqual([]);
+    expect(result.decision.acts).toEqual([
+      { kind: "feel", mood: "有点困", why: null },
+      { kind: "send", text: "总算发出来了", replyTo: null },
+    ]);
+    const retryMsgs = prompts[1] as Array<Record<string, unknown>>;
+    expect(retryMsgs).toHaveLength(4);
+    expect(retryMsgs[2]?.tool_calls).toMatchObject([
+      { id: "call_bad", extra_content: { google: { thought_signature: "sig-1" } } },
+    ]);
+    expect(String(retryMsgs[3]?.content)).toContain("invalid args for feel");
+    expect(String(retryMsgs[3]?.content)).toContain('"already_executed":[]');
+  });
+
+  it("preserves already-executed outward acts and tells retry not to duplicate them", async () => {
+    let seenToolFeedback = "";
+    let turn = 0;
+    const result = await executePtcTurn({
+      persona: "你是 Alice。",
+      request: request({ affordances: ["send", "react"] }),
+      callModel: async (prompt) => {
+        turn += 1;
+        if (turn === 1) {
+          return JSON.stringify({
+            content: "",
+            calls: [
+              {
+                id: "c1",
+                name: "run_code",
+                arguments: JSON.stringify({
+                  code: 'await tools.say({ text: "先说这句" });\nawait tools.react({ messageId: "999", emoji: "👍" });',
+                }),
+              },
+            ],
+          });
+        }
+        seenToolFeedback = String(prompt.messages?.at(-1)?.content ?? "");
+        return JSON.stringify({
+          content: "",
+          calls: [
+            {
+              id: "c2",
+              name: "run_code",
+              arguments: JSON.stringify({
+                code: 'await tools.react({ messageId: "43", emoji: "👍" });',
+              }),
+            },
+          ],
+        });
+      },
+    });
+    expect(turn).toBe(2);
+    expect(seenToolFeedback).toContain('already_executed":["say(\\"先说这句\\")"]');
+    expect(seenToolFeedback).toContain("not found");
+    expect(result.decision.acts).toEqual([
+      { kind: "send", text: "先说这句", replyTo: null },
+      { kind: "react", messageId: "43", emoji: "👍" },
     ]);
   });
 });

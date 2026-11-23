@@ -23,9 +23,9 @@ export const ROOM_REFRESH_MS = 6 * 3_600_000;
 /** 拉表情合计的群：最近这么久里有人说话的。 */
 export const ACTIVE_MS = 30 * 60_000;
 /** 每个群拉最近几条（她的记录是 30 条）。 */
-export const REACTION_IDS = 30;
+const REACTION_IDS = 30;
 /** 一轮最多拉几个群。 */
-export const REACTION_CHATS = 8;
+const REACTION_CHATS = 8;
 
 /** Telegram 消息上的表情合计：只留普通 emoji（自定义表情、付费的星星不写）。 */
 export function reactedOf(results: readonly tl.TypeReactionCount[] | undefined): Reacted[] {
@@ -62,13 +62,8 @@ export class Scene {
         if (!key) return;
         this.texts.set(key, event.text);
         if (event.reactions) this.reactions.set(key, signature(event.reactions));
-        if (event.chatType === "group") {
-          const r = this.recent.get(event.scope) ?? { ids: [], at: 0 };
-          const n = Number(event.messageId);
-          if (Number.isSafeInteger(n)) r.ids = [...r.ids, n].slice(-REACTION_IDS);
-          r.at = event.at;
-          this.recent.set(event.scope, r);
-        }
+        if (event.chatType === "group")
+          this.noteGroupMessage(event.scope, event.messageId, event.at);
         return;
       }
       case "message.updated":
@@ -82,6 +77,15 @@ export class Scene {
       default:
         return;
     }
+  }
+
+  /** 记下群里最近的消息编号（拉表情用）和最后一条的时刻。 */
+  private noteGroupMessage(scope: string, messageId: string, at: number): void {
+    const r = this.recent.get(scope) ?? { ids: [], at: 0 };
+    const n = Number(messageId);
+    if (Number.isSafeInteger(n)) r.ids = [...r.ids, n].slice(-REACTION_IDS);
+    r.at = at;
+    this.recent.set(scope, r);
   }
 
   /** 一条消息后来的样子里和上次知道的不同的那几样；都没变时为 null。 */

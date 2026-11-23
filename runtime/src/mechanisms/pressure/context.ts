@@ -4,7 +4,7 @@
  * 回复链逸散，去掉了前后各一条：带上它们线上的记录长了 27%）。叫醒她的那条和新的话先找。
  * 带回来的每一条先换掉记录里一条别人只发贴纸的行或机器人的话（从最旧的换起；价值标注里它们 93–97%、82% 和眼前的事
  * 无关），换完了才加长。记录照旧按时间排，不相邻的地方写"中间还有 N 条"。私聊不改（对方的每句话都冲着她）。
- * 只从 Journal 折叠：这里记最近一天的原话（World.transcript）。
+ * 只从 Journal fold：这里记最近一天的原话（World.transcript）。
  *
  * 候选 mentions（PLAN 第 55 件第 4 项，2 月 getUnreadMentionIds）：沉在记录之前、她还没看到的找她的话（回复她、点她名）
  * 也先带回来，最多 BURIED_CAP 条，和被引用的那句一样只带那一条本身。"没看到"：它进来之后她还没看过这里的记录（没有
@@ -17,10 +17,10 @@ import { sentEntry } from "../../mind/step.js";
 import type { FeatureContext, PressureFeature } from "./feature.js";
 import type { World } from "./world.js";
 
-export const CHAIN_DEPTH = 3;
-export const CHAIN_CAP = 12;
+const CHAIN_DEPTH = 3;
+const CHAIN_CAP = 12;
 /** 沉底的找她的话最多带回几条（最近的几条）。手设。 */
-export const BURIED_CAP = 3;
+const BURIED_CAP = 3;
 /** 原话留最近一天、每个会话最多这么多条。 */
 const KEPT_MS = 24 * 3_600_000;
 const KEPT = 2000;
@@ -58,7 +58,7 @@ function withSeen(world: World, event: AliceEvent): World {
 
 /**
  * 记录之前的、找她的、她还没看到的话（最近的 BURIED_CAP 条，从新到旧）。它进来之后她只要看过一次记录就算看到了：
- * 那时它要么还在记录里，要么正是被这里带回来的（像打开会话时 Telegram 跳到那条 @）。
+ * 那时它要么还在记录里，要么正是被这里带回来的（像打开会话时客户端跳到那条 @）。
  */
 function buried(ctx: FeatureContext, o: Older): string[] {
   const seen = ctx.world.seenAt?.[ctx.chat.scope] ?? Number.NEGATIVE_INFINITY;
@@ -159,34 +159,41 @@ function seedOrder(ctx: FeatureContext, trigger: string | null): TimelineEntry[]
   return first ? [first, ...newest.filter((e) => e !== first)] : newest;
 }
 
+/**
+ * 顺着引用回复往记录之前找被接的那几行：一层一层往上，最多 CHAIN_DEPTH 层、CHAIN_CAP 行；找过的记进 visited。
+ * 队列边走边往后加，所以是按层的先后走的。
+ */
+function climb(o: Older, visited: Set<string>, start: readonly string[]): Set<number> {
+  const index = new Map(o.all.map((e, i) => [e.messageId, i]));
+  const added = new Set<number>();
+  const queue: Array<[target: string, depth: number]> = start.map((id) => [id, 0]);
+  for (const [target, depth] of queue) {
+    if (depth >= CHAIN_DEPTH || added.size >= CHAIN_CAP) break;
+    const i = index.get(target);
+    const e = i === undefined ? undefined : o.all[i];
+    if (i === undefined || !e || i >= o.start || visited.has(target)) continue;
+    visited.add(target);
+    added.add(i);
+    if (e.replyToMessageId && !visited.has(e.replyToMessageId)) {
+      queue.push([e.replyToMessageId, depth + 1]);
+    }
+  }
+  return added;
+}
+
 function chain(
   ctx: FeatureContext,
   o: Older,
   trigger: string | null,
   first: readonly string[],
 ): LogItem[] | null {
-  const index = new Map(o.all.map((e, i) => [e.messageId, i]));
   const visited = new Set(ctx.chat.timeline.map((e) => e.messageId));
-  const added = new Set<number>();
-  let frontier = [
+  const added = climb(o, visited, [
     ...first,
     ...seedOrder(ctx, trigger).flatMap((e) =>
       e.replyToMessageId && !visited.has(e.replyToMessageId) ? [e.replyToMessageId] : [],
     ),
-  ];
-  for (let d = 0; d < CHAIN_DEPTH && frontier.length > 0 && added.size < CHAIN_CAP; d++) {
-    const next: string[] = [];
-    for (const target of frontier) {
-      if (added.size >= CHAIN_CAP) break;
-      const i = index.get(target);
-      const e = i === undefined ? undefined : o.all[i];
-      if (i === undefined || !e || i >= o.start || visited.has(target)) continue;
-      visited.add(target);
-      added.add(i);
-      if (e.replyToMessageId && !visited.has(e.replyToMessageId)) next.push(e.replyToMessageId);
-    }
-    frontier = next;
-  }
+  ]);
   if (added.size === 0) return null;
   const record = Array.from({ length: ctx.chat.timeline.length }, (_, k) => o.start + k);
   const gone = new Set(spare(ctx, o, record, trigger).slice(0, added.size));

@@ -3,12 +3,12 @@
  * 2026-11-12 体检的缺陷都出在这几种怪处上（eval-artifacts/footprint/）：适配器或执行器退回去，这里就红。
  */
 import { describe, expect, it } from "vitest";
+import { Album } from "../src/album.js";
 import { type ActEffect, deliver } from "../src/interpret.js";
 import type { AliceEvent, MessageReceived } from "../src/mind/events.js";
 import { towardHerReader } from "../src/mind/step.js";
 import { FakeTelegram, SELF, throughPlatform } from "../src/sim/platform.js";
 import { executeAct } from "../src/telegram/acts.js";
-import { Album } from "../src/telegram/album.js";
 import { CATCH_UP_MS } from "../src/telegram/catch-up.js";
 import { Gates, Telegram } from "../src/telegram/gates.js";
 import { Shelf } from "../src/telegram/shelf.js";

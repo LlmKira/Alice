@@ -1,6 +1,6 @@
 /**
  * 发言上下文的写法（eval-artifacts/presentation/）：卡片是她自己记的事，机制写成"我……"，她自己写下的话原样；
- * 标题不补横线（## 怎么写、## 参考、开头一行"Telegram 私聊 · 日期"、锚点上面 ---）；记录里同一天隔了 30 分钟以上插一行。
+ * 标题不补横线（## 怎么写、## 参考、开头一行"Telegram 私聊 · 日期"、anchor 上面 ---）；记录里同一天隔了 30 分钟以上插一行。
  */
 import { describe, expect, it } from "vitest";
 import { mechanisms } from "../src/mechanisms/registry.js";
@@ -16,8 +16,12 @@ const MIN = 60_000;
 const T = Date.UTC(2026, 10, 10, 7, 0);
 const DM = "telegram:1";
 
-const c = (kind: Contribution["kind"], text: string, more: Partial<Contribution> = {}) =>
-  ({ mechanism: "test", kind, text, ...more }) as Contribution;
+const c = (kind: Contribution["kind"], text: string, more: Partial<Contribution> = {}) => ({
+  mechanism: "test",
+  kind,
+  text,
+  ...more,
+});
 
 const said = (at: number, id: string, text: string): TimelineEntry => ({
   at,
@@ -79,7 +83,7 @@ describe("first-person card", () => {
     expect(text).toContain("我住在平行世界");
     expect(text).toContain("因为小满来找我");
     expect(text).toContain("  我在这里答应过或打算做的事：\n  - 陪你看番（");
-    expect(text.replace("陪你看番", "")).not.toContain("你");
+    expect(text?.replace("陪你看番", "")).not.toContain("你");
 
     const sad: AliceEvent[] = [
       {
@@ -112,32 +116,6 @@ describe("first-person card", () => {
     expect(text).toContain("  - 刚才想过：哼，明明是你先失踪的");
     expect(text).toContain("  - 1 小时前 关于 小满：你这个笨蛋");
     expect(text).toContain("：说你像只猫");
-  });
-});
-
-describe("headings without padded rules", () => {
-  const r = request([
-    c("state", "我在平行世界。"),
-    c("reference", "你平时私聊时的几种回法", {
-      examples: [
-        { scene: "有人问你在不在", acts: [{ kind: "send", text: "在呢", replyTo: null }] },
-      ],
-    }),
-  ]);
-  const { system, user } = renderSpeechPrompt("P", r);
-
-  it("the system prompt has Markdown headings", () => {
-    expect(system).toMatch(/^## 怎么写$/m);
-    expect(system).toMatch(/^## 参考（只是平时说话的口气示范/m);
-    expect(system).not.toContain("──");
-  });
-
-  it("the user message opens with a plain header line and puts --- above the turn anchor", () => {
-    expect(user.split("\n")[0]).toBe("Telegram 私聊 · 2026年11月10日 周二");
-    const anchor = user.split("\n\n").at(-1) ?? "";
-    expect(anchor.split("\n")[0]).toBe("---");
-    expect(anchor).toContain("轮到你了");
-    expect(user).not.toContain("─");
   });
 });
 

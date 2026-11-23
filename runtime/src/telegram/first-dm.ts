@@ -3,7 +3,7 @@
  * 里面的访问凭证不能拿来发私聊。按 mtcute 的做法，发之前经过她和对方同在的群、指着对方在那里说过的一条消息
  * （inputUserFromMessage）向 Telegram 要完整的资料，拿到凭证再发。
  *
- * Acquaintances 是 Journal 的投影（和 shelf、album 一样）：只从写进了日志的事件更新，折叠和运行时看到的一样。
+ * Acquaintances 是 Journal 的投影（和 shelf、album 一样）：只从写进了日志的事件更新，fold 和运行时看到的一样。
  */
 import { MtPeerNotFoundError, type TelegramClient, tl } from "@mtcute/node";
 import type { AliceEvent } from "../mind/events.js";
@@ -34,22 +34,7 @@ export class Acquaintances {
 
   observe(event: AliceEvent): void {
     if (event.type === "message.received") {
-      const chat = idOf(event.scope);
-      if (chat === null) return;
-      if (event.chatType === "private") {
-        this.opened.add(chat);
-        return;
-      }
-      const user = Number(event.senderId);
-      const message = Number(event.messageId);
-      if (!Number.isSafeInteger(user) || user <= 0 || !Number.isSafeInteger(message)) return;
-      const groups = this.seen.get(user) ?? new Map<number, number>();
-      groups.delete(chat);
-      groups.set(chat, message);
-      for (const old of [...groups.keys()].slice(0, Math.max(0, groups.size - GROUPS_KEPT))) {
-        groups.delete(old);
-      }
-      this.seen.set(user, groups);
+      this.received(event);
       return;
     }
     if (event.type === "message.sent") {
@@ -62,6 +47,26 @@ export class Acquaintances {
       const chat = idOf(event.scope);
       if (chat !== null) for (const groups of this.seen.values()) groups.delete(chat);
     }
+  }
+
+  /** 私聊里收到的：有过来往了。群里收到的：记下他在这个群最后说的一条。 */
+  private received(event: Extract<AliceEvent, { type: "message.received" }>): void {
+    const chat = idOf(event.scope);
+    if (chat === null) return;
+    if (event.chatType === "private") {
+      this.opened.add(chat);
+      return;
+    }
+    const user = Number(event.senderId);
+    const message = Number(event.messageId);
+    if (!Number.isSafeInteger(user) || user <= 0 || !Number.isSafeInteger(message)) return;
+    const groups = this.seen.get(user) ?? new Map<number, number>();
+    groups.delete(chat);
+    groups.set(chat, message);
+    for (const old of [...groups.keys()].slice(0, Math.max(0, groups.size - GROUPS_KEPT))) {
+      groups.delete(old);
+    }
+    this.seen.set(user, groups);
   }
 
   /** 发往 chatId 是第一次私聊：对方是人（Telegram 的用户 id 是正数），还没有过私聊来往。 */

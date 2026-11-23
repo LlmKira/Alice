@@ -1,5 +1,8 @@
+import type { Album } from "../album.js";
 import { type Act, type ActKind, affordanceOf, type TelegramAct } from "../mind/affordances.js";
+import { Failed } from "../mind/failure.js";
 import type { ActOutcome } from "../mind/outcome.js";
+import { typingMs } from "../utils/typing.js";
 import {
   editText,
   forwardMessage,
@@ -12,12 +15,10 @@ import {
   sendText,
   sendVoice,
 } from "./actions.js";
-import type { Album } from "./album.js";
 import { discover } from "./discover.js";
 import { TelegramActionError } from "./errors.js";
 import type { Telegram } from "./gates.js";
 import type { Shelf } from "./shelf.js";
-import { typingMs } from "./typing.js";
 import { chatIdOf } from "./world-adapter.js";
 
 export interface ActContext {
@@ -34,12 +35,12 @@ export interface ActContext {
   shelf: Shelf;
   album: Album;
   /** 贴纸词 → Telegram fileId（palette）；没有可用贴纸时为 null。 */
-  stickerFileId(word: string): string | null;
-  now(): number;
+  stickerFileId: (word: string) => string | null;
+  now: () => number;
   /** 把一句话合成语音（llm/tts.ts）。 */
-  speak(text: string): Promise<SpokenVoice>;
+  speak: (text: string) => Promise<SpokenVoice>;
   /** 等一会儿（发文字前"正在输入"的那几秒）。 */
-  pause(ms: number): Promise<void>;
+  pause: (ms: number) => Promise<void>;
 }
 
 /** 有数字 id 的会话里的动作。 */
@@ -64,7 +65,7 @@ function telegramId(id: string | null): number | undefined {
 }
 
 /**
- * 可供性登记表里每一行在 Telegram 上怎么做。类型要求每种动作都有一项，
+ * affordance 登记表里每一行在 Telegram 上怎么做。类型要求每种动作都有一项，
  * 所以登记表加一行而这里没补，类型检查会失败。
  */
 const executors: { [K in Exclude<TelegramAct["kind"], "join-chat">]: Executor<K> } = {
@@ -104,7 +105,7 @@ const executors: { [K in Exclude<TelegramAct["kind"], "join-chat">]: Executor<K>
   // 看了才知道的动作：返回的是她看到的东西（act.done 的 result），不是消息 id。
   "album-search": async ({ album, now }, act) => ({
     kind: "looked",
-    text: await album.search(act.query, now()),
+    text: await album.search(act.query, now(), "telegram:"),
     found: [],
   }),
   "album-send": async ({ telegram, chatId, album }, act) => {
@@ -139,6 +140,10 @@ const executors: { [K in Exclude<TelegramAct["kind"], "join-chat">]: Executor<K>
     }
     await editText(telegram, chatId, messageId, act.text);
     return DONE;
+  },
+  // Telegram 生产未开启 unsend（用 edit 改消息）；保留执行器位以满足类型完备性。
+  unsend: async () => {
+    throw new Failed({ reason: "unavailable" }, "unsend is not enabled on Telegram");
   },
   repeat: async ({ telegram, chatId }, act) => {
     const messageId = telegramId(act.messageId);

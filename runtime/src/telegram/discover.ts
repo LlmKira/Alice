@@ -19,8 +19,8 @@ const SHOWN = 3;
 const RECENT = 3;
 
 const INVITE = /(?:t\.me|telegram\.me)\/(?:\+|joinchat\/)([\w-]+)/i;
-const PUBLIC = /(?:t\.me|telegram\.me)\/([A-Za-z][\w]{3,31})(?:[/?#]|$)/i;
-const HANDLE = /^@([A-Za-z][\w]{3,31})$/;
+const PUBLIC = /(?:t\.me|telegram\.me)\/([A-Z]\w{3,31})(?:[/?#]|$)/i;
+const HANDLE = /^@([A-Z]\w{3,31})$/i;
 
 export interface Found {
   text: string;
@@ -60,9 +60,9 @@ async function preview(tg: Telegram, chat: Chat): Promise<FoundPlace | null> {
 }
 
 async function byInvite(tg: Telegram, hash: string): Promise<FoundPlace[]> {
-  const invite = (await tg.request(NAME, { hash }, (c) =>
+  const invite = await tg.request<tl.TypeChatInvite>(NAME, { hash }, (c) =>
     c.call({ _: "messages.checkChatInvite", hash }),
-  )) as tl.TypeChatInvite;
+  );
   if (invite._ === "chatInvite") {
     return [
       {
@@ -86,9 +86,9 @@ async function byName(tg: Telegram, name: string): Promise<FoundPlace[]> {
 }
 
 async function byKeyword(tg: Telegram, q: string): Promise<FoundPlace[]> {
-  const res = (await tg.request(NAME, { query: q }, (c) =>
+  const res = await tg.request<tl.contacts.RawFound>(NAME, { query: q }, (c) =>
     c.call({ _: "contacts.search", q, limit: 10 }),
-  )) as tl.contacts.RawFound;
+  );
   const chats = res.chats
     .filter((c): c is tl.RawChannel => c._ === "channel" && Boolean(c.username))
     .map((c) => new Chat(c))

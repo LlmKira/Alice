@@ -1,17 +1,29 @@
+import {
+  affordances,
+  type CapabilityResolver,
+  PLATFORM_ACT_KINDS,
+  type PlatformCapabilities,
+  platformSupports,
+  resolveCapabilities,
+} from "../mind/affordances.js";
 import { composeMind, type Mechanism } from "../mind/mechanism.js";
-import { closeness } from "./closeness.js";
 import { errands } from "./errands.js";
-import { examples } from "./examples.js";
 import { failures } from "./failures.js";
 import { closenessCalibrated, familiar } from "./familiar.js";
 import { language } from "./language.js";
 import { missed } from "./missed.js";
-import { paletteComposite } from "./palette.js";
+import { paletteAuthentic } from "./palette.js";
 import { patience, typingPatience } from "./patience.js";
 import { presence } from "./presence.js";
-import { pressureProduction } from "./pressure/index.js";
+import {
+  createPressure,
+  type PlatformAttentionOptions,
+  PRODUCTION,
+  pressureProduction,
+} from "./pressure/index.js";
 import { roomVoiceGolden } from "./room-voice.js";
 import { sceneFacts } from "./scene-facts.js";
+import { stickerBag } from "./stickers.js";
 import { expression, voice } from "./voice.js";
 
 /**
@@ -19,8 +31,6 @@ import { expression, voice } from "./voice.js";
  * 它们是压力场的另一种组成，只在组别里。新增机制只改这里。
  */
 export const allMechanisms: readonly Mechanism[] = [
-  closeness,
-  examples,
   patience,
   typingPatience,
   language,
@@ -31,7 +41,8 @@ export const allMechanisms: readonly Mechanism[] = [
   pressureProduction,
   voice,
   expression,
-  paletteComposite,
+  paletteAuthentic,
+  stickerBag,
   familiar,
   closenessCalibrated,
   roomVoiceGolden,
@@ -46,7 +57,8 @@ export const allMechanisms: readonly Mechanism[] = [
 export const mechanisms: readonly Mechanism[] = [
   pressureProduction,
   familiar,
-  paletteComposite,
+  paletteAuthentic,
+  stickerBag,
   typingPatience,
   language,
   presence,
@@ -73,11 +85,58 @@ export const mechanisms: readonly Mechanism[] = [
 ];
 
 /**
- * 外壳提供的服务决定哪些机制激活（composeMind）：关掉执行代理时（index.ts：没有 EXA_API_KEY 或 ALICE_ERRANDS=off）
- * errands 缺 errand，不激活，SDK 里就没有 look_up。errands 没有状态，带不带它折叠出的状态相同。
+ * 按平台能力声明过滤对外动作：平台不支持的不进提示词、不进 settle；平台独有或按平台开启的
+ * gated 动作（如 QQ 的撤回 unsend）按会话所属平台提供。没有状态，不影响日志折叠。
  */
-export function productionMechanisms(errandsOn: boolean): readonly Mechanism[] {
-  return composeMind(mechanisms, errandsOn ? ["errand"] : []).mechanisms;
+function platformCapabilityMechanism(
+  capabilities: PlatformCapabilities | CapabilityResolver,
+): Mechanism {
+  const resolve = resolveCapabilities(capabilities);
+  const mayUnsend = typeof capabilities === "function" || capabilities.acts.has("unsend");
+  return {
+    name: "platform-capabilities",
+    ...(mayUnsend
+      ? {
+          affordances: ["unsend"] as const,
+          affordancesIn: (scope) => (resolve?.(scope)?.acts.has("unsend") ? ["unsend"] : []),
+        }
+      : {}),
+    withholds: (chat) =>
+      PLATFORM_ACT_KINDS.filter(
+        (kind) => !platformSupports(resolve?.(chat.scope), kind, chat.chatType),
+      ),
+  };
+}
+
+/**
+ * 外壳提供的服务决定哪些机制激活（composeMind）：关掉执行代理时（index.ts：没有 EXA_API_KEY 或 ALICE_ERRANDS=off）
+ * errands 缺 errand，不激活，SDK 里就没有 look_up。errands 没有状态，带不带它 fold 出的状态相同。
+ * 传入平台能力声明（或按会话查询的解析器）时，意愿层（pressure）和发言/落盘层同步按所属平台收口。
+ */
+export function productionMechanisms(
+  errandsOn: boolean,
+  capabilities?: PlatformCapabilities | CapabilityResolver,
+  attention?: PlatformAttentionOptions,
+): readonly Mechanism[] {
+  const list = capabilities ? platformScoped(capabilities, attention)(mechanisms) : mechanisms;
+  return composeMind(list, errandsOn ? ["errand"] : []).mechanisms;
+}
+
+/**
+ * 让一套机制按平台能力收口：生产的压力场换成带能力声明的那一个，末尾加上平台能力那一项。
+ * 返回的函数对几套机制（线上轮换的生产和候选）共用同一批对象：轮换按对象认出哪些机制换了（mind/rotation.ts）。
+ */
+export function platformScoped(
+  capabilities: PlatformCapabilities | CapabilityResolver,
+  attention?: PlatformAttentionOptions,
+): (list: readonly Mechanism[]) => readonly Mechanism[] {
+  const pressure = createPressure(affordances, PRODUCTION, {
+    name: "pressure-production",
+    capabilities,
+    ...(attention ? { attention } : {}),
+  });
+  const scoped = platformCapabilityMechanism(capabilities);
+  return (list) => [...list.map((m) => (m === pressureProduction ? pressure : m)), scoped];
 }
 
 export function byName(names: readonly string[]): readonly Mechanism[] {

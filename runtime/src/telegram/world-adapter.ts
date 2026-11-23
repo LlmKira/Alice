@@ -3,6 +3,7 @@ import {
   getMarkedPeerId,
   type Message,
   type MessageMedia,
+  type Sticker,
   type TelegramClient,
   type tl,
   User,
@@ -39,7 +40,7 @@ export function inviteScope(hash: string): string {
 }
 
 /** 邀请写法的会话 → 邀请码；不是这种写法时为 null。 */
-export function inviteOf(scope: string): string | null {
+function inviteOf(scope: string): string | null {
   const m = scope.startsWith(`${SCOPE_PREFIX}+`) ? scope.slice(SCOPE_PREFIX.length + 1) : null;
   return m && /^[\w-]+$/.test(m) ? m : null;
 }
@@ -167,6 +168,266 @@ const editedOf = (msg: Message) => Boolean(msg.editDate) && !msg.hideEditMark;
 /** 看图、听语音要先把文件下下来。 */
 type Downloader = Pick<TelegramClient, "downloadAsBuffer">;
 
+interface AdapterOptions {
+  selfId: string;
+  selfUsername?: string;
+  /** 不进入时间线的发送者 id（config：ALICE_IGNORED_SENDERS，逗号分隔；真实 id 不进仓库）。 */
+  ignoredSenders?: ReadonlySet<string>;
+  now: () => number;
+  onEvent: (
+    event:
+      | MessageReceived
+      | MessagePerceived
+      | MessageUpdated
+      | PostReceived
+      | ReactionReceived
+      | MembershipChanged
+      | MemberJoined
+      | TypingReceived
+      | HistoryRead,
+  ) => void;
+  /**
+   * 看图片、动图和视频的预览帧，听语音（llm/perceive.ts）；结果作为 message.perceived 晚一点到。
+   * 不给就只写"图片""动图""语音 8 秒"。
+   */
+  perceive?: {
+    image: (jpeg: Uint8Array) => Promise<string>;
+    gif: (jpeg: Uint8Array) => Promise<string>;
+    video: (jpeg: Uint8Array) => Promise<string>;
+    voice: (ogg: Uint8Array) => Promise<string>;
+    sticker?: (
+      meta: { fileId?: string; fileUniqueId?: string; emoji?: string; setTitle?: string },
+      load: () => Promise<Uint8Array>,
+    ) => Promise<string> | string;
+  };
+  warn?: (message: string, error: unknown) => void;
+  /**
+   * 这条消息是不是第一次进来（telegram/catch-up.ts Inbox）：推送和补拉会送来同一条，只认第一次。
+   */
+  admit: (scope: string, messageId: string) => boolean;
+  /** 这个群是不是她这次启动之后才进的、还没记过（catch-up.ts Groups）。 */
+  newGroup: (scope: string) => boolean;
+  /**
+   * 现场事实（telegram/scene.ts Scene）：贴纸那套的标题（查过的直接给，没查过的查到后交给 found），
+   * 一条消息后来的样子里变了的那几样。不给就不记这些。
+   */
+  scene?: {
+    stickerSet: (
+      set: tl.TypeInputStickerSet | null,
+      found: (title: string) => void,
+    ) => string | undefined;
+    changes: (
+      scope: string,
+      messageId: string,
+      seen: { text?: string | null; edited?: boolean; reactions?: readonly Reacted[] },
+      at: number,
+    ) => MessageUpdated | null;
+  };
+}
+
+/**
+ * 入群提示（被拉进来、点链接进来）：别人记成谁刚进了群，她自己记成 membership.changed；都不当成一条空消息
+ * 进时间线。用户账号收不到成员变化的更新（onChatMemberUpdate 线上 22 小时一次也没有），提示是主要的来源。
+ * 退群提示里是她自己：她退了，或被移出了。别人的退群提示照旧（返回 false，当一条消息进来）。
+ * 记下了就返回 true。
+ */
+function membershipNotice(
+  ctx: Message,
+  senderId: string,
+  scope: string,
+  options: AdapterOptions,
+): boolean {
+  const joined = joinedBy(ctx.action, senderId);
+  if (joined) {
+    for (const userId of joined) {
+      options.onEvent(
+        userId === options.selfId
+          ? {
+              type: "membership.changed",
+              at: options.now(),
+              scope,
+              member: true,
+              reason: ctx.action?.type === "users_added" ? "added" : "joined",
+            }
+          : { type: "member.joined", at: options.now(), scope, userId },
+      );
+    }
+    return true;
+  }
+  const left = leftBy(ctx.action, senderId);
+  if (!left || left.userId !== options.selfId) return false;
+  options.onEvent({
+    type: "membership.changed",
+    at: options.now(),
+    scope,
+    member: false,
+    reason: left.reason,
+  });
+  return true;
+}
+
+/** 消息里点了她的名：@她的用户名，或指向她的文字提及。 */
+function mentionsSelf(ctx: Message, options: AdapterOptions): boolean {
+  const username = options.selfUsername?.toLowerCase();
+  for (const entity of ctx.entities ?? []) {
+    if (username && entity.kind === "mention" && entity.text.toLowerCase() === `@${username}`) {
+      return true;
+    }
+    if (entity.is("text_mention") && String(entity.params.userId) === options.selfId) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 贴纸那套的标题：查过的直接给；没查过的查到后作为 message.updated 补上。 */
+function stickerSetOf(ctx: Message, scope: string, options: AdapterOptions): string | undefined {
+  const sticker = ctx.media?.type === "sticker" && ctx.media.hasStickerSet ? ctx.media : null;
+  if (!sticker) return undefined;
+  return options.scene?.stickerSet(sticker.inputStickerSet, (title) =>
+    options.onEvent({
+      type: "message.updated",
+      at: options.now(),
+      scope,
+      messageId: String(ctx.id),
+      stickerSet: title,
+    }),
+  );
+}
+
+function receivedOf(
+  ctx: Message,
+  options: AdapterOptions,
+  known: {
+    senderId: string;
+    isPrivate: boolean;
+    directed: boolean;
+    facts: MediaFacts | null;
+    stickerSet: string | undefined;
+    reactions: Reacted[];
+  },
+): MessageReceived {
+  const { senderId, isPrivate, facts, stickerSet, reactions } = known;
+  const replyId = ctx.replyToMessage?.id;
+  return {
+    type: "message.received",
+    at: options.now(),
+    scope: scopeOf(String(ctx.chat.id)),
+    chatType: isPrivate ? "private" : "group",
+    messageId: String(ctx.id),
+    senderId,
+    senderName: ctx.sender?.displayName ?? senderId,
+    text: ctx.text ? ctx.text.slice(0, 4096) : null,
+    contentType: facts?.type ?? "text",
+    ...(facts ? { media: describeMedia(facts) } : {}),
+    replyToMessageId: replyId == null ? null : String(replyId),
+    directed: known.directed,
+    ...(ctx.chat instanceof User || !ctx.chat.title ? {} : { chatTitle: ctx.chat.title }),
+    ...(ctx.sender instanceof User && ctx.sender.isBot ? { isBot: true as const } : {}),
+    ...(ctx.forward ? { forwardedFrom: ctx.forward.sender.displayName } : {}),
+    ...(stickerSet ? { stickerSet } : {}),
+    ...(editedOf(ctx) ? { edited: true as const } : {}),
+    ...(reactions.length ? { reactions } : {}),
+  };
+}
+
+type Perceive = NonNullable<AdapterOptions["perceive"]>;
+
+/** 要看、要听的那一份：图片、动图和视频的预览帧、不太长的语音；都不是时为 null。 */
+function lookOf(
+  media: MessageMedia,
+  frame: ReturnType<typeof previewFrame>,
+  facts: MediaFacts,
+  perceive: Perceive,
+) {
+  if (media?.type === "photo") {
+    return { file: media, ask: perceive.image, label: (t: string) => `图片：${t}` };
+  }
+  if (frame) {
+    return {
+      file: frame,
+      ask: media?.type === "video" && media.isAnimation ? perceive.gif : perceive.video,
+      label: (t: string) => `${describeMedia(facts)}：${t}`,
+    };
+  }
+  if (media?.type === "voice" && media.duration <= VOICE_MAX_SECONDS) {
+    return {
+      file: media,
+      ask: perceive.voice,
+      label: (t: string) => `${describeMedia(facts)}：“${t}”`,
+    };
+  }
+  return null;
+}
+
+/** 贴纸交给看图时带上的已知信息（有的才带）。 */
+function stickerMetaOf(media: Sticker, stickerSet: string | undefined) {
+  return {
+    ...(media.fileId ? { fileId: media.fileId } : {}),
+    ...(media.uniqueFileId ? { fileUniqueId: media.uniqueFileId } : {}),
+    ...(media.emoji ? { emoji: media.emoji } : {}),
+    ...(stickerSet ? { setTitle: stickerSet } : {}),
+  };
+}
+
+/** 看图、听语音、看贴纸：结果晚一点作为 message.perceived 到。不给 perceive 就什么也不做。 */
+function perceiveMedia(
+  ctx: Message,
+  client: Downloader,
+  facts: MediaFacts,
+  stickerSet: string | undefined,
+  options: AdapterOptions,
+): void {
+  const media = ctx.media;
+  const perceive = options.perceive;
+  if (!perceive) return;
+  const frame = previewFrame(media);
+  const look = lookOf(media, frame, facts, perceive);
+  const stickerAsk = perceive.sticker;
+  if (stickerAsk && !frame && media?.type === "sticker") {
+    const sFrame = stickerFrame(media);
+    if (sFrame) {
+      const meta = stickerMetaOf(media, stickerSet);
+      reportPerceived(
+        ctx,
+        options,
+        Promise.resolve().then(() => stickerAsk(meta, () => client.downloadAsBuffer(sFrame))),
+        (text) => text,
+      );
+    }
+  }
+  if (look) {
+    reportPerceived(
+      ctx,
+      options,
+      client.downloadAsBuffer(look.file).then((bytes) => look.ask(bytes)),
+      look.label,
+    );
+  }
+}
+
+/** 看到、听到的写成 message.perceived；带类型的失败（暂停时不看）是有意没做，不是出错。 */
+function reportPerceived(
+  ctx: Message,
+  options: AdapterOptions,
+  perceived: Promise<string>,
+  label: (text: string) => string,
+): void {
+  void perceived
+    .then((text) =>
+      options.onEvent({
+        type: "message.perceived",
+        at: options.now(),
+        scope: scopeOf(String(ctx.chat.id)),
+        messageId: String(ctx.id),
+        media: label(text),
+      }),
+    )
+    .catch((error) => {
+      if (!(error instanceof Failed)) options.warn?.("Perception failed", error);
+    });
+}
+
 /**
  * 入站适配：把新消息转成 MessageReceived，只记 Telegram 给的事实。directed = 私聊、点名了 Alice、或 Telegram
  * 说了被回复的那条是她的（跨会话的回复才带发送者）。同一个群里回复她的某一条，Telegram 不给被回复者
@@ -175,63 +436,8 @@ type Downloader = Pick<TelegramClient, "downloadAsBuffer">;
  */
 export function bindTelegramWorldAdapter(
   dispatcher: Dispatcher,
-  options: {
-    selfId: string;
-    selfUsername?: string;
-    /** 不进入时间线的发送者 id（config：ALICE_IGNORED_SENDERS，逗号分隔；真实 id 不进仓库）。 */
-    ignoredSenders?: ReadonlySet<string>;
-    now(): number;
-    onEvent(
-      event:
-        | MessageReceived
-        | MessagePerceived
-        | MessageUpdated
-        | PostReceived
-        | ReactionReceived
-        | MembershipChanged
-        | MemberJoined
-        | TypingReceived
-        | HistoryRead,
-    ): void;
-    /**
-     * 看图片、动图和视频的预览帧，听语音（llm/perceive.ts）；结果作为 message.perceived 晚一点到。
-     * 不给就只写"图片""动图""语音 8 秒"。
-     */
-    perceive?: {
-      image(jpeg: Uint8Array): Promise<string>;
-      gif(jpeg: Uint8Array): Promise<string>;
-      video(jpeg: Uint8Array): Promise<string>;
-      voice(ogg: Uint8Array): Promise<string>;
-      sticker?(
-        meta: { fileId?: string; fileUniqueId?: string; emoji?: string; setTitle?: string },
-        load: () => Promise<Uint8Array>,
-      ): Promise<string> | string;
-    };
-    warn?(message: string, error: unknown): void;
-    /**
-     * 这条消息是不是第一次进来（telegram/catch-up.ts Inbox）：推送和补拉会送来同一条，只认第一次。
-     */
-    admit(scope: string, messageId: string): boolean;
-    /** 这个群是不是她这次启动之后才进的、还没记过（catch-up.ts Groups）。 */
-    newGroup(scope: string): boolean;
-    /**
-     * 现场事实（telegram/scene.ts Scene）：贴纸那套的标题（查过的直接给，没查过的查到后交给 found），
-     * 一条消息后来的样子里变了的那几样。不给就不记这些。
-     */
-    scene?: {
-      stickerSet(
-        set: tl.TypeInputStickerSet | null,
-        found: (title: string) => void,
-      ): string | undefined;
-      changes(
-        scope: string,
-        messageId: string,
-        seen: { text?: string | null; edited?: boolean; reactions?: readonly Reacted[] },
-        at: number,
-      ): MessageUpdated | null;
-    };
-  },
-): { receive(msg: Message, client: Downloader): void } {
+  options: AdapterOptions,
+): { receive: (msg: Message, client: Downloader) => void } {
   /** 一条新消息（推送来的，或对话轮询补拉来的）。 */
   const receive = (ctx: Message, client: Downloader): void => {
     const chatId = String(ctx.chat.id);
@@ -250,39 +456,9 @@ export function bindTelegramWorldAdapter(
       });
       return;
     }
-    const senderId = ctx.sender ? String(ctx.sender.id) : "unknown";
+    const senderId = String(ctx.sender.id);
     const scope = scopeOf(chatId);
-    // 入群提示（被拉进来、点链接进来）：别人记成谁刚进了群，她自己记成 membership.changed；都不当成一条空消息
-    // 进时间线。用户账号收不到成员变化的更新（onChatMemberUpdate 线上 22 小时一次也没有），提示是主要的来源。
-    const joined = joinedBy(ctx.action, senderId);
-    if (joined) {
-      for (const userId of joined) {
-        options.onEvent(
-          userId === options.selfId
-            ? {
-                type: "membership.changed",
-                at: options.now(),
-                scope,
-                member: true,
-                reason: ctx.action?.type === "users_added" ? "added" : "joined",
-              }
-            : { type: "member.joined", at: options.now(), scope, userId },
-        );
-      }
-      return;
-    }
-    // 退群提示里是她自己：她退了，或被移出了。别人的退群提示照旧。
-    const left = leftBy(ctx.action, senderId);
-    if (left && left.userId === options.selfId) {
-      options.onEvent({
-        type: "membership.changed",
-        at: options.now(),
-        scope,
-        member: false,
-        reason: left.reason,
-      });
-      return;
-    }
+    if (membershipNotice(ctx, senderId, scope, options)) return;
     // 她自己的消息由外壳在发送成功后记 message.sent。
     if (senderId === options.selfId) return;
     if (options.ignoredSenders?.has(senderId)) return;
@@ -290,19 +466,7 @@ export function bindTelegramWorldAdapter(
     const replySender = ctx.replyToMessage?.sender ?? null;
     const replyToAlice =
       replySender !== null && "id" in replySender && String(replySender.id) === options.selfId;
-
-    let mentioned = false;
-    const username = options.selfUsername?.toLowerCase();
-    for (const entity of ctx.entities ?? []) {
-      if (username && entity.kind === "mention" && entity.text.toLowerCase() === `@${username}`) {
-        mentioned = true;
-        break;
-      }
-      if (entity.is("text_mention") && String(entity.params.userId) === options.selfId) {
-        mentioned = true;
-        break;
-      }
-    }
+    const mentioned = mentionsSelf(ctx, options);
 
     const isPrivate = ctx.chat instanceof User;
     // 这次启动时对话列表里没有、Journal 里也没有过的群：她是刚被拉进来的（入群提示可能根本没送到）。
@@ -315,108 +479,19 @@ export function bindTelegramWorldAdapter(
         reason: "added",
       });
     }
-    const replyId = ctx.replyToMessage?.id;
     const facts = mediaFacts(ctx.media);
-    const sticker = ctx.media?.type === "sticker" && ctx.media.hasStickerSet ? ctx.media : null;
-    const stickerSet = sticker
-      ? options.scene?.stickerSet(sticker.inputStickerSet, (title) =>
-          options.onEvent({
-            type: "message.updated",
-            at: options.now(),
-            scope,
-            messageId: String(ctx.id),
-            stickerSet: title,
-          }),
-        )
-      : undefined;
-    const reactions = reactionsOf(ctx);
-    options.onEvent({
-      type: "message.received",
-      at: options.now(),
-      scope: scopeOf(chatId),
-      chatType: isPrivate ? "private" : "group",
-      messageId: String(ctx.id),
-      senderId,
-      senderName: ctx.sender?.displayName ?? senderId,
-      text: ctx.text ? ctx.text.slice(0, 4096) : null,
-      contentType: facts?.type ?? "text",
-      ...(facts ? { media: describeMedia(facts) } : {}),
-      replyToMessageId: replyId == null ? null : String(replyId),
-      directed: isPrivate || replyToAlice || mentioned,
-      ...(ctx.chat instanceof User || !ctx.chat.title ? {} : { chatTitle: ctx.chat.title }),
-      ...(ctx.sender instanceof User && ctx.sender.isBot ? { isBot: true as const } : {}),
-      ...(ctx.forward ? { forwardedFrom: ctx.forward.sender.displayName } : {}),
-      ...(stickerSet ? { stickerSet } : {}),
-      ...(editedOf(ctx) ? { edited: true as const } : {}),
-      ...(reactions.length ? { reactions } : {}),
-    });
-
-    const media = ctx.media;
-    const perceive = options.perceive;
-    const frame = previewFrame(media);
-    const look =
-      !perceive || !facts
-        ? null
-        : media?.type === "photo"
-          ? { file: media, ask: perceive.image, label: (t: string) => `图片：${t}` }
-          : frame
-            ? {
-                file: frame,
-                ask: media?.type === "video" && media.isAnimation ? perceive.gif : perceive.video,
-                label: (t: string) => `${describeMedia(facts)}：${t}`,
-              }
-            : media?.type === "voice" && media.duration <= VOICE_MAX_SECONDS
-              ? {
-                  file: media,
-                  ask: perceive.voice,
-                  label: (t: string) => `${describeMedia(facts)}：“${t}”`,
-                }
-              : media?.type === "sticker" && perceive.sticker
-                ? (() => {
-                    const stickerAsk = perceive.sticker;
-                    const sFrame = stickerFrame(media);
-                    if (!sFrame || !stickerAsk) return null;
-                    const meta = {
-                      ...(media.fileId ? { fileId: media.fileId } : {}),
-                      ...(media.uniqueFileId ? { fileUniqueId: media.uniqueFileId } : {}),
-                      ...(media.emoji ? { emoji: media.emoji } : {}),
-                      ...(stickerSet ? { setTitle: stickerSet } : {}),
-                    };
-                    void Promise.resolve()
-                      .then(() => stickerAsk(meta, () => client.downloadAsBuffer(sFrame)))
-                      .then((text) =>
-                        options.onEvent({
-                          type: "message.perceived",
-                          at: options.now(),
-                          scope: scopeOf(chatId),
-                          messageId: String(ctx.id),
-                          media: text,
-                        }),
-                      )
-                      .catch((error) => {
-                        if (!(error instanceof Failed)) options.warn?.("Perception failed", error);
-                      });
-                    return null;
-                  })()
-                : null;
-    if (look) {
-      void client
-        .downloadAsBuffer(look.file)
-        .then((bytes) => look.ask(bytes))
-        .then((text) =>
-          options.onEvent({
-            type: "message.perceived",
-            at: options.now(),
-            scope: scopeOf(chatId),
-            messageId: String(ctx.id),
-            media: look.label(text),
-          }),
-        )
-        // 带类型的失败（暂停时不看）是有意没做，不是出错。
-        .catch((error) => {
-          if (!(error instanceof Failed)) options.warn?.("Perception failed", error);
-        });
-    }
+    const stickerSet = stickerSetOf(ctx, scope, options);
+    options.onEvent(
+      receivedOf(ctx, options, {
+        senderId,
+        isPrivate,
+        directed: isPrivate || replyToAlice || mentioned,
+        facts,
+        stickerSet,
+        reactions: reactionsOf(ctx),
+      }),
+    );
+    if (facts) perceiveMedia(ctx, client, facts, stickerSet, options);
   };
 
   dispatcher.onNewMessage(async (ctx) => receive(ctx, ctx.client));
@@ -425,7 +500,6 @@ export function bindTelegramWorldAdapter(
   const scene = options.scene;
   if (scene)
     dispatcher.onEditMessage(async (ctx) => {
-      if (!ctx.sender) return;
       if (!(ctx.chat instanceof User) && ctx.chat.chatType === "channel") return;
       const senderId = String(ctx.sender.id);
       if (senderId === options.selfId || options.ignoredSenders?.has(senderId)) return;

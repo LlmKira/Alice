@@ -12,13 +12,19 @@ import { createGateway, type Spent } from "../src/llm/gateway.js";
 
 const NOW = Date.UTC(2026, 10, 12, 7, 0); // 东八区 11 月 12 日 15:00
 
-type Call = { name: string; arguments: string };
+interface Call {
+  name: string;
+  arguments: string;
+}
 /** 假的网关和 exa：模型按 script 依次回话；记下每次请求的工具选项。 */
 function fakeNet(script: Array<Call[] | string>, exaCost = 0.007) {
   const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
   const f = (async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
-    const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+    const body =
+      typeof init?.body === "string" && init.body !== ""
+        ? (JSON.parse(init.body) as Record<string, unknown>)
+        : {};
     requests.push({ url, body });
     if (url.includes("/chat/completions")) {
       const next = script.shift() ?? "";
@@ -133,7 +139,7 @@ describe("the executor hands back a short fact with sources it actually saw", ()
   });
 
   it("a gateway failure is reported in her words and still carries what was spent", async () => {
-    const f = (async () => new Response("down", { status: 503 })) as unknown as typeof fetch;
+    const f: typeof fetch = async () => new Response("down", { status: 503 });
     const error = await runErrand("查", null, opts(f)).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ErrandError);
     expect((error as ErrandError).message).toBe("网上那边出了点问题，没查成");

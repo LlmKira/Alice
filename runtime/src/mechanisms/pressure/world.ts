@@ -1,10 +1,10 @@
 /**
- * 世界层：从事件折叠出的实体图（论文 §2 Ontology 的子集），纯函数，时间只来自 event.at。
+ * 世界层：从事件 fold 出的实体图（论文 §2 Ontology 的子集），纯函数，时间只来自 event.at。
  * 实体：会话（channel）、线程（thread，只从环境确定性地推出：别人对她说的话停在那里、她没接）、她每次开口得到的
  * 反应（reception），以及她自己记下的事实、承诺、跟着的事（memory.ts）。关于人的事实（名字、看见的、有往来、
- * 亲近、回避）不在这里：只有 relation 折进 relations（relation.ts）。这里另留意愿层自己的结局（willingness：
+ * 亲近、回避）不在这里：只有 relation fold 进 relations（relation.ts）。这里另留意愿层自己的结局（willingness：
  * 想过、决定先不找他）。
- * 压力场的各样东西（feature.ts）各自折叠自己的那几块：心情（affect）、生活（life）、够得着的地方和频道里看到的
+ * 压力场的各样东西（feature.ts）各自 fold 自己的那几块：心情（affect）、生活（life）、够得着的地方和频道里看到的
  * 帖子（reach，P2 信息的来源）、关于人和群记得的事（people）。
  * 这里只记"发生了什么"，不算压力。
  */
@@ -19,7 +19,7 @@ import { type AliceEvent, type ChatType, NEGATIVE_REACTIONS } from "../../mind/e
 import type { TimelineEntry } from "../../mind/state.js";
 import type { MissedState } from "../missed.js";
 import { type AffectState, initialAffect } from "./affect.js";
-import type { Activity } from "./availability.js";
+import type { AttachmentState } from "./attachment.js";
 import type { PostsState } from "./desire.js";
 import type { DiaryEntry } from "./diary.js";
 import type { FairnessState } from "./fairness.js";
@@ -61,7 +61,7 @@ import {
   type Willingness,
 } from "./relation.js";
 
-/** 会话里还记着的别人的消息（可供性"有没有可回应的消息"用）。 */
+/** 会话里还记着的别人的消息（affordance"有没有可回应的消息"用）。 */
 const RECENT_IDS = 30;
 const RECENT_RECEPTIONS = 20;
 
@@ -72,7 +72,7 @@ const RECENT_RECEPTIONS = 20;
  * 说话却没人理她、窗口内根本没人说话、被拒绝（踢出、拉黑，或可插拔分类器判定的明确拒绝）、被嫌弃（cold：她的话上
  * 被点了负面表情，NEGATIVE_REACTIONS，一次轻的拒绝）。
  */
-export type ReceptionKind = "replied" | "taken" | "ignored" | "unheard" | "rejected" | "cold";
+type ReceptionKind = "replied" | "taken" | "ignored" | "unheard" | "rejected" | "cold";
 
 export interface Reception {
   at: number;
@@ -99,7 +99,7 @@ interface Awaiting {
 }
 
 /** 一条没接的话（论文 Def P4 的线程，从环境推出）。 */
-export interface Thread {
+interface Thread {
   openedAt: number;
   weight: number;
 }
@@ -154,7 +154,7 @@ export interface ChatNode {
   /** 连续选择沉默或失败的次数（σ_fail），她说出话或被点名时归零。 */
   silences: number;
   silencesAt: number;
-  /** 习惯化 H(v)（论文 §3 Habituation，ADR-222）。 */
+  /** habituation H(v)（论文 §3 Habituation，ADR-222）。 */
   habit: number;
   habitAt: number;
   /** 她上一次主动开口（不是接话）的时刻（σ_cool）。 */
@@ -190,12 +190,8 @@ export interface TurnSignals {
   bondAt: number;
   /** 最近几条别人的话的词（算 idf 的背景，有界）。 */
   recent: readonly (readonly string[])[];
-  /** 她在场时看过、决定不说的时刻：这段对话她放下了，直到她再开口。 */
-  leftAt: number;
   /** 她在这段对话里（turn.ts dwell）：从哪一轮开口起、之后别人说了几条、怎么结束的。 */
   dwell: Dwell;
-  /** 她看着这段对话、还没开口（turn.ts follow）：从哪一次看起、之后别人说了几条、怎么结束的。 */
-  watch: Watch;
   /** 群里的人嫌她的程度（turn.ts rejection），按人记。 */
   rejection: Rejection;
 }
@@ -220,19 +216,6 @@ export const NO_REJECTION: Rejection = {
   recovered: { n: 0, ms: 0 },
 };
 
-/** 她看着的一段对话为什么不看了：冷下来了、从她看起又过了 K 条、她开口了（之后是 dwell）。 */
-export type WatchEnd = "cooled" | "passed-by" | "joined";
-
-export interface Watch {
-  /** 从哪一次看起（0：没在看）。 */
-  from: number;
-  /** 从那时起别人说了几条。 */
-  after: number;
-  ended: { at: number; why: WatchEnd } | null;
-}
-
-export const NO_WATCH: Watch = { from: 0, after: 0, ended: null };
-
 /** 一段她在里面的对话为什么结束：冷下来了、从她身边过去了、她看过决定不说。 */
 export type DwellEnd = "cooled" | "passed-by" | "declined";
 
@@ -253,16 +236,14 @@ export const NO_TURN: TurnSignals = {
   bond: 0,
   bondAt: 0,
   recent: [],
-  leftAt: 0,
   dwell: NO_DWELL,
-  watch: NO_WATCH,
   rejection: NO_REJECTION,
 };
 
 export interface World {
   chats: Readonly<Record<string, ChatNode>>;
   /**
-   * 意愿层自己的结局（"想过、决定先不找他"的 consideredAt 与连着几次）：不是关系，留在世界底座。
+   * 意愿层自己的结局（"想过、决定先不找他"的 consideredAt 与连着几次）：不是关系，留在世界 base。
    * 关于人的事实（名字、看见的、有往来、亲近、回避）在 relations（relation.ts）。
    */
   willingness: Readonly<Record<string, Willingness>>;
@@ -281,18 +262,16 @@ export interface World {
   affect: AffectState;
   /** 她的日记（diary.ts）：她顺手写的（feb），或反思时写的（reflect）。 */
   diary: readonly DiaryEntry[];
-  /** 每个会话里她经历了多少，自上次在那里反思起（只有 reflect 的日记写法折叠它，diary.ts involve）。 */
+  /** 每个会话里她经历了多少，自上次在那里反思起（只有 reflect 的日记写法 fold 它，diary.ts involve）。 */
   involvement: Readonly<Record<string, number>>;
   /** 她心里想过的（候选 feb-thought）：只有提供"想"能力时才会有。 */
   thoughts: readonly ThoughtLine[];
-  /** 每个说过话的人最近几十天在哪些钟点出现过（世界在线份额 A(h)，availability.ts）。 */
-  activity: Readonly<Record<string, Activity>>;
-  /** 她自己最近说过的话（跨会话、只有文字、有界）：行动回声和候选 groupturn 的话题有关读它。 */
+  /** 她自己最近说过的话（跨会话、只有文字、有界）：行动回声和群里拉力的话题有关（group-pull.ts）读它。 */
   said: readonly SaidLine[];
   /** 发言调用连续失败了几次、最后一次在何时（任何会话；一次成功的决定清零）：节律按它退避。 */
   callFailures: { count: number; at: number };
-  // 下面几块各归压力场的一样东西（feature.ts）折叠；组成里没有那一样时一直是空的。
-  /** 她自己的生活（life.ts），从 noise.drawn 折叠。 */
+  // 下面几块各归压力场的一样东西（feature.ts）fold；组成里没有那一样时一直是空的。
+  /** 她自己的生活（life.ts），从 noise.drawn fold。 */
   life: LifeState;
   /** 她够得着、但还没有会话的地方（reach.ts：在群里认识的人、看过预览的群、频道里看到的帖子）。 */
   reach: ReachState;
@@ -302,7 +281,7 @@ export interface World {
   bedAt?: number;
   /** 她上次看消息之后别处来了多少（missed.ts withMissed，作息那一格）；组成里没有时没有这一项。 */
   missed?: MissedState;
-  /** 最近一天每个会话的原话（群聊记录 context.ts 折叠）；组成里没有那一样时没有这一项。 */
+  /** 最近一天每个会话的原话（群聊记录 context.ts fold）；组成里没有那一样时没有这一项。 */
   transcript?: Readonly<Record<string, readonly TimelineEntry[]>>;
   /** 每个会话里她最后一次看过记录的时刻（context.ts 带回沉底的找她的话时用）；组成里没有时没有这一项。 */
   seenAt?: Readonly<Record<string, number>>;
@@ -316,9 +295,11 @@ export interface World {
   feedback?: ReceptionFeedbackState;
   /** 注意力公平与第一次私聊节奏（候选 fairness.ts）；组成里没有时没有这一项。 */
   fairness?: FairnessState;
+  /** ADR-299 按人的牵挂引力与未消深疤（候选 attachment.ts）；组成里没有时没有这一项。 */
+  attachment?: AttachmentState;
 }
 
-export interface SaidLine {
+interface SaidLine {
   at: number;
   scope: string;
   text: string;
@@ -332,7 +313,7 @@ export interface ThoughtLine extends SaidLine {
 }
 
 /** 她自己的话留这么多行（约一天的量）。 */
-export const SAID_KEPT = 40;
+const SAID_KEPT = 40;
 
 export const emptyWorld: World = {
   chats: {},
@@ -347,7 +328,6 @@ export const emptyWorld: World = {
   diary: [],
   involvement: {},
   thoughts: [],
-  activity: {},
   said: [],
   callFailures: { count: 0, at: 0 },
   life: emptyLife,
@@ -449,7 +429,7 @@ function withRhythm(c: ChatNode, at: number): ChatNode {
   return { ...c, lastAnyAt: at, gapEma };
 }
 
-/** 看了一眼：未读清零，习惯化 +1（论文 Eq habituation-state）。 */
+/** 看了一眼：未读清零，habituation +1（论文 Eq habituation-state）。 */
 function looked(c: ChatNode, at: number): ChatNode {
   return {
     ...c,
@@ -463,7 +443,7 @@ function looked(c: ChatNode, at: number): ChatNode {
 
 /**
  * 想过、决定先不（或主动找过了）：冷却与群聊存在感从此刻重新长起——"考虑过就消耗"这条规则只在这里
- * （2026-11-11 理论伙伴写成公理）。答应的事由记忆（recall.ts memory）在同一条事件上折：世界折叠不再写它。
+ * （2026-11-11 理论伙伴写成公理）。答应的事由记忆（recall.ts memory）在同一条事件上折：世界 fold 不再写它。
  */
 function considered(c: ChatNode, at: number): ChatNode {
   return { ...c, consideredAt: at };
@@ -540,7 +520,7 @@ function welcomeGain(c: ChatNode, kind: ReceptionKind, at: number): number {
 }
 
 /** 群里每个人最近说了几轮淡掉一半的时长。手设：一个白天里的几段对话都还算数。 */
-export const VOICE_HALF_LIFE = 6 * 3_600_000;
+const VOICE_HALF_LIFE = 6 * 3_600_000;
 
 /** 淡掉之后此刻的计数。 */
 export function voicesAt(c: ChatNode, at: number): { by: Record<string, number>; her: number } {
@@ -570,7 +550,7 @@ const WELCOME_FLOOR = -0.5;
 /** 这个群平时被接的比例按这个半衰期淡掉旧的。手设。 */
 const USUAL_HALF_LIFE = 24 * 3_600_000;
 
-/** 别人的一条话折进这个群的常态：换了人或隔开了就是新的一轮；紧挨着上一个别人、UPTAKE_LINK 之内，那一轮算被接。 */
+/** 别人的一条话 fold 进这个群的常态：换了人或隔开了就是新的一轮；紧挨着上一个别人、UPTAKE_LINK 之内，那一轮算被接。 */
 function withUsual(prev: ChatNode, sender: string, at: number): ChatNode["usual"] {
   const u = prev.usual;
   const keep = (n: number) => halfLife(n, at - u.at, USUAL_HALF_LIFE);
@@ -656,11 +636,7 @@ export function isSolicited(chat: ChatNode, at: number): boolean {
 }
 
 /**
- * 可插拔的"明确拒绝"分类器：判断一条进来的消息是不是在拒绝她刚才的话。
- * 默认没有（不接 LLM，也不用关键词匹配做语义判断）；以后可以接一个带类型结果的判断。
- */
-/**
- * 世界折叠之前：reach 候选在一个还没有的会话里做了决定（或开了口、动作做完或失败），由世界底座建出它。
+ * 世界 fold 之前：reach 候选在一个还没有的会话里做了决定（或开了口、动作做完或失败），由世界 base 建出它。
  * 不运行时导入 reach.ts，避免模块循环依赖。
  */
 function openReachOnUse(world: World, event: AliceEvent): World {
@@ -669,32 +645,47 @@ function openReachOnUse(world: World, event: AliceEvent): World {
     case "speech.failed":
     case "message.sent":
     case "act.done":
-    case "act.failed": {
-      const { scope } = event;
-      if (world.chats[scope]) return world;
-      const place = world.reach.places[scope];
-      if (place) {
-        return put(world, scope, {
-          ...freshChat("group"),
-          member: false,
-          place: { seenAt: place.seenAt },
-        });
-      }
-      for (const [id, met] of Object.entries(world.reach.met)) {
-        const i = met.scope.lastIndexOf(":");
-        const dm = i < 0 ? id : `${met.scope.slice(0, i + 1)}${id}`;
-        if (dm !== scope) continue;
-        return (relationView(world, id)?.lastBondAt ?? 0) > 0
-          ? put(world, scope, { ...freshChat("private"), partner: id })
-          : world;
-      }
-      return world;
-    }
+    case "act.failed":
+      return openReachChat(world, event.scope);
     default:
       return world;
   }
 }
+
+/** 在 reach 里够得着的地方或认识的人那里建出还没有的会话；够不着、没来往过的不建。 */
+function openReachChat(world: World, scope: string): World {
+  if (world.chats[scope]) return world;
+  const place = world.reach.places[scope];
+  if (place) {
+    return put(world, scope, {
+      ...freshChat("group"),
+      member: false,
+      place: { seenAt: place.seenAt },
+    });
+  }
+  const met = Object.entries(world.reach.met).find(
+    ([id, { scope: where }]) => dmScopeOf(where, id) === scope,
+  );
+  if (!met) return world;
+  const [id] = met;
+  return (relationView(world, id)?.lastBondAt ?? 0) > 0
+    ? put(world, scope, { ...freshChat("private"), partner: id })
+    : world;
+}
+
+/** 和一个人的私聊 scope：认识他的那个会话的 scope 保留最后一个冒号及之前的部分，后面换成他的 id。 */
+function dmScopeOf(metScope: string, id: string): string {
+  const i = metScope.lastIndexOf(":");
+  return i < 0 ? id : `${metScope.slice(0, i + 1)}${id}`;
+}
+
+/**
+ * 可插拔的"明确拒绝"分类器：判断一条进来的消息是不是在拒绝她刚才的话。
+ * 默认没有（不接 LLM，也不用关键词匹配做语义判断）；以后可以接一个带类型结果的判断。
+ */
 export type RejectionClassifier = (event: AliceEvent, chat: ChatNode) => boolean;
+
+type EventOf<T extends AliceEvent["type"]> = Extract<AliceEvent, { type: T }>;
 
 /** 一个事件进来，世界怎么变。 */
 export function reduceWorld(
@@ -702,246 +693,292 @@ export function reduceWorld(
   event: AliceEvent,
   rejected: RejectionClassifier = () => false,
 ): World {
-  let w = world.firstAt > 0 ? world : { ...world, firstAt: event.at };
-  w = openReachOnUse(w, event);
-  if (event.type === "clock.tick") {
-    // 时间走了：把等反应窗口已过的会话结算掉（冷落要在没有新消息时也能被觉察）。
-    let chats: Record<string, ChatNode> | null = null;
-    for (const [scope, c] of Object.entries(w.chats)) {
-      const s = settle(c, event.at);
-      if (s === c) continue;
-      chats = chats ?? { ...w.chats };
-      chats[scope] = s;
-    }
-    return chats ? { ...w, chats } : w;
-  }
+  const w = openReachOnUse(world.firstAt > 0 ? world : { ...world, firstAt: event.at }, event);
   switch (event.type) {
-    case "message.received": {
-      const prev = settle(w.chats[event.scope] ?? freshChat(event.chatType), event.at);
-      const worthy = isGroupAttentionWorthy(event);
-      let c: ChatNode = withRhythm(
-        {
-          ...prev,
-          partner: event.chatType === "private" ? event.senderId : prev.partner,
-          seen: prev.seen + 1,
-          recentIds: [...prev.recentIds, event.messageId].slice(-RECENT_IDS),
-          recentFrom: [...prev.recentFrom, event.senderId].slice(-RECENT_IDS),
-          unread: worthy ? prev.unread + 1 : prev.unread,
-          ewms: worthy
-            ? halfLife(prev.ewms, event.at - prev.ewmsAt, UNREAD_HALF_LIFE) + 1
-            : prev.ewms,
-          ewmsAt: worthy ? event.at : prev.ewmsAt,
-          lastIncomingAt: worthy ? event.at : prev.lastIncomingAt,
-          incoming: worthy
-            ? [...within(prev.incoming, event.at, COST_WINDOW), event.at]
-            : prev.incoming,
-          effort: worthy ? withEffort(prev, event.at, 0, effortWeight(event.text)) : prev.effort,
-          ...(event.chatType === "group"
-            ? {
-                usual: withUsual(prev, event.senderId, event.at),
-                voices: withVoice(prev, event.senderId, event.at),
-              }
-            : {}),
-          ...(event.chatTitle ? { title: event.chatTitle } : {}),
-        },
-        event.at,
-      );
-      const toHer = event.directed || event.chatType === "private";
-      if (event.directed) {
-        c = { ...c, pending: c.pending + 1, lastDirectedAt: event.at, silences: 0 };
-      }
-      // 别人对她说的话停在这里：开一条线程，直到她接（论文 Def P4，权重按会话类型）。
-      if (toHer && !c.thread)
-        c = { ...c, thread: { openedAt: event.at, weight: THREAD_WEIGHT[event.chatType] } };
-      // 有人回应了她：对她说、回复她的话；群里还有北极星"接她"的口径（PLAN 第 43 件）——紧挨着她的话、
-      // UPTAKE_LINK 之内说的，或者她刚接的那个人 UPTAKE_LINK 之内接着说。她对没回应的连发归零；群里别人自己聊天不算。
-      const sinceHer = event.at - prev.lastAliceAt;
-      const takenUp =
-        event.chatType === "group" &&
-        prev.awaiting !== null &&
-        sinceHer <= UPTAKE_LINK &&
-        (prev.lastAliceAt > prev.lastIncomingAt || prev.awaiting.to === event.senderId);
-      const replying =
-        toHer ||
-        (event.replyToMessageId !== null &&
-          (c.awaiting?.ids.includes(event.replyToMessageId) ?? false));
-      const answering = replying || takenUp;
-      if (answering) c = { ...c, outgoing: 0 };
-      if (c.awaiting) {
-        if (rejected(event, c)) c = withReception(c, event.at, "rejected", event.senderId);
-        else if (replying) c = withReception(c, event.at, "replied", event.senderId);
-        else if (takenUp) c = withReception(c, event.at, "taken", event.senderId);
-        else c = { ...c, awaiting: { ...c.awaiting, others: c.awaiting.others + 1 } };
-      }
-      const count = w.relations.people[event.senderId]?.seen.count ?? 0;
-      // novelty：对这个人的预测有多不确定，σ = 1/(1+n/10)（论文 Remark per-contact surprise 的 σ_c）
-      return {
-        ...put(w, event.scope, c),
-        novelty:
-          efold(w.novelty, event.at - w.noveltyAt, NOVELTY_TAU) +
-          1 / (1 + count / SIGMA_HALF_COUNT),
-        noveltyAt: event.at,
-      };
-    }
-    case "message.sent": {
-      const found = w.chats[event.scope];
-      if (!found) return w;
-      const prev = settle(found, event.at);
-      const newTurn = event.at - prev.lastAliceAt > TURN_GAP;
-      // 她这一轮接的是谁：开口前 UPTAKE_LINK 之内紧挨着的那条别人的话。
-      const answered =
-        prev.lastIncomingAt > prev.lastAliceAt && event.at - prev.lastIncomingAt <= UPTAKE_LINK
-          ? prev.recentFrom.at(-1)
-          : undefined;
-      const c: ChatNode = withRhythm(
-        {
-          ...prev,
-          // 答应过的事（chats.commitments）只由记忆（recall.ts memory）折，世界折叠不再写它。
-          lastAliceAt: event.at,
-          // 行动消耗驱动它的信号（ADR-218/270）：读了、回了，未读、义务、线程清零（论文 Def P5）。
-          unread: 0,
-          ewms: 0,
-          ewmsAt: event.at,
-          pending: 0,
-          thread: null,
-          awaiting: prev.awaiting
-            ? { ...prev.awaiting, ids: [...prev.awaiting.ids, event.messageId] }
-            : {
-                turnAt: event.at,
-                ids: [event.messageId],
-                others: 0,
-                ...(isSolicited(prev, event.at) ? {} : { proactive: true }),
-                ...(answered ? { to: answered } : {}),
-              },
-          outgoing: halfLife(prev.outgoing, event.at - prev.outgoingAt, outHalfLife(prev)) + 1,
-          outgoingAt: event.at,
-          silences: 0,
-          lastProactiveAt: isSolicited(prev, event.at) ? prev.lastProactiveAt : event.at,
-          turns: newTurn ? [...within(prev.turns, event.at, SAT.rateWindow), event.at] : prev.turns,
-          effort: newTurn ? withEffort(prev, event.at, 1, 0) : prev.effort,
-          voices: prev.chatType === "group" ? withVoice(prev, null, event.at) : prev.voices,
-        },
-        event.at,
-      );
-      const next: World = {
-        ...put(w, event.scope, c),
-        turns: newTurn ? [...within(w.turns, event.at, COST_WINDOW), event.at] : w.turns,
-        said:
-          event.kind !== "text" && event.kind !== "voice"
-            ? w.said
-            : [...w.said, { at: event.at, scope: event.scope, text: event.text }].slice(-SAID_KEPT),
-      };
-      // 主动找了对方：想联系的冲动由"找过了"满足，从此刻重新长起；关系本身（lastBondAt）不变，
-      // 一直没回照样积累回避。否则冲动不减，对方不在时她会一条接一条地发
-      // （memory-eval：对方一直没回时她最多连发 27 轮）。
-      if (isSolicited(prev, event.at)) return next;
-      return partnerConsidered(
-        put(next, event.scope, { ...c, consideredAt: event.at }),
-        prev,
-        event.at,
-      );
-    }
-    case "speech.decided": {
-      w = { ...w, lastCallAt: event.at, callFailures: { count: 0, at: 0 } };
-      const prev = w.chats[event.scope];
-      if (!prev) return w;
-      // 只标已读、只在心里记一笔都不算回应；说话、贴纸、表情、退群都是可见的行动。
-      const silent = isSilent(event.decision.acts);
-      const left = event.decision.acts.some(leaves);
-      // 看过了：未读清零；选择不回也是义务和线程的一个有类型的结局（ADR-270），一并清零。
-      // 想过、没走：离开的冲动也是考虑过就消耗，不然被冷落的热闹群里每个节律格都会为"要不要走"
-      // 叫醒她一次（eval-artifacts/cliff/notes.md）。
-      const c: ChatNode = {
-        ...looked(prev, event.at),
-        pending: 0,
-        thread: silent ? null : prev.thread,
-        stayedAt: left ? prev.stayedAt : event.at,
-      };
-      if (!silent) return put(w, event.scope, c);
-      // 没人找她时想过要不要说、决定先不：冷却与群聊存在感从此刻重新长起，而不是一分钟后再问一遍
-      // （will/prereg 零成本估算：不消耗时私聊每天被反复斟酌约 16 次）。选择沉默记一笔（σ_fail）。
-      // "有人等她、她没回"有时限（isSolicited）：对方道了晚安、半年没再说话，之后每一次想过、决定先不，
-      // 都消耗冷却并退避。
-      if (isSolicited(prev, event.at)) return put(w, event.scope, withFailure(c, event.at));
-      return partnerConsidered(
-        put(w, event.scope, withFailure(considered(c, event.at), event.at)),
-        prev,
-        event.at,
-      );
-    }
+    case "clock.tick":
+      return settleAll(w, event.at);
+    case "message.received":
+      return receiveMessage(w, event, rejected);
+    case "message.sent":
+      return sendMessage(w, event);
+    case "speech.decided":
+      return decideSpeech(w, event);
     case "message.perceived":
       // 外壳判出的口气：敌意的那条不算一次往来（relation.ts 退回那一段）。
       return w;
-    case "reaction.received": {
-      // 有人在她这一轮的话上点了表情。正面、中性的是一次回应（轻，但有人看见了她、给了反应）；负面的（👎、🤡、💩……）
-      // 是一次轻的拒绝：不算回应、不续关系、不清连发，回避加一点（北极星读数同样把它算作嫌弃）。
-      const prev = w.chats[event.scope];
-      if (!prev?.awaiting?.ids.includes(event.messageId)) return w;
-      if (NEGATIVE_REACTIONS.has(event.emoji)) {
-        return put(
-          w,
-          event.scope,
-          withReception(prev, event.at, "cold", event.senderId, event.emoji),
-        );
-      }
-      const c = withReception(prev, event.at, "replied", event.senderId, event.emoji);
-      return put(w, event.scope, { ...c, outgoing: 0 });
-    }
+    case "reaction.received":
+      return receiveReaction(w, event);
     case "chat.described":
-      // 群里禁发的消息种类：发言提示里由 scene-facts 的 withholds 拿掉对应的动作，意愿层读同一份（ADR-276）。
+      // 群里禁发的消息种类：发言提示里由 scene-facts 的 withholds 去掉对应的动作，意愿层读同一份（ADR-276）。
       // 群的样子可能比这个群的第一条消息先到，所以不挂在会话上。
       return { ...w, bans: { ...w.bans, [event.scope]: event.banned } };
-    case "membership.changed": {
-      const prev = w.chats[event.scope];
-      if (!prev) return w;
-      // 被踢是最明确的拒绝；自己离开、被拉进来只改成员身份。
-      const c = event.reason === "kicked" ? withReception(prev, event.at, "rejected", null) : prev;
-      return put(w, event.scope, { ...c, member: event.member });
-    }
-    case "act.done": {
-      const row = affordanceOf(event.act.kind);
-      // 她心里的事由提供它的那一样折进世界（feature.ts）。
-      if (row.via === "mind") return w;
-      const prev = w.chats[event.scope];
-      const member = memberAfter(row);
-      return prev && member !== undefined ? put(w, event.scope, { ...prev, member }) : w;
-    }
-    case "act.failed": {
-      // 被对方拉黑（telegram/errors 的 refused）是明确的拒绝；其余失败只抬高 σ_fail。
-      const prev = w.chats[event.scope];
-      if (!prev) return w;
-      const c = event.reason === "refused" ? withReception(prev, event.at, "rejected", null) : prev;
-      return put(w, event.scope, withFailure(c, event.at));
-    }
-    case "chat.glanced": {
-      // 看了一眼（没有调用模型，glance.ts）：只消耗看了就缓解的东西——未读清零、习惯化 +1。她没想过要不要说，
-      // 所以冷却、群聊存在感、离开的冲动、σ_fail 都不动：存在感照样长，长到说一句比看一眼更值时才叫醒她斟酌。
-      // 看一眼是她在节律到点时做的那件事，节律也从这里重新数：她看手机的节奏不变，只是这一次不用想。
-      const prev = w.chats[event.scope];
-      const paced = { ...w, lastCallAt: event.at };
-      return prev ? put(paced, event.scope, looked(prev, event.at)) : paced;
-    }
-    case "speech.failed": {
-      // 没看到、没回成：有人在等她时，义务、线程、未读都留着，好再试。没人找她时，这次就当看了一眼、
-      // 想过、决定先不（与沉默的决定一样），所以失败不会比沉默更勤（研究伙伴 switching-scan/prereg-backoff：
-      // 否则失败率 0.5 时调用多 33%）；节律从这次尝试重新数，并按连续失败次数再退避。
-      const failed: World = {
-        ...w,
-        lastCallAt: event.at,
-        callFailures: { count: w.callFailures.count + 1, at: event.at },
-      };
-      const prev = w.chats[event.scope];
-      if (!prev) return failed;
-      if (isSolicited(prev, event.at)) return put(failed, event.scope, withFailure(prev, event.at));
-      const c = withFailure(
-        { ...considered(looked(prev, event.at), event.at), stayedAt: event.at },
-        event.at,
-      );
-      return partnerConsidered(put(failed, event.scope, c), prev, event.at);
-    }
+    case "membership.changed":
+      return changeMembership(w, event);
+    case "act.done":
+      return finishAct(w, event);
+    case "act.failed":
+      return failAct(w, event);
+    case "speech.failed":
+      return failSpeech(w, event);
     default:
       return w;
   }
+}
+
+/** 时间走了：把等反应窗口已过的会话结算掉（冷落要在没有新消息时也能被觉察）。 */
+function settleAll(w: World, at: number): World {
+  let chats: Record<string, ChatNode> | null = null;
+  for (const [scope, c] of Object.entries(w.chats)) {
+    const s = settle(c, at);
+    if (s === c) continue;
+    chats = chats ?? { ...w.chats };
+    chats[scope] = s;
+  }
+  return chats ? { ...w, chats } : w;
+}
+
+/** 进来一条消息后会话的计数和节律；群里别人之间的闲聊（不值得注意的）只记见过，不涨未读、义务和代价。 */
+function withIncoming(prev: ChatNode, event: EventOf<"message.received">): ChatNode {
+  const worthy = isGroupAttentionWorthy(event);
+  return withRhythm(
+    {
+      ...prev,
+      partner: event.chatType === "private" ? event.senderId : prev.partner,
+      seen: prev.seen + 1,
+      recentIds: [...prev.recentIds, event.messageId].slice(-RECENT_IDS),
+      recentFrom: [...prev.recentFrom, event.senderId].slice(-RECENT_IDS),
+      ...(worthy
+        ? {
+            unread: prev.unread + 1,
+            ewms: halfLife(prev.ewms, event.at - prev.ewmsAt, UNREAD_HALF_LIFE) + 1,
+            ewmsAt: event.at,
+            lastIncomingAt: event.at,
+            incoming: [...within(prev.incoming, event.at, COST_WINDOW), event.at],
+            effort: withEffort(prev, event.at, 0, effortWeight(event.text)),
+          }
+        : {}),
+      ...(event.chatType === "group"
+        ? {
+            usual: withUsual(prev, event.senderId, event.at),
+            voices: withVoice(prev, event.senderId, event.at),
+          }
+        : {}),
+      ...(event.chatTitle ? { title: event.chatTitle } : {}),
+    },
+    event.at,
+  );
+}
+
+/**
+ * 有人回应了她：对她说、回复她的话；群里还有北极星"接她"的口径（PLAN 第 43 件）——紧挨着她的话、
+ * UPTAKE_LINK 之内说的，或者她刚接的那个人 UPTAKE_LINK 之内接着说。她对没回应的连发归零；群里别人自己聊天不算。
+ * prev 是这条消息之前的会话，c 是记下这条消息之后的。
+ */
+function withAnswer(
+  prev: ChatNode,
+  c: ChatNode,
+  event: EventOf<"message.received">,
+  toHer: boolean,
+  rejected: RejectionClassifier,
+): ChatNode {
+  const sinceHer = event.at - prev.lastAliceAt;
+  const takenUp =
+    event.chatType === "group" &&
+    prev.awaiting !== null &&
+    sinceHer <= UPTAKE_LINK &&
+    (prev.lastAliceAt > prev.lastIncomingAt || prev.awaiting.to === event.senderId);
+  const replying =
+    toHer ||
+    (event.replyToMessageId !== null &&
+      (c.awaiting?.ids.includes(event.replyToMessageId) ?? false));
+  const next = replying || takenUp ? { ...c, outgoing: 0 } : c;
+  if (!next.awaiting) return next;
+  if (rejected(event, next)) return withReception(next, event.at, "rejected", event.senderId);
+  if (replying) return withReception(next, event.at, "replied", event.senderId);
+  if (takenUp) return withReception(next, event.at, "taken", event.senderId);
+  return { ...next, awaiting: { ...next.awaiting, others: next.awaiting.others + 1 } };
+}
+
+function receiveMessage(
+  w: World,
+  event: EventOf<"message.received">,
+  rejected: RejectionClassifier,
+): World {
+  const prev = settle(w.chats[event.scope] ?? freshChat(event.chatType), event.at);
+  let c = withIncoming(prev, event);
+  const toHer = event.directed || event.chatType === "private";
+  if (event.directed) {
+    c = { ...c, pending: c.pending + 1, lastDirectedAt: event.at, silences: 0 };
+  }
+  // 别人对她说的话停在这里：开一条线程，直到她接（论文 Def P4，权重按会话类型）。
+  if (toHer && !c.thread)
+    c = { ...c, thread: { openedAt: event.at, weight: THREAD_WEIGHT[event.chatType] } };
+  c = withAnswer(prev, c, event, toHer, rejected);
+  const count = w.relations.people[event.senderId]?.seen.count ?? 0;
+  // novelty：对这个人的预测有多不确定，σ = 1/(1+n/10)（论文 Remark per-contact surprise 的 σ_c）
+  return {
+    ...put(w, event.scope, c),
+    novelty:
+      efold(w.novelty, event.at - w.noveltyAt, NOVELTY_TAU) + 1 / (1 + count / SIGMA_HALF_COUNT),
+    noveltyAt: event.at,
+  };
+}
+
+/** 她这一轮开口在等谁的反应：接着上一轮的等，或者从这条开始新等一轮，记下是不是主动开口、接的是谁。 */
+function awaitingAfterSent(
+  prev: ChatNode,
+  event: EventOf<"message.sent">,
+  solicited: boolean,
+): Awaiting {
+  if (prev.awaiting) return { ...prev.awaiting, ids: [...prev.awaiting.ids, event.messageId] };
+  // 她这一轮接的是谁：开口前 UPTAKE_LINK 之内紧挨着的那条别人的话。
+  const answered =
+    prev.lastIncomingAt > prev.lastAliceAt && event.at - prev.lastIncomingAt <= UPTAKE_LINK
+      ? prev.recentFrom.at(-1)
+      : undefined;
+  return {
+    turnAt: event.at,
+    ids: [event.messageId],
+    others: 0,
+    ...(solicited ? {} : { proactive: true }),
+    ...(answered ? { to: answered } : {}),
+  };
+}
+
+function sendMessage(w: World, event: EventOf<"message.sent">): World {
+  const found = w.chats[event.scope];
+  if (!found) return w;
+  const prev = settle(found, event.at);
+  const newTurn = event.at - prev.lastAliceAt > TURN_GAP;
+  const solicited = isSolicited(prev, event.at);
+  const c: ChatNode = withRhythm(
+    {
+      ...prev,
+      // 答应过的事（chats.commitments）只由记忆（recall.ts memory）折，世界 fold 不再写它。
+      lastAliceAt: event.at,
+      // 行动消耗驱动它的信号（ADR-218/270）：读了、回了，未读、义务、线程清零（论文 Def P5）。
+      unread: 0,
+      ewms: 0,
+      ewmsAt: event.at,
+      pending: 0,
+      thread: null,
+      awaiting: awaitingAfterSent(prev, event, solicited),
+      outgoing: halfLife(prev.outgoing, event.at - prev.outgoingAt, outHalfLife(prev)) + 1,
+      outgoingAt: event.at,
+      silences: 0,
+      lastProactiveAt: solicited ? prev.lastProactiveAt : event.at,
+      turns: newTurn ? [...within(prev.turns, event.at, SAT.rateWindow), event.at] : prev.turns,
+      effort: newTurn ? withEffort(prev, event.at, 1, 0) : prev.effort,
+      voices: prev.chatType === "group" ? withVoice(prev, null, event.at) : prev.voices,
+    },
+    event.at,
+  );
+  const spoken = event.kind === "text" || event.kind === "voice";
+  const next: World = {
+    ...put(w, event.scope, c),
+    turns: newTurn ? [...within(w.turns, event.at, COST_WINDOW), event.at] : w.turns,
+    said: spoken
+      ? [...w.said, { at: event.at, scope: event.scope, text: event.text }].slice(-SAID_KEPT)
+      : w.said,
+  };
+  // 主动找了对方：想联系的冲动由"找过了"满足，从此刻重新长起；关系本身（lastBondAt）不变，
+  // 一直没回照样积累回避。否则冲动不减，对方不在时她会一条接一条地发
+  // （memory-eval：对方一直没回时她最多连发 27 轮）。
+  if (solicited) return next;
+  return partnerConsidered(
+    put(next, event.scope, { ...c, consideredAt: event.at }),
+    prev,
+    event.at,
+  );
+}
+
+function decideSpeech(world: World, event: EventOf<"speech.decided">): World {
+  const w = { ...world, lastCallAt: event.at, callFailures: { count: 0, at: 0 } };
+  const prev = w.chats[event.scope];
+  if (!prev) return w;
+  // 只标已读、只在心里记一笔都不算回应；说话、贴纸、表情、退群都是可见的行动。
+  const silent = isSilent(event.decision.acts);
+  const left = event.decision.acts.some(leaves);
+  // 看过了：未读清零；选择不回也是义务和线程的一个有类型的结局（ADR-270），一并清零。
+  // 想过、没走：离开的冲动也是考虑过就消耗，不然被冷落的热闹群里每个节律格都会为"要不要走"
+  // 叫醒她一次（eval-artifacts/cliff/notes.md）。
+  const c: ChatNode = {
+    ...looked(prev, event.at),
+    pending: 0,
+    thread: silent ? null : prev.thread,
+    stayedAt: left ? prev.stayedAt : event.at,
+  };
+  if (!silent) return put(w, event.scope, c);
+  // 没人找她时想过要不要说、决定先不：冷却与群聊存在感从此刻重新长起，而不是一分钟后再问一遍
+  // （will/prereg 零成本估算：不消耗时私聊每天被反复斟酌约 16 次）。选择沉默记一笔（σ_fail）。
+  // "有人等她、她没回"有时限（isSolicited）：对方道了晚安、半年没再说话，之后每一次想过、决定先不，
+  // 都消耗冷却并退避。
+  if (isSolicited(prev, event.at)) return put(w, event.scope, withFailure(c, event.at));
+  return partnerConsidered(
+    put(w, event.scope, withFailure(considered(c, event.at), event.at)),
+    prev,
+    event.at,
+  );
+}
+
+/**
+ * 有人在她这一轮的话上点了表情。正面、中性的是一次回应（轻，但有人看见了她、给了反应）；负面的（👎、🤡、💩……）
+ * 是一次轻的拒绝：不算回应、不续关系、不清连发，回避加一点（北极星读数同样把它算作嫌弃）。
+ */
+function receiveReaction(w: World, event: EventOf<"reaction.received">): World {
+  const prev = w.chats[event.scope];
+  if (!prev?.awaiting?.ids.includes(event.messageId)) return w;
+  if (NEGATIVE_REACTIONS.has(event.emoji)) {
+    return put(w, event.scope, withReception(prev, event.at, "cold", event.senderId, event.emoji));
+  }
+  const c = withReception(prev, event.at, "replied", event.senderId, event.emoji);
+  return put(w, event.scope, { ...c, outgoing: 0 });
+}
+
+/** 被踢是最明确的拒绝；自己离开、被拉进来只改成员身份。 */
+function changeMembership(w: World, event: EventOf<"membership.changed">): World {
+  const prev = w.chats[event.scope];
+  if (!prev) return w;
+  const c = event.reason === "kicked" ? withReception(prev, event.at, "rejected", null) : prev;
+  return put(w, event.scope, { ...c, member: event.member });
+}
+
+function finishAct(w: World, event: EventOf<"act.done">): World {
+  const row = affordanceOf(event.act.kind);
+  // 她心里的事由提供它的那一样 fold 进世界（feature.ts）。
+  if (row.via === "mind") return w;
+  const prev = w.chats[event.scope];
+  const member = memberAfter(row);
+  return prev && member !== undefined ? put(w, event.scope, { ...prev, member }) : w;
+}
+
+/** 被对方拉黑（telegram/errors 的 refused）是明确的拒绝；其余失败只抬高 σ_fail。 */
+function failAct(w: World, event: EventOf<"act.failed">): World {
+  const prev = w.chats[event.scope];
+  if (!prev) return w;
+  const c = event.reason === "refused" ? withReception(prev, event.at, "rejected", null) : prev;
+  return put(w, event.scope, withFailure(c, event.at));
+}
+
+/**
+ * 没看到、没回成：有人在等她时，义务、线程、未读都留着，好再试。没人找她时，这次就当看了一眼、
+ * 想过、决定先不（与沉默的决定一样），所以失败不会比沉默更勤（研究伙伴 switching-scan/prereg-backoff：
+ * 否则失败率 0.5 时调用多 33%）；节律从这次尝试重新数，并按连续失败次数再退避。
+ */
+function failSpeech(w: World, event: EventOf<"speech.failed">): World {
+  const failed: World = {
+    ...w,
+    lastCallAt: event.at,
+    callFailures: { count: w.callFailures.count + 1, at: event.at },
+  };
+  const prev = w.chats[event.scope];
+  if (!prev) return failed;
+  if (isSolicited(prev, event.at)) return put(failed, event.scope, withFailure(prev, event.at));
+  const c = withFailure(
+    { ...considered(looked(prev, event.at), event.at), stayedAt: event.at },
+    event.at,
+  );
+  return partnerConsidered(put(failed, event.scope, c), prev, event.at);
 }
 
 /** 可选的层级来源（忠实度回放用 2 月图里的 tier）；返回 undefined 则按 relations 算。 */

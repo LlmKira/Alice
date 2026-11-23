@@ -3,7 +3,7 @@ import { decodeEvent } from "../src/journal.js";
 import type { MessageReceived } from "../src/mind/events.js";
 import { emptyState, type TimelineEntry } from "../src/mind/state.js";
 import { step } from "../src/mind/step.js";
-import { describeMedia } from "../src/speech/media.js";
+import { describeMedia, mediaLabel } from "../src/speech/media.js";
 import { logLines } from "../src/speech/prompt.js";
 
 const entry = (over: Partial<TimelineEntry>): TimelineEntry => ({
@@ -109,5 +109,17 @@ describe("what she sees of a non-text message", () => {
       decodeEvent("message.received", "telegram:1", { ...base, media: "贴纸 😂" }),
     ).toMatchObject({ media: "贴纸 😂" });
     expect(decodeEvent("message.received", "telegram:1", { ...base, media: 3 })).toBeNull();
+  });
+});
+
+describe("names that exist on every object are not known types", () => {
+  it("a message type such as constructor reads as a plain message", () => {
+    expect(mediaLabel("constructor")).toBe("消息");
+    expect(mediaLabel("sticker")).toBe("贴纸");
+  });
+  it("a journal row whose type is toString is not an event", () => {
+    expect(
+      decodeEvent("toString", "telegram:1", { type: "toString", scope: "telegram:1" }),
+    ).toBeNull();
   });
 });

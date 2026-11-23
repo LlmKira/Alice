@@ -59,6 +59,17 @@ const CHATS: ChatTermFreqs = {
 /** 她心里记得的：填充词 + 两件具体的事。 */
 const MEMORY = [tokens("她知道不是这个，最近在看芙莉莲，周末去露营")];
 
+describe("tokens: Chinese and Japanese by two-character fragments, emoji are not text", () => {
+  it("cuts Chinese and kana into overlapping pairs and keeps Latin words whole", () => {
+    expect(tokens("周末露营 camping")).toEqual(["camping", "周末", "末露", "露营"]);
+    expect(tokens("ひらがな")).toEqual(["ひら", "らが", "がな"]);
+  });
+  it("an emoji-only message has no topic, and emoji leave no fragments next to words", () => {
+    expect(tokens("😂🤣")).toEqual([]);
+    expect(tokens("露营😂好玩")).toEqual(["露营", "好玩"]);
+  });
+});
+
 describe("crossChatIdf: filler has no weight, a rare topic word does", () => {
   it("gives words that every chat uses an idf of 0", () => {
     const idf = crossChatIdf(tokens("我知道不是这个 芙莉莲"), CHATS, MEMORY);

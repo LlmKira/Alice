@@ -61,8 +61,8 @@ function harness(replies: string[], folded = createFold(active).result()) {
   const jobs: Array<{
     act: Act;
     context: SpeechPrompt | null;
-    done(r: { result: string; usage?: BackgroundUsage }): void;
-    fail(e: Error): void;
+    done: (r: { result: string; usage?: BackgroundUsage }) => void;
+    fail: (e: Error) => void;
   }> = [];
   const telegram: Act[] = [];
   let now = T0;
@@ -95,7 +95,16 @@ function harness(replies: string[], folded = createFold(active).result()) {
   };
   const shell = new Shell(ports, active, "PERSONA", folded, 1e12);
   const settle = () => new Promise((r) => setTimeout(r, 0));
-  return { shell, journal, prompts, jobs, telegram, settle, tick: (ms: number) => (now += ms) };
+  return {
+    shell,
+    ports,
+    journal,
+    prompts,
+    jobs,
+    telegram,
+    settle,
+    tick: (ms: number) => (now += ms),
+  };
 }
 
 describe("looking something up: it runs in the background and its result comes back to her", () => {
@@ -155,7 +164,7 @@ describe("looking something up: it runs in the background and its result comes b
     // 外壳：她说要查一下，但没有执行者。
     const h = harness([lookUp("明天上海的天气")]);
     const bare = new Shell(
-      { ...(h.shell as unknown as { ports: ShellPorts }).ports, background: unavailable },
+      { ...h.ports, background: unavailable },
       active,
       "PERSONA",
       createFold(active).result(),
@@ -166,7 +175,7 @@ describe("looking something up: it runs in the background and its result comes b
     const shellSide = h.journal
       .filter((e) => e.type.startsWith("act."))
       .map((e) => ({ type: e.type, reason: "reason" in e ? e.reason : undefined }));
-    // 回放：同一个决定，不给后台桩。
+    // 回放：同一个决定，不给后台 stub。
     const replaySide: typeof shellSide = [];
     const { effects } = await replay([ask(T0, "1", "明天上海天气怎么样")], {
       mechanisms: active,
@@ -204,7 +213,7 @@ describe("looking something up: it runs in the background and its result comes b
   it("without the executor she is not offered the action at all", async () => {
     const h = harness([]);
     const bare = new Shell(
-      { ...(h.shell as unknown as { ports: ShellPorts }).ports, background: unavailable },
+      { ...h.ports, background: unavailable },
       [directedWake],
       "PERSONA",
       createFold([directedWake]).result(),

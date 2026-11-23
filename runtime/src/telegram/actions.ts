@@ -7,11 +7,11 @@ import { scopeOf } from "./world-adapter.js";
 function parseMarkdown(text: string): { text: string; entities: tl.TypeMessageEntity[] } | null {
   try {
     const normalized = text
-      .replace(/^#{1,6}\s+(.+)$/gm, "**$1**")
+      .replace(/^#{1,6}\s+(\S.*)$/gm, "**$1**")
       .replace(/^[-*+]\s+/gm, "• ")
       .replace(/^\d+\.\s+/gm, "• ");
     const parsed = md(normalized);
-    return parsed.entities?.length
+    return (parsed.entities?.length ?? 0) > 0
       ? (parsed as { text: string; entities: tl.TypeMessageEntity[] })
       : null;
   } catch {
@@ -44,7 +44,7 @@ async function readFirst(tg: Telegram, chatId: number): Promise<void> {
 }
 
 /** 会在 chatId 留下一条她的消息的请求（过第二道连发闸；第一次私聊先拿到对方，gates.ts post）。 */
-function post<T>(
+async function post<T>(
   tg: Telegram,
   chatId: number,
   name: string,
@@ -55,13 +55,13 @@ function post<T>(
 }
 
 /** 先标记已读，再发文字。typing：先显示正在输入，等这么久再发（像真人打字）。 */
-export function sendText(
+export async function sendText(
   tg: Telegram,
   chatId: number,
   text: string,
   options: {
     replyToMsgId?: number;
-    typing?: { ms: number; pause(ms: number): Promise<void> };
+    typing?: { ms: number; pause: (ms: number) => Promise<void> };
   } = {},
 ): Promise<number | undefined> {
   return post(tg, chatId, "send_text", {}, async (client, peer) => {
@@ -93,7 +93,7 @@ export interface SpokenVoice {
 /**
  * 发一条语音（2 月 send_voice）：合成的时候显示"正在录音"。合成失败是确定没发出去（voice_failed）。
  */
-export function sendVoice(
+export async function sendVoice(
   tg: Telegram,
   chatId: number,
   synthesize: () => Promise<SpokenVoice>,
@@ -131,7 +131,7 @@ export function sendVoice(
  * 改她自己的一条文字消息（2 月 edit_message）。内容没变时 Telegram 报 MESSAGE_NOT_MODIFIED：
  * 已经是这句话了，当作改好了。
  */
-export function editText(
+export async function editText(
   tg: Telegram,
   chatId: number,
   messageId: number,
@@ -150,7 +150,7 @@ export function editText(
  * 把一条消息转到 toChatId（她的一条新消息）。noAuthor：不带原作者（复读、从相册发图）。
  * 源群禁止转发时 Telegram 报 CHAT_FORWARDS_RESTRICTED，是带类型的失败。
  */
-export function forwardMessage(
+export async function forwardMessage(
   tg: Telegram,
   from: { chatId: number; messageId: number },
   toChatId: number,
@@ -169,7 +169,7 @@ export function forwardMessage(
 }
 
 /** 标记已读（消息、提及、表情角标），"看了"。 */
-export function markRead(tg: Telegram, chatId: number): Promise<void> {
+export async function markRead(tg: Telegram, chatId: number): Promise<void> {
   return tg.request("mark_read", { chatId: String(chatId) }, async (client) => {
     await client.readHistory(chatId, { clearMentions: true });
     try {
@@ -181,7 +181,7 @@ export function markRead(tg: Telegram, chatId: number): Promise<void> {
 }
 
 /** 给一条消息点表情回应（2 月 sendReaction）。 */
-export function sendReaction(
+export async function sendReaction(
   tg: Telegram,
   chatId: number,
   messageId: number,
@@ -193,7 +193,7 @@ export function sendReaction(
 }
 
 /** 退出群或频道（2 月 leaveChat）。 */
-export function leaveChat(tg: Telegram, chatId: number): Promise<void> {
+export async function leaveChat(tg: Telegram, chatId: number): Promise<void> {
   return tg.request("leave_chat", { chatId: String(chatId) }, async (client) => {
     await client.leaveChat(chatId);
   });
@@ -203,7 +203,7 @@ export function leaveChat(tg: Telegram, chatId: number): Promise<void> {
  * 加入群或频道（2 月 joinChat）：按 id，或者按邀请链接（找群时只看到了邀请预览、不知道 id 的群）。
  * 要管理员审批的群，Telegram 回 INVITE_REQUEST_SENT：记为带类型的失败 join_requested（申请已经发出去了）。
  */
-export function joinChat(
+export async function joinChat(
   tg: Telegram,
   target: { chatId: number } | { invite: string },
 ): Promise<void> {
@@ -227,8 +227,8 @@ export function joinChat(
   });
 }
 
-/** fileId 来自 sticker_palette（telegram/palette.ts）。 */
-export function sendSticker(
+/** fileId 来自 sticker_palette（sticker-palette.ts）。 */
+export async function sendSticker(
   tg: Telegram,
   chatId: number,
   fileId: string,

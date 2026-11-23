@@ -206,10 +206,19 @@ describe("affect: her mood is there unless it would be stale, its reason follows
   });
 });
 
+const sent = (scope: string, at: number): AliceEvent => ({
+  type: "message.sent",
+  at,
+  scope,
+  messageId: `me:${at}`,
+  text: "嗯",
+  kind: "text",
+});
+
 describe("warmth: being sought warms her, a bystander's boredom barely moves her, and she can still be cold", () => {
   const W: Warmth = { home: true, relevance: true, bids: true };
   const start: AffectState = { ...initialAffect, home: 0.19, valence: 0.19 };
-  /** 心情读关系事实（他上次来找我、有没有过来往）：世界折叠在前、心情在后，和压力场的次序一样。 */
+  /** 心情读关系事实（他上次来找我、有没有过来往）：世界 fold 在前、心情在后，和压力场的次序一样。 */
   const run = (events: AliceEvent[]) => {
     let world = emptyWorld;
     return events.reduce((state, event) => {
@@ -218,14 +227,6 @@ describe("warmth: being sought warms her, a bystander's boredom barely moves her
       return next;
     }, start);
   };
-  const sent = (scope: string, at: number): AliceEvent => ({
-    type: "message.sent",
-    at,
-    scope,
-    messageId: `me:${at}`,
-    text: "嗯",
-    kind: "text",
-  });
   const reflected = (scope: string, word: string, why: string, at: number): AliceEvent => ({
     type: "ponder.done",
     at,
@@ -295,7 +296,7 @@ describe("tone: an unfriendly approach does not make her glad", () => {
   const W: Warmth = { home: true, relevance: true, bids: true };
   const WT: Warmth = { ...W, tone: true };
   const start: AffectState = { ...initialAffect, home: 0.19, valence: 0.19 };
-  /** 心情读关系事实（他上次来找我、有没有过来往）：世界折叠在前、心情在后，和压力场的次序一样。 */
+  /** 心情读关系事实（他上次来找我、有没有过来往）：世界 fold 在前、心情在后，和压力场的次序一样。 */
   const run = (events: AliceEvent[], w: Warmth) => {
     let world = emptyWorld;
     return events.reduce((state, event) => {
@@ -304,14 +305,6 @@ describe("tone: an unfriendly approach does not make her glad", () => {
       return next;
     }, start);
   };
-  const sent = (scope: string, at: number): AliceEvent => ({
-    type: "message.sent",
-    at,
-    scope,
-    messageId: `me:${at}`,
-    text: "嗯",
-    kind: "text",
-  });
   const perceived = (
     scope: string,
     at: number,

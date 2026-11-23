@@ -56,7 +56,7 @@ interface FakeMessage {
   chat: unknown;
   sender: User;
   text: string;
-  entities: Array<{ kind: string; text: string; params: object; is(kind: string): boolean }>;
+  entities: Array<{ kind: string; text: string; params: object; is: (kind: string) => boolean }>;
   media: { type: string; [k: string]: unknown } | null;
   action: { type: string; [k: string]: unknown } | null;
   replyToMessage: { id: number; sender: null } | null;
@@ -129,12 +129,14 @@ export class FakeTelegram {
   private readonly late: Array<{ at: number; message: FakeMessage }> = [];
 
   constructor(private readonly now: () => number) {
+    // eslint-disable-next-line slop/no-chained-type-assertions -- 假的 mtcute 对象只实现 telegram/ 用到的那几个成员
     this.dispatcher = {
       onNewMessage: (fn: (m: Message) => unknown) => void this.onMessage.push(fn),
       onRawUpdate: (filter: never, fn: never) => void this.onRaw.push({ filter, fn }),
       // 用户账号收不到成员变化的更新：登记了也不会被调用。
       onChatMemberUpdate: () => {},
     } as unknown as Dispatcher;
+    // eslint-disable-next-line slop/no-chained-type-assertions -- 假的 mtcute 对象只实现 telegram/ 用到的那几个成员
     this.client = this.clientMethods() as unknown as TelegramClient;
     this.user(SELF.id, SELF.name);
   }
@@ -256,6 +258,7 @@ export class FakeTelegram {
     const last = c.history.at(-1)?.id ?? 0;
     const id =
       wanted !== undefined && Number.isSafeInteger(wanted) && wanted > last ? wanted : last + 1;
+    const replyTo = post.replyTo ?? 0;
     return {
       id,
       date: new Date(this.now()),
@@ -271,7 +274,7 @@ export class FakeTelegram {
       media: mediaOf(post.contentType, post.media),
       action: post.action ?? null,
       // 同一个群里的回复：mtcute 拿不到被回复者。
-      replyToMessage: post.replyTo ? { id: post.replyTo, sender: null } : null,
+      replyToMessage: replyTo > 0 ? { id: replyTo, sender: null } : null,
       client: this.client,
     };
   }
@@ -282,11 +285,13 @@ export class FakeTelegram {
   }
 
   private dispatch(message: FakeMessage): void {
+    // eslint-disable-next-line slop/no-chained-type-assertions -- 假的 mtcute 对象只实现 telegram/ 用到的那几个成员
     for (const fn of this.onMessage) void fn(message as unknown as Message);
   }
 
   /** TelegramClient 里 telegram/ 用到的那几个方法。 */
   private clientMethods() {
+    // eslint-disable-next-line ts/no-this-alias -- 下面的生成器方法不能写成箭头函数
     const self = this;
     return {
       async *iterDialogs() {
@@ -462,34 +467,7 @@ export async function throughPlatform(
   let now = start;
   const fake = new FakeTelegram(() => now);
   const names = new Names();
-  // 会话：第一个事件是她进群的，开始时她还不在里面（对话列表里没有）。
-  const first = new Map<string, AliceEvent>();
-  for (const e of events) if ("scope" in e && e.scope && !first.has(e.scope)) first.set(e.scope, e);
-  for (const [scope, e] of first) {
-    const push: Push = o.unpushed?.has(scope) ? "never" : o.late?.has(scope) ? "late" : "now";
-    if (e.type === "post.received") {
-      fake.chat(names.scope(scope), "channel", { title: e.title, push });
-    } else if (e.type === "message.received" && e.chatType === "private") {
-      const partner = fake.user(names.person(e.senderId), e.senderName);
-      fake.chat(names.scope(scope, e.senderId), "private", { push, partner });
-    } else if (e.type === "message.sent" && !scope.startsWith("telegram:-")) {
-      // 她先开口的私聊：会话的 id 就是对方。
-      const id = names.scope(scope);
-      fake.chat(id, "private", { push, partner: fake.user(id, scope) });
-    } else if (
-      e.type === "message.received" ||
-      e.type === "message.sent" ||
-      e.type === "member.joined" ||
-      e.type === "membership.changed"
-    ) {
-      const title = e.type === "message.received" ? e.chatTitle : undefined;
-      fake.chat(names.scope(scope), "group", {
-        push,
-        member: !(e.type === "membership.changed" && e.member),
-        ...(title ? { title } : {}),
-      });
-    }
-  }
+  openChats(events, fake, names, o);
 
   // 真的那几样：去重、她在哪些群、入站适配、对话轮询。适配器写出的事件像 Journal 一样再投影给前两样。
   const inbox = new Inbox();
@@ -511,8 +489,6 @@ export async function throughPlatform(
     perceive: { image: echoPerceive, gif: echoPerceive, video: echoPerceive, voice: echoPerceive },
   });
   const tg = new Telegram(fake.client, new Gates(() => now));
-  /** 看图、听语音是异步的：在时钟往前走之前让它们写完（同一刻）。 */
-  const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
   groups.started(await dialogScopes(tg));
 
   let nextPoll = start + CATCH_UP_MS;
@@ -536,91 +512,172 @@ export async function throughPlatform(
     }
   };
 
-  const hers = new Set<string>();
+  const stage: Stage = {
+    fake,
+    names,
+    hers: new Set<string>(),
+    journal,
+    asIs: (e) => out.push({ e, asIs: true }),
+  };
   for (const e of events) {
     await advance(e.at);
     now = e.at;
-    switch (e.type) {
-      case "message.received": {
-        const chatId = names.scope(e.scope, e.chatType === "private" ? e.senderId : undefined);
-        const replyTo = names.messageOf(e.scope, e.replyToMessageId);
-        const toHer = e.replyToMessageId !== null && hers.has(`${e.scope}/${e.replyToMessageId}`);
-        const from = fake.user(names.person(e.senderId), e.senderName, e.isBot === true);
-        const n = fake.post(
-          chatId,
-          from,
-          {
-            text: e.text,
-            replyTo,
-            // 群里冲着她、又不是回复她的：是点了她的名。
-            mention: e.directed && e.chatType === "group" && !toHer,
-            contentType: e.contentType,
-            ...(e.media ? { media: e.media } : {}),
-          },
-          names.wanted(e.messageId),
-        );
-        names.message(e.scope, e.messageId, n);
-        await settle();
-        break;
-      }
-      case "message.sent": {
-        // 她发出的消息：外壳在发送成功后记 message.sent（客户端不派发）。
-        const chatId = names.scope(e.scope);
-        const id = fake.sent(chatId, e.text, names.wanted(e.messageId));
-        names.message(e.scope, e.messageId, id);
-        hers.add(`${e.scope}/${e.messageId}`);
-        journal({ ...e, scope: scopeOf(chatId), messageId: String(id) });
-        break;
-      }
-      case "member.joined": {
-        const user = fake.user(names.person(e.userId), e.userId);
-        fake.post(names.scope(e.scope), user, {
-          action: { type: "user_joined_link", inviter: ADMIN.id },
-        });
-        break;
-      }
-      case "membership.changed": {
-        const chatId = names.scope(e.scope);
-        const admin = fake.user(ADMIN.id, ADMIN.name);
-        if (e.member)
-          fake.post(chatId, admin, { action: { type: "users_added", users: [SELF.id] } });
-        else if (e.reason === "kicked")
-          fake.post(chatId, admin, { action: { type: "user_removed", user: SELF.id } });
-        else fake.leave(chatId);
-        break;
-      }
-      case "post.received": {
-        const admin = fake.user(ADMIN.id, ADMIN.name);
-        const n = fake.post(
-          names.scope(e.scope),
-          admin,
-          { text: e.text },
-          names.wanted(e.messageId),
-        );
-        names.message(e.scope, e.messageId, n);
-        break;
-      }
-      case "reaction.received": {
-        const n = names.messageOf(e.scope, e.messageId);
-        if (n !== null && e.senderId !== null) {
-          await fake.react(
-            names.scope(e.scope),
-            n,
-            fake.user(names.person(e.senderId), e.senderId),
-            e.emoji,
-          );
-        }
-        break;
-      }
-      default:
-        // 没有 Telegram 对应物的事件（她的随机数、外壳看懂的图）原样留着。
-        out.push({ e, asIs: true });
-    }
+    await play(e, stage);
   }
   // 最后再轮询一轮，补齐不推送的会话里最后那几条。
   await advance((events.at(-1)?.at ?? start) + LATE_PUSH_MS + CATCH_UP_MS);
 
   return out.map(({ e, asIs }) => (asIs ? e : back(e, names))).sort((a, b) => a.at - b.at);
+}
+
+/** 看图、听语音是异步的：在时钟往前走之前让它们写完（同一刻）。 */
+const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/** 会话：第一个事件是她进群的，开始时她还不在里面（对话列表里没有）。 */
+function openChats(
+  events: readonly AliceEvent[],
+  fake: FakeTelegram,
+  names: Names,
+  o: PlatformOptions,
+): void {
+  const first = new Map<string, AliceEvent>();
+  for (const e of events) if ("scope" in e && e.scope && !first.has(e.scope)) first.set(e.scope, e);
+  for (const [scope, e] of first) {
+    const push: Push = o.unpushed?.has(scope) ? "never" : o.late?.has(scope) ? "late" : "now";
+    openChat(scope, e, push, fake, names);
+  }
+}
+
+function openChat(scope: string, e: AliceEvent, push: Push, fake: FakeTelegram, names: Names) {
+  if (e.type === "post.received") {
+    fake.chat(names.scope(scope), "channel", { title: e.title, push });
+    return;
+  }
+  if (e.type === "message.received" && e.chatType === "private") {
+    const partner = fake.user(names.person(e.senderId), e.senderName);
+    fake.chat(names.scope(scope, e.senderId), "private", { push, partner });
+    return;
+  }
+  if (e.type === "message.sent" && !scope.startsWith("telegram:-")) {
+    // 她先开口的私聊：会话的 id 就是对方。
+    const id = names.scope(scope);
+    fake.chat(id, "private", { push, partner: fake.user(id, scope) });
+    return;
+  }
+  if (
+    e.type === "message.received" ||
+    e.type === "message.sent" ||
+    e.type === "member.joined" ||
+    e.type === "membership.changed"
+  ) {
+    const title = e.type === "message.received" ? e.chatTitle : undefined;
+    fake.chat(names.scope(scope), "group", {
+      push,
+      member: e.type !== "membership.changed" || !e.member,
+      ...(title ? { title } : {}),
+    });
+  }
+}
+
+/** 回放一个事件要用到的东西：假 Telegram、名字对照、她发过的消息、适配器的出口。 */
+interface Stage {
+  fake: FakeTelegram;
+  names: Names;
+  /** 她发过的消息（会话/编号）：别人回复它就是回复她。 */
+  hers: Set<string>;
+  journal: (e: AliceEvent) => void;
+  /** 没有 Telegram 对应物的事件原样留着。 */
+  asIs: (e: AliceEvent) => void;
+}
+
+/** 一个输入事件在假 Telegram 里发生。 */
+async function play(e: AliceEvent, { fake, names, hers, journal, asIs }: Stage): Promise<void> {
+  switch (e.type) {
+    case "message.received":
+      postReceived(e, fake, names, hers);
+      await settle();
+      break;
+    case "message.sent": {
+      // 她发出的消息：外壳在发送成功后记 message.sent（客户端不派发）。
+      const chatId = names.scope(e.scope);
+      const id = fake.sent(chatId, e.text, names.wanted(e.messageId));
+      names.message(e.scope, e.messageId, id);
+      hers.add(`${e.scope}/${e.messageId}`);
+      journal({ ...e, scope: scopeOf(chatId), messageId: String(id) });
+      break;
+    }
+    case "member.joined": {
+      const user = fake.user(names.person(e.userId), e.userId);
+      fake.post(names.scope(e.scope), user, {
+        action: { type: "user_joined_link", inviter: ADMIN.id },
+      });
+      break;
+    }
+    case "membership.changed":
+      changeMembership(e, fake, names);
+      break;
+    case "post.received": {
+      const admin = fake.user(ADMIN.id, ADMIN.name);
+      const n = fake.post(names.scope(e.scope), admin, { text: e.text }, names.wanted(e.messageId));
+      names.message(e.scope, e.messageId, n);
+      break;
+    }
+    case "reaction.received": {
+      const n = names.messageOf(e.scope, e.messageId);
+      if (n !== null && e.senderId !== null) {
+        await fake.react(
+          names.scope(e.scope),
+          n,
+          fake.user(names.person(e.senderId), e.senderId),
+          e.emoji,
+        );
+      }
+      break;
+    }
+    default:
+      // 没有 Telegram 对应物的事件（她的随机数、外壳看懂的图）原样留着。
+      asIs(e);
+  }
+}
+
+function postReceived(
+  e: Extract<AliceEvent, { type: "message.received" }>,
+  fake: FakeTelegram,
+  names: Names,
+  hers: ReadonlySet<string>,
+): void {
+  const chatId = names.scope(e.scope, e.chatType === "private" ? e.senderId : undefined);
+  const replyTo = names.messageOf(e.scope, e.replyToMessageId);
+  const toHer = e.replyToMessageId !== null && hers.has(`${e.scope}/${e.replyToMessageId}`);
+  const from = fake.user(names.person(e.senderId), e.senderName, e.isBot === true);
+  const n = fake.post(
+    chatId,
+    from,
+    {
+      text: e.text,
+      replyTo,
+      // 群里冲着她、又不是回复她的：是点了她的名。
+      mention: e.directed && e.chatType === "group" && !toHer,
+      contentType: e.contentType,
+      ...(e.media ? { media: e.media } : {}),
+    },
+    names.wanted(e.messageId),
+  );
+  names.message(e.scope, e.messageId, n);
+}
+
+/** 她被拉进群、被踢、自己退群。 */
+function changeMembership(
+  e: Extract<AliceEvent, { type: "membership.changed" }>,
+  fake: FakeTelegram,
+  names: Names,
+): void {
+  const chatId = names.scope(e.scope);
+  const admin = fake.user(ADMIN.id, ADMIN.name);
+  if (e.member) fake.post(chatId, admin, { action: { type: "users_added", users: [SELF.id] } });
+  else if (e.reason === "kicked")
+    fake.post(chatId, admin, { action: { type: "user_removed", user: SELF.id } });
+  else fake.leave(chatId);
 }
 
 /** 适配器写出的事件 → 输入里的写法。 */

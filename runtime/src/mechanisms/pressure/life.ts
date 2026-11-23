@@ -11,7 +11,7 @@
  *    长尾来自做事的时长，不设任何延迟参数。洗澡时手机不在手边，优先级取最高。
  * 3. 这些都写成她此刻的事实（"你在吃饭，手机拿出来看了一眼""你刚洗完澡"），不写机制、不写数。
  *
- * 随机数只从 noise.drawn 来（mind/noise.ts），所以从日志折叠、回放都得到同一天。
+ * 随机数只从 noise.drawn 来（mind/noise.ts），所以从日志 fold、回放都得到同一天。
  * 她的生活是她自己的：都是一个人能自己做的事，不去谁的身边（和能力事实一致），也不编身份（上课、上班不在里面：
  * 人格里没写她上学或工作）。
  */
@@ -43,7 +43,7 @@ export const LIFE_TONE = {
 const ENERGY_OU = ou(LIFE_TONE.energy);
 const SOCIAL_OU = ou(LIFE_TONE.social);
 
-/** 正在做的事：决定说法，以及手机在不在手边。后四样只在候选 life-l2 里（FILLERS）。 */
+/** 正在做的事：决定说法，以及手机在不在手边。后四样是随手的事（FILLERS）。 */
 export type ActivityKind =
   | "wash"
   | "meal"
@@ -61,9 +61,9 @@ export type ActivityKind =
  * 时长按对数正态（均值 meanMin、对数标准差 LENGTH_SIGMA）。已经在做别的事时不开始（错过这个时段就算了）。
  * 每天的总量对着 2018 年全国时间利用调查（国家统计局公报）：用餐 1 小时 44 分钟（这里约 92 分钟：她起得晚，
  * 早饭和午饭并成一顿）、个人卫生护理 50 分钟（这里约 37 分钟）、休闲娱乐与看电视合计 2 小时 45 分钟
- * （这里打游戏、看剧合计约 1 小时 10 分钟：她的空闲有一部分本来就在 Telegram 上）。
+ * （这里打游戏、看剧合计约 1 小时 10 分钟：她的空闲有一部分本来就花在聊天上）。
  * 都在家里：人格写着"Offline stuff isn't your domain"；第一版有"出门""在外面吃饭"，真模型场景里她因此答应了
- * 出来见面（"来呗，正好想喝奶茶"），所以拿掉（eval-artifacts/life/prereg.md 修订 1）。
+ * 出来见面（"来呗，正好想喝奶茶"），所以删了（eval-artifacts/life/prereg.md 修订 1）。
  * 钟点按她的时型往后挪：她 9:31 醒、约 1:34 睡（sleep.ts），比常人晚两三个小时。
  * 时段与 p 是手设的，每个都写在这里；没有一项是按回复延迟挑的。
  */
@@ -103,7 +103,7 @@ export const LENGTH_SIGMA = 0.4;
 const NO_PHONE: ReadonlySet<ActivityKind> = new Set(["shower", "wash"]);
 
 /**
- * 候选 life-l2（docs/research/her-life.md 第 1 片，eval-artifacts/her-life/prereg-1.md）：时段里的事之外，
+ * 醒着时手上一直有事（生产的 life-body 用；docs/research/her-life.md 第 1 片，eval-artifacts/her-life/prereg-1.md）：时段里的事之外，
  * 她醒着的每一刻手上也有一件自己的事。Barabási 的 L = 2 里，人手上一直有一件别的事和消息竞争；生产只在时段里
  * 有事（醒着时约两成），其余时间她一直拿着手机，被找 15 秒就回。
  * 一件做完、或被时段里的事打断，就按权重开始下一件，各抽自己的优先级（和时段里的事同一个 Q）。都在家里、一个人做。
@@ -129,7 +129,7 @@ const lengthOf = (meanMin: number, z: number) =>
   meanMin * MIN * Math.exp(LENGTH_SIGMA * z - (LENGTH_SIGMA * LENGTH_SIGMA) / 2);
 
 /**
- * 候选 life-l2-glance（eval-artifacts/her-life/prereg-3.md）：做别的事时，她隔一阵瞄一眼手机。Andrews et al. 2015
+ * 瞄一眼手机（生产的 life-body 用；eval-artifacts/her-life/prereg-3.md）：做别的事时，她隔一阵瞄一眼手机。Andrews et al. 2015
  * 的 84.68 次里 55% 不到 30 秒，每天约 46.6 次瞄一眼；每次按 15 秒算，和 FILLERS 刷手机长度的推导同一个假设。
  * 只在看得到手机、又不是正在刷手机的事里瞄（洗澡、洗漱不瞄）。瞄的那 15 秒她手上没事，不付代价：消息在那时
  * 照常排序，攒着的也一样。时刻来自这一格没用上的 life-length（这一格没开始新的事时它没被用）：落在 GLANCE_P
@@ -140,7 +140,7 @@ export const GLANCE = { perDay: 0.55 * 84.68, ms: 15_000 } as const;
 export const GLANCE_P = 0.444;
 
 /**
- * Q：被私聊找她的那一刻，那个会话里最好的意愿（NSV）的分位（生产配置、2 月 B 全量回放、rate 桩，醒着时 n = 965；
+ * Q：被私聊找她的那一刻，那个会话里最好的意愿（NSV）的分位（生产配置、2 月 B 全量回放、rate stub，醒着时 n = 965；
  * 脚本 eval-artifacts/life/nsv-probe.mts）。分位点之间线性插值。按秩换算：优先级 x 的事，恰好有 1 − x 的私聊比它重要。
  */
 const NSV_QUANTILES: ReadonlyArray<readonly [number, number]> = [
@@ -166,7 +166,7 @@ export function priorityCost(x: number): number {
   return (NSV_QUANTILES.at(-1) as readonly [number, number])[1];
 }
 
-export interface Doing {
+interface Doing {
   kind: ActivityKind;
   from: number;
   until: number;
@@ -186,7 +186,7 @@ export interface LifeState {
   done: Doing | null;
   /** 每个时段最近一次轮到的"生活日"（一天从早上 6 点算起，跨午夜的时段算前一天）。 */
   slots: Readonly<Record<string, number>>;
-  /** 这一格里她瞄一眼手机的时刻（候选 life-l2-glance；没有就不瞄）。 */
+  /** 这一格里她瞄一眼手机的时刻（glance；没有就不瞄）。 */
   glanceAt?: number;
 }
 
@@ -207,13 +207,29 @@ const lifeMinute = (t: number) => {
   return m < 6 * 60 ? m + 24 * 60 : m;
 };
 
+/** 这一格的标准正态数；旧日志里没有的键按 0（常态）算。 */
+interface Draws {
+  energy: number;
+  social: number;
+  life: number;
+  "life-length": number;
+}
+
+/** 手上在做的和刚做完的。 */
+interface Hands {
+  doing: Doing | null;
+  done: Doing | null;
+}
+
+const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
+
 /**
- * 折叠一次抽样：两条随机游走走一步；手上的事做完了就放下；空着（醒着）时，按此刻各时段的开始概率决定开不开始
+ * fold 一次抽样：两条随机游走走一步；手上的事做完了就放下；空着（醒着）时，按此刻各时段的开始概率决定开不开始
  * 一件事、开始哪件。一个均匀数 u 同时决定开不开始和是哪件，落进的那一段里的位置再换成优先级
  * （仍是均匀的），所以每格只用 life 与 life-length 两个数。
- * fill（候选 life-l2）：手上只是随手的事（FILLERS）时，时段里的事照样开始、打断它；什么都没在做时，用剩下的 u
+ * fill：手上只是随手的事（FILLERS）时，时段里的事照样开始、打断它；什么都没在做时，用剩下的 u
  * 按权重开始一件随手的事。每件事都结束在格子上，醒着的每一格手上都有事。
- * glance（候选 life-l2-glance）：这一格接着做同一件看得到手机的事时，可能在格子里瞄一眼（GLANCE）。
+ * glance：这一格接着做同一件看得到手机的事时，可能在格子里瞄一眼（GLANCE）。
  */
 export function reduceLife(
   life: LifeState,
@@ -223,8 +239,7 @@ export function reduceLife(
   const fill = o.fill === true;
   if (event.type !== "noise.drawn") return life;
   const now = event.at;
-  // 旧日志里没有的键按 0（常态）算。
-  const z = { energy: 0, social: 0, life: 0, "life-length": 0, ...event.draws };
+  const z: Draws = { energy: 0, social: 0, life: 0, "life-length": 0, ...event.draws };
   const hours = life.at > 0 ? (now - life.at) / H : Number.POSITIVE_INFINITY;
   // 第一次：从平稳分布起步（等于走了无限长的一步）。
   const energy = Number.isFinite(hours)
@@ -233,95 +248,138 @@ export function reduceLife(
   const social = Number.isFinite(hours)
     ? ouStep(life.social, SOCIAL_OU, hours, z.social)
     : LIFE_TONE.social.sd * z.social;
-  let doing = life.doing;
-  let done = life.done;
-  if (doing && now >= doing.until) {
-    done = doing;
-    doing = null;
-  }
-  // 睡着了，手上的事也就停了。
-  if (doing && isAsleep(now)) {
-    done = { ...doing, until: now };
-    doing = null;
-  }
-  let slots = life.slots;
-  // fill：结束在下一个整格上，下一件在那一格接上。
-  const span = (length: number) =>
-    fill ? Math.ceil(length / NOISE_EVERY_MS) * NOISE_EVERY_MS : Math.round(length);
-  const idle = !doing || (fill && FILLER.has(doing.kind));
-  if (idle && !isAsleep(now)) {
-    const day = lifeDay(now);
-    const minute = lifeMinute(now);
-    // 上一格到这一格多少分钟（第一格按一个抽样间隔算）。
-    const step = (now - (life.at || now - NOISE_EVERY_MS)) / MIN;
-    let u = normalCdf(z.life);
-    for (const slot of LIFE_SLOTS) {
-      if (minute < slot.from || minute >= slot.to || slots[slot.key] === day) continue;
-      // 时段里均匀开始、总概率 p：剩下的时段里条件化的开始概率（落在这一格里的概率）。
-      const left = (slot.to - minute) / (slot.to - slot.from);
-      const h = Math.min(
-        1,
-        (slot.p * Math.min(step, slot.to - minute)) /
-          (slot.to - slot.from) /
-          Math.max(1e-9, 1 - slot.p * (1 - left)),
-      );
-      if (u >= h) {
-        u = (u - h) / (1 - h);
-        continue;
-      }
-      const kind = slot.kind;
-      // 放下手上随手的事（只有 fill 才会有）。
-      if (doing) done = { ...doing, until: now };
-      doing = {
-        kind,
-        from: now,
-        until: now + span(lengthOf(slot.meanMin, z["life-length"])),
-        priority: NO_PHONE.has(kind) ? 1 : Math.min(1, Math.max(0, u / h)),
-      };
-      slots = { ...slots, [slot.key]: day };
-      break;
-    }
-    // 这一格没开始的、已经过去的时段：今天不再轮到（不必记，minute 超过 to 自然不再进来）。
-    if (fill && !doing) {
-      // 剩下的 u 仍是均匀的：落进哪一段就做哪件，段里的位置就是优先级。
-      let lo = 0;
-      for (const [i, f] of FILLERS.entries()) {
-        const hi = i === FILLERS.length - 1 ? 1 : lo + f.weight / FILLER_WEIGHT;
-        if (u < hi) {
-          doing = {
-            kind: f.kind,
-            from: now,
-            until: now + span(lengthOf(f.meanMin, z["life-length"])),
-            priority: Math.min(1, Math.max(0, (u - lo) / (hi - lo))),
-          };
-          break;
-        }
-        lo = hi;
-      }
-    }
-  }
-  // 接着做同一件看得到手机的事（这一格的 life-length 没被用上）：可能瞄一眼。
-  const g = normalCdf(z["life-length"]);
-  const glances =
-    o.glance === true &&
-    doing !== null &&
-    doing === life.doing &&
-    doing.kind !== "phone" &&
-    !NO_PHONE.has(doing.kind) &&
-    g < GLANCE_P;
+  const hands = putDown(life.doing, life.done, now);
+  const idle = !hands.doing || (fill && FILLER.has(hands.doing.kind));
+  const next =
+    idle && !isAsleep(now) ? pickUp(life, hands, now, z, fill) : { ...hands, slots: life.slots };
+  const glanceAt =
+    o.glance === true ? glanceIn(life.doing, next.doing, now, z["life-length"]) : null;
   return {
     at: now,
     energy,
     social,
-    doing,
-    done,
-    slots,
-    ...(glances ? { glanceAt: now + Math.floor((g / GLANCE_P) * NOISE_EVERY_MS) } : {}),
+    doing: next.doing,
+    done: next.done,
+    slots: next.slots,
+    ...(glanceAt !== null ? { glanceAt } : {}),
   };
 }
 
+/** 手上的事做完了就放下；睡着了，手上的事也就停了。 */
+function putDown(doing: Doing | null, done: Doing | null, now: number): Hands {
+  if (doing && now >= doing.until) return { doing: null, done: doing };
+  if (doing && isAsleep(now)) return { doing: null, done: { ...doing, until: now } };
+  return { doing, done };
+}
+
+/** fill：结束在下一个整格上，下一件在那一格接上。 */
+function spanOf(length: number, fill: boolean): number {
+  return fill ? Math.ceil(length / NOISE_EVERY_MS) * NOISE_EVERY_MS : Math.round(length);
+}
+
+/** 醒着、空着时拿起一件事：先按时段开始概率挑时段里的事；fill 时什么都没在做，就用剩下的 u 挑一件随手的事。 */
+function pickUp(
+  life: LifeState,
+  hands: Hands,
+  now: number,
+  z: Draws,
+  fill: boolean,
+): Hands & { slots: LifeState["slots"] } {
+  const day = lifeDay(now);
+  // 上一格到这一格多少分钟（第一格按一个抽样间隔算）。
+  const step = (now - (life.at || now - NOISE_EVERY_MS)) / MIN;
+  const drawn = drawSlot(life.slots, day, lifeMinute(now), step, normalCdf(z.life));
+  if (drawn.slot) {
+    const { kind, meanMin, key } = drawn.slot;
+    return {
+      // 放下手上随手的事（只有 fill 才会有）。
+      done: hands.doing ? { ...hands.doing, until: now } : hands.done,
+      doing: {
+        kind,
+        from: now,
+        until: now + spanOf(lengthOf(meanMin, z["life-length"]), fill),
+        priority: NO_PHONE.has(kind) ? 1 : clamp01(drawn.u),
+      },
+      slots: { ...life.slots, [key]: day },
+    };
+  }
+  // 这一格没开始的、已经过去的时段：今天不再轮到（不必记，minute 超过 to 自然不再进来）。
+  const filler = fill && !hands.doing ? drawFiller(drawn.u) : null;
+  if (!filler) return { ...hands, slots: life.slots };
+  return {
+    ...hands,
+    doing: {
+      kind: filler.kind,
+      from: now,
+      until: now + spanOf(lengthOf(filler.meanMin, z["life-length"]), fill),
+      priority: filler.priority,
+    },
+    slots: life.slots,
+  };
+}
+
+/**
+ * 按此刻各时段的开始概率挑一件时段里的事。挑中时 u 是落进的那一段里的位置（换成优先级）；
+ * 没挑中时 slot 为 null，u 是剩下的均匀数（仍是均匀的）。
+ */
+function drawSlot(
+  slots: LifeState["slots"],
+  day: number,
+  minute: number,
+  step: number,
+  u0: number,
+): { slot: Slot | null; u: number } {
+  let u = u0;
+  for (const slot of LIFE_SLOTS) {
+    if (minute < slot.from || minute >= slot.to || slots[slot.key] === day) continue;
+    // 时段里均匀开始、总概率 p：剩下的时段里条件化的开始概率（落在这一格里的概率）。
+    const left = (slot.to - minute) / (slot.to - slot.from);
+    const h = Math.min(
+      1,
+      (slot.p * Math.min(step, slot.to - minute)) /
+        (slot.to - slot.from) /
+        Math.max(1e-9, 1 - slot.p * (1 - left)),
+    );
+    if (u >= h) {
+      u = (u - h) / (1 - h);
+      continue;
+    }
+    return { slot, u: u / h };
+  }
+  return { slot: null, u };
+}
+
+/** 剩下的 u 仍是均匀的：落进哪一段就做哪件随手的事，段里的位置就是优先级。 */
+function drawFiller(u: number): { kind: ActivityKind; meanMin: number; priority: number } | null {
+  let lo = 0;
+  for (const [i, f] of FILLERS.entries()) {
+    const hi = i === FILLERS.length - 1 ? 1 : lo + f.weight / FILLER_WEIGHT;
+    if (u < hi)
+      return { kind: f.kind, meanMin: f.meanMin, priority: clamp01((u - lo) / (hi - lo)) };
+    lo = hi;
+  }
+  return null;
+}
+
+/** 接着做同一件看得到手机的事（这一格的 life-length 没被用上）：可能瞄一眼，返回瞄的时刻；不瞄返回 null。 */
+function glanceIn(
+  prev: Doing | null,
+  doing: Doing | null,
+  now: number,
+  zLength: number,
+): number | null {
+  const g = normalCdf(zLength);
+  const glances =
+    doing !== null &&
+    doing === prev &&
+    doing.kind !== "phone" &&
+    !NO_PHONE.has(doing.kind) &&
+    g < GLANCE_P;
+  return glances ? now + Math.floor((g / GLANCE_P) * NOISE_EVERY_MS) : null;
+}
+
 /** 她此刻正在瞄一眼手机（GLANCE 的那 15 秒）。 */
-export function glancing(life: LifeState, now: number): boolean {
+function glancing(life: LifeState, now: number): boolean {
   return life.glanceAt !== undefined && now >= life.glanceAt && now < life.glanceAt + GLANCE.ms;
 }
 
@@ -343,25 +401,15 @@ const NO_PHONE_COST = 2 * priorityCost(1);
 const JUST_DONE = 20 * MIN;
 
 /**
- * 她自己的生活：从 noise.drawn 折进 world.life，写成此刻的事实。occupies：手上正在做的事让此刻的所有意愿都多付
- * 它的优先级（Barabási 的优先队列，在 NSV 的刻度上直接减，不乘 λ：priorityCost 就是按 NSV 的分布换算的）；
- * 消融 life-facts 不占用她（生活照样过、照样写成事实）。
- * warm：warmth 的想不想说话（sociability，见下；生产开着）。
- * fill：候选 life-l2，醒着时手上一直有事（FILLERS）。
- * glance：候选 life-l2-glance，做事时隔一阵瞄一眼手机（GLANCE），瞄的那 15 秒不付代价。
- * scan：候选 life-l2-glance-scan，瞄的那一眼扫过各个会话：有新消息的会话都按最新那条再问一次要不要醒
- * （mind/step.ts onTick），而不是只有节律排第一的那一个——看手机的人会扫一遍通知，可能回好几个。
- * 窗口就是那一眼本身，没有别的常数。
+ * 她自己的生活（身体 life-body.ts 之前的那一版，旧底的组别用）：从 noise.drawn fold 进 world.life，写成此刻的事实。
+ * 手上正在做的事让此刻的所有意愿都多付它的优先级（Barabási 的优先队列，在 NSV 的刻度上直接减，不乘 λ：
+ * priorityCost 就是按 NSV 的分布换算的）。
+ * warm：warmth 的想不想说话（sociability，见下）。
+ * fill、glance 只给 test/life.test.ts 的空跑：生产的 life-body 用的 FILLERS、GLANCE_P 在那里校准。
  */
-export function life(o: {
-  occupies: boolean;
-  warm?: boolean;
-  fill?: boolean;
-  glance?: boolean;
-  scan?: boolean;
-}): PressureFeature {
+export function life(o: { warm?: boolean; fill?: boolean; glance?: boolean }): PressureFeature {
   return feature({
-    name: `${o.occupies ? "life" : "lifefacts"}${o.fill ? "-l2" : ""}${o.glance ? "-glance" : ""}${o.scan ? "-scan" : ""}${o.warm ? "-warm" : ""}`,
+    name: `life${o.fill ? "-l2" : ""}${o.glance ? "-glance" : ""}${o.warm ? "-warm" : ""}`,
     provides: ["life"],
     // 想不想说话（warm）随她的心情起伏；没有心情那一样时按心情的初始值算（列在组合的 gaps 里）。
     uses: o.warm ? ["affect"] : [],
@@ -371,12 +419,7 @@ export function life(o: {
         : w,
     contribute: ({ world, now }) =>
       lifeFacts(world.life, now, o.warm ? sociability(world.life, world.affect, now) : undefined),
-    ...(o.occupies
-      ? { will: { busy: (world: View<"life">, now: number) => busyCost(world.life, now) } }
-      : {}),
-    ...(o.glance && o.scan
-      ? { scans: (world: View<"life">, now: number) => glancing(world.life, now) }
-      : {}),
+    will: { busy: (world: View<"life">, now: number) => busyCost(world.life, now) },
   });
 }
 
@@ -421,7 +464,7 @@ function activity(life: LifeState, now: number): string[] {
  * 想不想说话不给（消融 warmth-no-life：常态 0 的随机游走）时只在低于常态 1.5 个标准差时写（out.md 设计 2-1）；
  * 给了（warmth 的 sociability）按它的低尾。
  */
-export const QUIET_SD = 1.5;
+const QUIET_SD = 1.5;
 
 export function lifeFacts(
   life: LifeState,
@@ -433,22 +476,22 @@ export function lifeFacts(
     quiet: life.social < -QUIET_SD * LIFE_TONE.social.sd,
     chatty: life.social > LIFE_TONE.social.sd,
   };
-  const energy = alertness(now) + life.energy;
-  const tired = energy < TIRED;
-  const lively = !tired && life.energy > LIFE_TONE.energy.sd;
-  const tone = tired
-    ? `我这会儿有点累，没什么精神${chatty ? "，但挺想找人聊聊天" : ""}。`
-    : lively
-      ? `我这会儿精神挺好${chatty ? "，挺想找人聊聊天" : quiet ? "，但人比较安静" : ""}。`
-      : chatty
-        ? "我这会儿挺想找人聊聊天。"
-        : quiet
-          ? "我这会儿人有点犯懒、比较安静。"
-          : null;
+  const tone = toneLine(life, now, quiet, chatty);
   const lines = [...activity(life, now), ...(tone ? [tone] : [])];
   return lines.length > 0
     ? [{ mechanism: "pressure-life", kind: "state", text: lines.join("\n") }]
     : [];
+}
+
+/** 精力和想不想说话写成一句体感；都在常态附近时没有这一句。 */
+function toneLine(life: LifeState, now: number, quiet: boolean, chatty: boolean): string | null {
+  const tired = alertness(now) + life.energy < TIRED;
+  if (tired) return `我这会儿有点累，没什么精神${chatty ? "，但挺想找人聊聊天" : ""}。`;
+  if (life.energy > LIFE_TONE.energy.sd) {
+    return `我这会儿精神挺好${chatty ? "，挺想找人聊聊天" : quiet ? "，但人比较安静" : ""}。`;
+  }
+  if (chatty) return "我这会儿挺想找人聊聊天。";
+  return quiet ? "我这会儿人有点犯懒、比较安静。" : null;
 }
 
 /**
@@ -462,9 +505,9 @@ export function lifeFacts(
  * - 低的那句只在低尾写（说法见 lifeFacts）。低到一般人的"不想说话"（人群标准分 −1 以下）才写，
  *   对她是常态以下 2.27 个标准差，平稳时约 1% 的时候。"挺想找人聊聊天"仍是比她平时高一个标准差。
  */
-export const SOCIAL_HOME = topQuarterMean();
+const SOCIAL_HOME = topQuarterMean();
 /** 心情和想不想说话的组内相关。 */
-export const SOCIAL_MOOD_RHO = 0.5;
+const SOCIAL_MOOD_RHO = 0.5;
 
 /** 标准正态最高四分之一的均值：φ(z) / 0.25，z = Φ⁻¹(0.75) ≈ 0.6745。 */
 function topQuarterMean(): number {
@@ -473,7 +516,7 @@ function topQuarterMean(): number {
 }
 
 export function sociability(
-  life: LifeState,
+  life: Pick<LifeState, "social">,
   affect: AffectState,
   now: number,
 ): { quiet: boolean; chatty: boolean } {

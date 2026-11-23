@@ -5,7 +5,7 @@
  * 用法：tsx src/import-history.ts <目标 alice.db> <来源库> [<来源库> ...] [--apply]
  *   不带 --apply 只演练：报告每个来源的条数、去重后条数和时间范围，不写入。
  *   --apply 只在目标 Journal 里还没有新格式事件时写入（不重复导入）；8 月运行时的旧格式行不动。
- * 对生产库执行属于上线步骤；先在副本上运行并用 start:check 核对折叠结果。
+ * 对生产库执行属于上线步骤；先在副本上运行并用 start:check 核对 fold 结果。
  */
 import Database from "better-sqlite3";
 import { initDb } from "./db/connection.js";
@@ -90,10 +90,10 @@ function main(): void {
   }
   const { events, perSource } = collectHistory(sources);
   for (const s of perSource) console.log(`${s.source}: ${s.rows} rows, ${s.kept} new after dedupe`);
-  const first = events[0]?.at;
-  const last = events.at(-1)?.at;
+  const first = events[0]?.at ?? 0;
+  const last = events.at(-1)?.at ?? 0;
   console.log(
-    `total ${events.length} events, ${first ? new Date(first).toISOString() : "-"} .. ${last ? new Date(last).toISOString() : "-"}`,
+    `total ${events.length} events, ${first > 0 ? new Date(first).toISOString() : "-"} .. ${last > 0 ? new Date(last).toISOString() : "-"}`,
   );
   initDb(target);
   const written = importHistory(events, apply);

@@ -40,9 +40,6 @@ const request: ReflectRequest = {
 describe("the reflection marks what was entrusted or plainly private, in the same call", () => {
   it("asks for private on every kind of item it writes", () => {
     const p = renderReflectPrompt("PERSONA", request);
-    expect(p.system).toContain(
-      "- private：这一条是别人托你保密的事，或明显私密的事（健康、感情、要给谁的惊喜），写 true；其余写 false。",
-    );
     for (const field of ['"entries"', '"mood"', '"facts"', '"self"']) {
       const line = p.system.split("\n").find((l) => l.includes(field));
       expect(line).toContain('"private": true或false');
@@ -168,10 +165,9 @@ describe("what she thinks or feels while speaking can be marked too", () => {
     affordances: affordances.map((a) => a.kind),
   } as never;
 
-  it("[inner] and [心情] offer an optional secret, described once", () => {
+  it("[inner] and [心情] offer an optional secret", () => {
     const sdk = codeMode.rules(affordances.filter((a) => a.kind === "think" || a.kind === "feel"));
     expect(sdk.match(/ {4}secret\?: "私密";/g)).toHaveLength(2);
-    expect(sdk.match(/健康、感情、要给谁的惊喜/g)).toHaveLength(2);
   });
 
   it("reads secret as 私密 (or true); anything else, or nothing, leaves no field", () => {

@@ -8,11 +8,12 @@
 import type { Dispatcher } from "@mtcute/dispatcher";
 import { describe, expect, it } from "vitest";
 import { productionMechanisms } from "../src/mechanisms/registry.js";
-import type { SpeechRequest } from "../src/mind/effects.js";
+import type { Effect, SpeechRequest } from "../src/mind/effects.js";
 import type { AliceEvent, MessageReceived } from "../src/mind/events.js";
 import { type AliceState, emptyState } from "../src/mind/state.js";
 import { step, towardHer } from "../src/mind/step.js";
 import { bindTelegramWorldAdapter } from "../src/telegram/world-adapter.js";
+import { mtcuteFake } from "./mtcute-fake.js";
 
 const G = "telegram:-1009";
 // 东八区下午两点：她醒着，不在做事。
@@ -51,34 +52,48 @@ function loop(events: readonly AliceEvent[], mark: AliceEvent) {
   let request: SpeechRequest | null = null;
   let seen = false;
   while (queue.length > 0 || later.length > 0) {
-    later.sort((a, b) => a.at - b.at);
-    const first = later[0];
-    const next =
-      first && (queue.length === 0 || first.at <= (queue[0] as AliceEvent).at)
-        ? (later.shift() as AliceEvent)
-        : (queue.shift() as AliceEvent);
+    const next = takeNext(queue, later);
     const r = step(state, next, mechanisms);
     state = r.state;
     if (next === mark) {
       seen = true;
       marked = r.effects.map((e) => e.type);
     }
-    for (const e of r.effects) {
-      if (e.type === "set-timer")
-        later.push({ type: "timer.fired", at: e.at, scope: e.scope, timerId: e.timerId });
-      if (e.type === "call-speech") {
-        if (seen && request === null) request = e.request;
-        later.push({
+    if (seen && request === null) {
+      request = r.effects.find((e) => e.type === "call-speech")?.request ?? null;
+    }
+    later.push(...echoes(r.effects, next.at));
+  }
+  return { marked, request };
+}
+
+/** 下一个事件：到点的计时器或发言结果不晚于下一个输入事件时先送它。 */
+function takeNext(queue: AliceEvent[], later: AliceEvent[]): AliceEvent {
+  later.sort((a, b) => a.at - b.at);
+  const first = later[0];
+  return first && (queue.length === 0 || first.at <= (queue[0] as AliceEvent).at)
+    ? (later.shift() as AliceEvent)
+    : (queue.shift() as AliceEvent);
+}
+
+/** 副作用在闭环里引起的事件：计时器到点送 timer.fired，发言调用 5 秒后回"不说话"。 */
+function echoes(effects: readonly Effect[], at: number): AliceEvent[] {
+  return effects.flatMap((e): AliceEvent[] => {
+    if (e.type === "set-timer")
+      return [{ type: "timer.fired", at: e.at, scope: e.scope, timerId: e.timerId }];
+    if (e.type === "call-speech") {
+      return [
+        {
           type: "speech.decided",
-          at: next.at + 5 * S,
+          at: at + 5 * S,
           scope: e.scope,
           callId: e.callId,
           decision: { acts: [] },
-        });
-      }
+        },
+      ];
     }
-  }
-  return { marked, request: request as SpeechRequest | null };
+    return [];
+  });
 }
 
 describe("回复她的一条就是在找她（心智）", () => {
@@ -129,11 +144,11 @@ describe("回复她的一条就是在找她（心智）", () => {
 describe("回复她的一条就是在找她（入站适配只记事实，心智来定）", () => {
   function bind() {
     const events: AliceEvent[] = [];
-    const dispatcher = {
+    const dispatcher = mtcuteFake<Dispatcher>({
       onNewMessage: () => {},
       onRawUpdate: () => {},
       onChatMemberUpdate: () => {},
-    } as unknown as Dispatcher;
+    });
     const { receive } = bindTelegramWorldAdapter(dispatcher, {
       selfId: "42",
       now: () => 1000,

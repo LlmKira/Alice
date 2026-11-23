@@ -1,9 +1,9 @@
 /**
- * 可供性登记表：她在世界里能做的每一件事登记一次。发言、贴纸、表情、标记已读、退群、加群都是表里的一行；
+ * affordance 登记表：她在世界里能做的每一件事登记一次。发言、贴纸、表情、标记已读、退群、加群都是表里的一行；
  * 私聊别人不单列，是意愿层选中那个私聊会话后在里面 send。记下答应的事、记下心情是她心里的事
- * （via: "mind"）：没有 Telegram 效果，外壳直接记为 act.done，由机制折进世界。
+ * （via: "mind"）：不经聊天平台，外壳直接记为 act.done，由机制 fold 进世界。
  *
- * 新增一种能力：在 Act 里加一个形状、在 affordances 里加一行；经 Telegram 做的，在 telegram/acts.ts 的执行表里
+ * 新增一种能力：在 Act 里加一个形状、在 affordances 里加一行；经平台做的，在各平台的执行表（如 telegram/acts.ts）里
  * 补一项（类型会强制补上）。一行用类型化的字段说清它的一切：经哪条通道做（via）、要不要机制提供（gated）、
  * 会不会留下她的一条消息（posts）、做完之后会话里有什么变化（after）。settle、step、外壳和输出格式都按这些字段
  * 通用处理，不按种类写分支。
@@ -36,8 +36,6 @@ export type Act =
   | { kind: "let-go"; messageId: string }
   /** 她此刻的心情（她自己的词）和原因；secret：原因是别人托她保密的、明显私密的（只守受众规则）。 */
   | { kind: "feel"; mood: string; why: string | null; secret?: typeof SECRET }
-  /** 一句只有她自己看得见的心里话（about = 关于谁，就是他说的那条消息；不写就不针对谁）。 */
-  | { kind: "diary"; about: string | null; entry: string }
   /** 她此刻心里在想什么（2 月 think()）：不发出去，这个会话里过一会儿还记得；secret 同 feel。 */
   | { kind: "think"; thought: string; secret?: typeof SECRET }
   /** 她在这个会话里开始跟一件还没完的事（2 月 begin_topic），title 是她自己的话。 */
@@ -52,6 +50,8 @@ export type Act =
   | { kind: "voice"; text: string }
   /** 改她自己在这个会话里刚发的一条文字消息（改错字、改口；2 月 edit_message）。 */
   | { kind: "edit"; messageId: string; text: string }
+  /** 撤回/删除她自己在这个会话里刚发的一条消息（例如 QQ 不能改消息，但能撤回）。 */
+  | { kind: "unsend"; messageId: string }
   /** 群里大家连着发同一句时，跟着发一遍（2 月 repeat_message）：messageId 是被复读的那条。 */
   | { kind: "repeat"; messageId: string }
   /** 按关键词、@用户名或 t.me 链接找公开的群和频道；看到的预览回到这个会话。 */
@@ -62,14 +62,14 @@ export type Act =
   | { kind: "recall"; query: string | null; subject: string | null }
   /** 在 run_code 里主动记下或更正一条关于自己的话（发现前后矛盾时用 replaces 换掉旧说法）。 */
   | { kind: "note-self"; text: string; replaces: string | null }
-  /** 在 run_code 里核对对某人/来源群的私聊接收度与外部社交规范协议（是否需要先在群里打招呼）。 */
+  /** 在 run_code 里看看认识某人的那个群对私聊的态度（要不要先在群里打个招呼）。 */
   | { kind: "dm-check"; who: string | null }
   /** 在初次私聊里暂缓直接开口，记下一笔打算留到来源群里先自然问一句方不方便私聊。 */
   | { kind: "dm-defer"; reason: string };
 export type ActKind = Act["kind"];
 
-/** 驱动键由压力场（mechanisms/pressure）计算；这里只声明可供性能缓解哪些。 */
-export type DriveKey =
+/** 驱动键由压力场（mechanisms/pressure）计算；这里只声明 affordance 能缓解哪些。 */
+type DriveKey =
   | "attention"
   | "obligation"
   | "cooling"
@@ -78,26 +78,28 @@ export type DriveKey =
   | "thread"
   | "prospect"
   | "aversion"
-  /** 群里别人的话对上她心里的东西、说话的人最近和她有来往（候选 groupturn）。 */
+  /** 群里别人的话对上她心里的东西、说话的人最近和她有来往（group-pull.ts）。 */
   | "topic"
   | "bond";
 
-export type EntityKind = "chat" | "message" | "contact";
+type EntityKind = "chat" | "message" | "contact";
 
-/** 社交侵入度（2 月 social-cost.ts）。solicited 由意愿层按世界状态判断。 */
-export interface Intrusiveness {
+/** 社交 intrusiveness（2 月 social-cost.ts）。solicited 由意愿层按世界状态判断。 */
+interface Intrusiveness {
   private: { solicited: number; unsolicited: number };
   group: { solicited: number; unsolicited: number };
 }
 
 /**
  * 动作参数的种类，决定怎么校验（mind/args.ts）：消息编号必须在这个会话里，own 还必须是她自己
- * EDIT_WINDOW_MS 之内发的文字消息（改消息：不改别人的话，不改很久以前的），表情和贴纸必须在词表里。
+ * EDIT_WINDOW_MS 之内发的文字消息（改消息：不改别人的话，不改很久以前的），recent 是她自己
+ * UNSEND_WINDOW_MS 之内发的任何一条（撤回），表情和贴纸必须在词表里。
  */
 export type ArgKind =
   | "text"
   | "message"
   | "own"
+  | "recent"
   | "emoji"
   | "sticker"
   | "mood"
@@ -116,7 +118,8 @@ const SECRET_ARG: ArgSpec = {
   kind: "secret",
   optional: true,
   sparse: true,
-  about: "这是别人托你保密的事，或明显私密的事（健康、感情、要给谁的惊喜）时写上；其余不写",
+  about:
+    "Set when asked to keep this confidential or clearly private (health, romance, a planned surprise); otherwise omit",
 };
 
 export interface ArgSpec {
@@ -139,7 +142,7 @@ export type PostKind = "text" | "sticker" | "photo" | "voice" | "forward";
  * 会在会话里留下一条她的消息（计入连发上限）：留下的是 as 这一种，内容取自 from 这一类参数；
  * 参数是消息编号时（复读），内容是那条消息的原话。
  */
-export interface Posts {
+interface Posts {
   as: PostKind;
   from: ArgKind;
 }
@@ -148,13 +151,13 @@ export interface Posts {
  * 看了才知道的动作（翻相册、查一下、找群）：外壳把结果写进 act.done，回到这个会话，她看了再做下一步。
  * as 是她经历这件事的说法，提示词里写成"你翻了翻相册：……"。
  */
-export interface Look {
+interface Look {
   type: "look";
   as: string;
 }
 
 /** 做完之后这个会话里有什么变化（step 的 act.done 按它处理）。 */
-export type After =
+type After =
   | Look
   /**
    * 给记录里的一条消息加注（参数里要有一条 message）：那一行后面带上这句（"你说过这事先不追究了"）。
@@ -164,17 +167,19 @@ export type After =
   | { type: "annotate"; note: string }
   /** 改她自己的消息：时间线里那一行换成新的话，带上这个注。 */
   | { type: "revise"; note: string }
+  /** 撤回/删除她自己的消息：时间线里那一行清空原话，带上这个注。 */
+  | { type: "remove"; note: string }
   /** 她还在不在这个会话里（退群、加群）。 */
   | { type: "member"; member: boolean };
 
 /**
- * 执行通道。telegram：外壳排进这个会话的发送队列。mind：她心里的事，不经 Telegram，外壳直接记为 act.done。
+ * 执行通道。telegram：外壳排进这个会话的发送队列。mind：她心里的事，不经聊天平台，外壳直接记为 act.done。
  * errand：交出去在后台办，外壳不排进发送队列，先记 act.started，办完记 act.done（带 result）或 act.failed；
  * 办的时候她照常聊天，提示词里写着 pending 那句。
  *
- * gated：只有某个机制提供它（Mechanism.affordances）时才有。她心里的事没有机制把它折进世界就没有任何后果；
+ * gated：只有某个机制提供它（Mechanism.affordances）时才有。她心里的事没有机制把它 fold 进世界就没有任何后果；
  * 交出去办的事要有能用的执行代理（errands 机制）；发语音、改消息、复读、找群、转发还是候选。消融那个机制，
- * 这一行也一起拿掉。
+ * 这一行也随之删去。
  */
 type Channel =
   | { via: "telegram"; gated: boolean; after?: After }
@@ -184,10 +189,10 @@ type Channel =
       gated: true;
       after: Look;
       /** 还没办完时提示词里的那句（what 是参数，ago 是"刚""5 分钟前"）。 */
-      pending(what: string, ago: string): string;
+      pending: (what: string, ago: string) => string;
     };
 
-/** 判断可供性需要的会话视图：核心状态（chat-view.ts）和意愿层的世界图（chatViewOf）给出同样的字段。 */
+/** 判断 affordance 需要的会话视图：核心状态（chat-view.ts）和意愿层的世界图（chatViewOf）给出同样的字段。 */
 export interface ChatView {
   chatType: ChatType;
   member: boolean;
@@ -214,13 +219,13 @@ export type Affordance = {
   appliesTo: readonly EntityKind[];
   args: readonly ArgSpec[];
   /** 这一行此刻在这个会话里能不能做（不含 gated：机制给不给由 offers 一起判）。只写做不做得到，不写该不该。 */
-  available(chat: ChatView, now: number): boolean;
+  available: (chat: ChatView, now: number) => boolean;
   /**
    * 意愿层能不能为了这件事叫醒她（不写就是能）。醒着时她能做什么由 available 定；为了什么才叫醒她是另一回事：
    * 点表情在哪条消息上都能点，但只有来了新消息才值得为它叫醒——否则意愿层会借"点表情"的缓解每隔几小时叫醒她
    * 一次，醒来却发消息，绕过连发代价（memory-eval）。
    */
-  wakes?(chat: ChatView): boolean;
+  wakes?: (chat: ChatView) => boolean;
   relieves: Partial<Record<DriveKey, number>>;
   intrusiveness: Intrusiveness;
   /**
@@ -243,7 +248,7 @@ const member = (chat: ChatView) => chat.member;
  * 这类话时，读了它的那一轮做不出不可逆的动作；过了 LOOKED_MS、结果不在提示词里了，照常可用。
  * settle 也按 available 判，所以模型照写了标记也不会执行。
  */
-export function readOutside(chat: ChatView, now: number): boolean {
+function readOutside(chat: ChatView, now: number): boolean {
   return chat.looked.some((l) => now - l.at <= LOOKED_MS && affordanceOf(l.kind).outside === true);
 }
 
@@ -252,8 +257,10 @@ export function readOutside(chat: ChatView, now: number): boolean {
  * （研究员 2026-11-12：只写做不做得到，不替她定习惯；原先的 10 分钟是对习惯的猜测）。
  */
 export const EDIT_WINDOW_MS = 48 * 60 * 60_000;
+/** 她能撤回自己多久之内发的消息：QQ 撤回窗口 2 分钟。 */
+export const UNSEND_WINDOW_MS = 2 * 60_000;
 
-/** 默认（未测、暂定）的侵入度；send、react、mark-read 取自 2 月 social-cost.ts。 */
+/** 默认（未测、暂定）的 intrusiveness；send、react、mark-read 取自 2 月 social-cost.ts。 */
 const flat = (v: number): Intrusiveness => ({
   private: { solicited: v, unsolicited: v },
   group: { solicited: v, unsolicited: v },
@@ -273,17 +280,16 @@ const rows = [
   {
     kind: "send",
     name: "say",
-    hint: "发一条消息",
+    hint: "Send a message",
     appliesTo: ["chat"],
     args: [
-      { field: "text", kind: "text", about: "要说的话" },
+      { field: "text", kind: "text", about: "Message text" },
       {
         field: "replyTo",
         kind: "message",
         optional: true,
-        // 2026-11-13 Gemini 改稿 2（docs/adr/282-speech-style-and-room-voice.md）：别人刚回复你、你顺着往下接时通常不引用回去。
         about:
-          "引用回复哪条（编号）；群里隔条接话时填上；紧挨着上一条、或别人刚回复你而你顺着往下接时通常省略",
+          "Message ID to reply to (useful in busy groups when jumping back to an earlier message; omit when continuing directly)",
       },
     ],
     available: member,
@@ -307,9 +313,9 @@ const rows = [
   {
     kind: "sticker",
     name: "sticker",
-    hint: "发一张贴纸",
+    hint: "Send a sticker",
     appliesTo: ["chat"],
-    args: [{ field: "word", kind: "sticker", about: "贴纸的词" }],
+    args: [{ field: "word", kind: "sticker", about: "Sticker keyword or short visual phrase" }],
     available: member,
     relieves: { attention: 1, obligation: 0.5, cooling: 0.7, bond: 0.7 },
     intrusiveness: SHOWING,
@@ -321,11 +327,11 @@ const rows = [
   {
     kind: "react",
     name: "react",
-    hint: "给某条消息点个表情（看过了、顺手笑一下或轻声表态；适合群友发图、玩梗但没必要接话时，点完就够）",
+    hint: "React to a message with an emoji (useful for memes, images, or a quick acknowledgment without replying in text)",
     appliesTo: ["message"],
     args: [
-      { field: "messageId", kind: "message", about: "哪条消息（编号）" },
-      { field: "emoji", kind: "emoji", about: "表情" },
+      { field: "messageId", kind: "message", about: "Target message ID" },
+      { field: "emoji", kind: "emoji", about: "Reaction emoji" },
     ],
     // 醒着时哪条都能点；只有来了还没回应过的新消息，才值得为点表情叫醒她（见 wakes）。
     available: member,
@@ -342,7 +348,7 @@ const rows = [
   {
     kind: "mark-read",
     name: "mark_read",
-    hint: "只标记已读、不回复",
+    hint: "Mark chat as read without replying",
     appliesTo: ["chat"],
     args: [],
     available: member,
@@ -355,7 +361,7 @@ const rows = [
   {
     kind: "leave-chat",
     name: "leave_chat",
-    hint: "退出这个群",
+    hint: "Leave this group",
     appliesTo: ["chat"],
     args: [],
     available: (chat, now) => chat.chatType === "group" && chat.member && !readOutside(chat, now),
@@ -369,7 +375,7 @@ const rows = [
   {
     kind: "join-chat",
     name: "join_chat",
-    hint: "加入这个群",
+    hint: "Join this group",
     appliesTo: ["chat"],
     args: [],
     // 只对她不在其中的已知群可用；目前只有意愿层跨会话选目标时才会出现这种决定。
@@ -384,9 +390,9 @@ const rows = [
   {
     kind: "album-search",
     name: "search_album",
-    hint: "从相册里找一张图（在群里见过的图）",
+    hint: "Search saved photos seen earlier in groups",
     appliesTo: ["chat"],
-    args: [{ field: "query", kind: "text", about: "想找什么样的图", slot: "想找的图" }],
+    args: [{ field: "query", kind: "text", about: "Image search query", slot: "query" }],
     available: member,
     // 不缓解任何驱动：意愿层不会为"翻相册"叫醒她，醒着时想翻才翻。
     relieves: {},
@@ -400,9 +406,9 @@ const rows = [
     kind: "delegate",
     name: "look_up",
     // PTC 轮内查询：调用 await tools.look_up({ task }) 会当场返回结果文本，直接在同一段代码里接着说。
-    hint: "上网查客观事实（天气、新番、新闻、链接内容）或算日子",
+    hint: "Search the web or look up live facts (weather, news, anime, links, dates)",
     appliesTo: ["chat"],
-    args: [{ field: "task", kind: "text", about: "要查的事", slot: "要查的事" }],
+    args: [{ field: "task", kind: "text", about: "What to look up", slot: "task" }],
     // 同一个会话里一次只查一件，上一件还没查完就不再查；查完回来、别人还没再说话时也不再查
     // （lookRun 在别人说话时归零）。场景探针里结果回来那一轮她又查了一遍同样的事，两次结果各叫醒她一次，
     // 同一句话说了两遍；结果里写着"再查一下"时也停得下来（花费上限）。
@@ -420,9 +426,9 @@ const rows = [
   {
     kind: "album-send",
     name: "send_photo",
-    hint: "把相册里的一张图发出来（编号是翻相册时看到的）",
+    hint: "Send a photo from the album using an asset ID returned by search_album",
     appliesTo: ["chat"],
-    args: [{ field: "asset", kind: "text", about: "图的编号", slot: "图的编号" }],
+    args: [{ field: "asset", kind: "text", about: "Asset ID from search_album", slot: "asset" }],
     // 只在这个会话里刚翻过相册之后出现：没看过就没有编号可发（探针里没翻就发，3/10 编了不存在的编号）。
     available: (chat, now) =>
       chat.member && chat.looked.some((l) => l.kind === "album-search" && now - l.at <= LOOKED_MS),
@@ -436,26 +442,23 @@ const rows = [
   {
     kind: "intend",
     name: "intend",
-    hint: "记下你答应别人的事、或打算做的事",
+    hint: "Record something you promised or plan to do",
     appliesTo: ["chat"],
     args: [
       {
         field: "when",
         kind: "when",
         optional: true,
-        about: "什么时候，像今天、明天晚上、周五、下周、11月20日、两小时后；没说就不写",
+        about: "When (e.g. today, tonight, Friday, next week, in 2 hours; omit if unspecified)",
       },
-      { field: "what", kind: "text", about: "要做的事", slot: "要做的事" },
-      // Gemini 写的原文（/home/alice/.local/share/alice-briefs/prompt-gemini/out-cross-intent.md 第一段）：她看不见会话的
-      // 内部编号，只看得见群名和人名，所以写名字，由记忆认出是哪个会话（recall.ts placeNamed）。
+      { field: "what", kind: "text", about: "What to do", slot: "what" },
       {
         field: "where",
         kind: "text",
         optional: true,
         sparse: true,
-        slot: "在哪做",
-        about:
-          "要去哪个群或哪个人的私聊里做，就写那个群的名字或那个人的名字；就在当前聊天里做就不写",
+        slot: "where",
+        about: "Target group or person name if meant for another chat; omit for current chat",
       },
     ],
     available: () => true,
@@ -468,9 +471,9 @@ const rows = [
   {
     kind: "fulfil",
     name: "fulfil",
-    hint: "记下答应过或打算过的一件事已经做完了",
+    hint: "Mark a planned or promised item as done",
     appliesTo: ["chat"],
-    args: [{ field: "what", kind: "text", about: "哪件事", slot: "哪件事" }],
+    args: [{ field: "what", kind: "text", about: "Which item", slot: "what" }],
     available: () => true,
     relieves: {},
     intrusiveness: flat(0),
@@ -481,9 +484,9 @@ const rows = [
   {
     kind: "let-go",
     name: "let_go",
-    hint: "对某条让你不舒服的话说算了、先不追究（之后记录里那一行会带个注）",
+    hint: "Mark a message you have decided to let go of so it stops weighing on you",
     appliesTo: ["message"],
-    args: [{ field: "messageId", kind: "message", about: "哪条消息（编号）" }],
+    args: [{ field: "messageId", kind: "message", about: "Target message ID" }],
     available: () => true,
     relieves: {},
     intrusiveness: flat(0),
@@ -495,35 +498,18 @@ const rows = [
   {
     kind: "feel",
     name: "feel",
-    hint: "记下你此刻的心情",
+    hint: "Record your current mood",
     appliesTo: ["chat"],
     args: [
-      { field: "mood", kind: "mood", about: "心情" },
-      { field: "why", kind: "text", optional: true, about: "原因，可以不写", slot: "为什么" },
-      SECRET_ARG,
-    ],
-    available: () => true,
-    relieves: {},
-    intrusiveness: flat(0),
-    deliberate: false,
-    via: "mind",
-    gated: true,
-  },
-  {
-    // 2 月 diary()（ADR-82）；说明取自 2 月人格里的一句："Your diary is where you put the things you'd never say out loud."
-    kind: "diary",
-    name: "diary",
-    // 写成什么时候写：逐代 A/B 第四代之前只说了是什么，日记只写了 0–2%（2 月 12–48%）。
-    hint: "这一刻有让你在意、过后还会想起的事，想在日记里记一句说不出口的心里话",
-    appliesTo: ["contact", "chat"],
-    args: [
+      { field: "mood", kind: "mood", about: "Mood word or short phrase" },
       {
-        field: "about",
-        kind: "message",
+        field: "why",
+        kind: "text",
         optional: true,
-        about: "关于谁，就写他说的那条消息的编号；不针对谁就不写",
+        about: "Reason or trigger (optional)",
+        slot: "why",
       },
-      { field: "entry", kind: "text", about: "心里话", slot: "心里话" },
+      SECRET_ARG,
     ],
     available: () => true,
     relieves: {},
@@ -537,11 +523,12 @@ const rows = [
     kind: "think",
     // 名字不用 think：推理模型在 think 里写分析式推理。
     name: "inner",
-    // 写成"第一反应"而不是"先想清楚"：深思式的说法让她更冷静、更不鲜活；2 月的 think 是脱口而出的情绪
-    // （scenes/candidates.md G2c）。要短：exec-mode 那一轮的写法。
-    hint: "开口前心里闪过的真实念头，像自言自语，不用讲道理",
+    hint: "Jot an immediate private thought before speaking (short gut reaction)",
     appliesTo: ["chat"],
-    args: [{ field: "thought", kind: "text", about: "心里想的", slot: "心里想的" }, SECRET_ARG],
+    args: [
+      { field: "thought", kind: "text", about: "Private thought", slot: "thought" },
+      SECRET_ARG,
+    ],
     available: () => true,
     relieves: {},
     intrusiveness: flat(0),
@@ -554,9 +541,9 @@ const rows = [
   {
     kind: "topic-open",
     name: "open_topic",
-    hint: "记下一件你想在这里跟下去、还没完的事",
+    hint: "Start tracking an ongoing topic here",
     appliesTo: ["chat"],
-    args: [{ field: "title", kind: "text", about: "这件事", slot: "这件事" }],
+    args: [{ field: "title", kind: "text", about: "Topic title", slot: "title" }],
     available: () => true,
     relieves: {},
     intrusiveness: flat(0),
@@ -567,11 +554,11 @@ const rows = [
   {
     kind: "topic-advance",
     name: "advance_topic",
-    hint: "记下你跟着的那件事有了什么进展",
+    hint: "Record progress on a tracked topic",
     appliesTo: ["chat"],
     args: [
-      { field: "topic", kind: "text", about: "哪件事", slot: "哪件事" },
-      { field: "beat", kind: "text", about: "到哪了", slot: "到哪了" },
+      { field: "topic", kind: "text", about: "Topic name", slot: "topic" },
+      { field: "beat", kind: "text", about: "What changed or happened", slot: "beat" },
     ],
     available: () => true,
     relieves: {},
@@ -583,9 +570,9 @@ const rows = [
   {
     kind: "topic-close",
     name: "close_topic",
-    hint: "记下你跟着的那件事已经了结",
+    hint: "Close a tracked topic once it is finished",
     appliesTo: ["chat"],
-    args: [{ field: "topic", kind: "text", about: "哪件事", slot: "哪件事" }],
+    args: [{ field: "topic", kind: "text", about: "Topic name", slot: "topic" }],
     available: () => true,
     relieves: {},
     intrusiveness: flat(0),
@@ -598,8 +585,7 @@ const rows = [
     // 她再道一次晚安（live 一夜对同一个人五次）。这一行是她真去睡了；只在夜里给（bedtime 的 offers）。
     kind: "bed",
     name: "go_to_bed",
-    // bedtime 第一轮：真实那一夜剩下的宣布都在她选这一行之前（先口头道晚安，过一阵才选）。说晚安和去睡是同一件事。
-    hint: "道晚安、要去睡觉的时候：说了晚安，你就是去睡了",
+    hint: "Go to sleep when saying goodnight (calling this puts you to sleep)",
     appliesTo: ["chat"],
     args: [],
     available: () => true,
@@ -614,10 +600,9 @@ const rows = [
   {
     kind: "voice",
     name: "voice",
-    // "偶尔"和贴纸的"偶尔发"一样是软引导：每条都发语音的人不像真人；引导情绪表达与亲近重要时刻用声音，不写死台词。
-    hint: "偶尔把一句想说的话用语音发出去，适合撒娇、护短、心情起伏想说得更真切，或者懒得打长字、深夜陪人聊天时",
+    hint: "Send a short voice message instead of text (good for playful, close, or emotional moments)",
     appliesTo: ["chat"],
-    args: [{ field: "text", kind: "text", about: "要说的话" }],
+    args: [{ field: "text", kind: "text", about: "Spoken text" }],
     // 在哪都能发：群里有没有人发过语音是群里的习惯，跟不跟由她自己定（研究员 2026-11-12：发语音是她的自由；
     // 只软引导、不设门槛）。
     available: (chat) => chat.member,
@@ -631,11 +616,11 @@ const rows = [
   {
     kind: "edit",
     name: "edit",
-    hint: "改你刚发的一条消息（打错字了、想改口）",
+    hint: "Edit one of your recent text messages (e.g. fix a typo or rephrase)",
     appliesTo: ["message"],
     args: [
-      { field: "messageId", kind: "own", about: "你刚发的哪条（编号）" },
-      { field: "text", kind: "text", about: "改成的话", slot: "改好的话" },
+      { field: "messageId", kind: "own", about: "ID of your own message to edit" },
+      { field: "text", kind: "text", about: "Updated text", slot: "text" },
     ],
     available: (chat, now) => chat.member && chat.own.some((m) => now - m.at <= EDIT_WINDOW_MS),
     relieves: {},
@@ -646,11 +631,27 @@ const rows = [
     after: { type: "revise", note: "改过" },
   },
   {
+    kind: "unsend",
+    name: "unsend",
+    hint: "Recall or delete one of your own recent messages (useful when editing is unavailable or you want to take it back)",
+    appliesTo: ["message"],
+    args: [
+      { field: "messageId", kind: "recent", about: "ID of your own recent message to recall" },
+    ],
+    available: (chat, now) => chat.member && chat.own.some((m) => now - m.at <= UNSEND_WINDOW_MS),
+    relieves: {},
+    intrusiveness: flat(0),
+    deliberate: true,
+    via: "telegram",
+    gated: true,
+    after: { type: "remove", note: "已撤回" },
+  },
+  {
     kind: "repeat",
     name: "repeat",
-    hint: "跟着大家复读正在刷的那句话",
+    hint: "Join a playful group +1 / repeat-chain meme by echoing that exact message",
     appliesTo: ["message"],
-    args: [{ field: "messageId", kind: "message", about: "大家在复读的那条（编号）" }],
+    args: [{ field: "messageId", kind: "message", about: "Message ID to repeat" }],
     // 只在群里有人正在复读时：不同的人连着发同一句（ChatView.echo）。
     available: (chat) => chat.member && chat.chatType === "group" && chat.echo !== null,
     relieves: {},
@@ -665,14 +666,14 @@ const rows = [
     // 会话里另做决定（join-chat），这里只是看。只由候选 reach 提供。
     kind: "chat-search",
     name: "find_chats",
-    hint: "按关键词、@用户名或别人发来的 t.me 邀请链接查群和频道，看看简介、人数和最近几条",
+    hint: "Search public groups or channels by keyword, @username, or t.me link",
     appliesTo: ["chat"],
     args: [
       {
         field: "query",
         kind: "text",
-        about: "关键词、@用户名或 t.me 链接",
-        slot: "想找的群",
+        about: "Keyword, @username, or t.me link",
+        slot: "query",
       },
     ],
     available: member,
@@ -689,9 +690,9 @@ const rows = [
     // 是隐私不变量，由 reach.ts mayForward 定义，执行器按它拒绝（telegram/shelf.ts）。只由候选 reach 提供。
     kind: "forward",
     name: "forward",
-    hint: "把你在频道里看到的一条帖子原样转到这里",
+    hint: "Forward a channel post seen earlier into this chat",
     appliesTo: ["message"],
-    args: [{ field: "item", kind: "text", about: "帖子的编号", slot: "编号" }],
+    args: [{ field: "item", kind: "text", about: "Post ID", slot: "item" }],
     available: member,
     // 只缓解想分享的劲头：没有可转的东西时意愿层不会借"转发"的理由叫醒她（提示词里那时也没有这一项，
     // 醒来就会去说话，绕过说话的代价；同 react 只给新消息点表情的道理）。
@@ -705,16 +706,22 @@ const rows = [
   {
     kind: "recall",
     name: "recall",
-    hint: "翻一下你自己的记忆：按关键词或人名查更早的日记、你说过的话、记住的事、开着的话头、承诺和今天的日程",
+    hint: "Search your memory (past diary entries, spoken lines, remembered facts, open topics, promises, today's schedule)",
     appliesTo: ["chat"],
     args: [
-      { field: "query", kind: "text", optional: true, about: "关键词（可省略）", slot: "关键词" },
+      {
+        field: "query",
+        kind: "text",
+        optional: true,
+        about: "Search keyword (optional)",
+        slot: "query",
+      },
       {
         field: "subject",
         kind: "text",
         optional: true,
-        about: "谁或哪个会话（可省略）",
-        slot: "对象",
+        about: "Person or chat name (optional)",
+        slot: "subject",
       },
     ],
     available: () => true,
@@ -728,16 +735,16 @@ const rows = [
   {
     kind: "note-self",
     name: "note_self",
-    hint: "记下或更正一条关于你自己的近况、习惯或说过的话（前后矛盾时用 replaces 换掉旧说法）",
+    hint: "Save or update a note about yourself (use replaces to overwrite a contradicting old note)",
     appliesTo: ["chat"],
     args: [
-      { field: "text", kind: "text", about: "记下或改后的内容", slot: "内容" },
+      { field: "text", kind: "text", about: "New or updated note", slot: "text" },
       {
         field: "replaces",
         kind: "text",
         optional: true,
-        about: "要替换掉的旧说法原文（可省略）",
-        slot: "旧说法",
+        about: "Exact old note to replace (optional)",
+        slot: "replaces",
       },
     ],
     available: () => true,
@@ -750,15 +757,15 @@ const rows = [
   {
     kind: "dm-check",
     name: "check_dm",
-    hint: "核对这个群对突然私聊群友的接受度、历史回应与是否建议先在群里征询同意",
+    hint: "Check how this source group responds to unsolicited DMs and whether to ask in the group first",
     appliesTo: ["chat"],
     args: [
       {
         field: "who",
         kind: "text",
         optional: true,
-        about: "群友名字或消息编号（在群里写明想私聊谁，在私聊可省略）",
-        slot: "对象",
+        about: "Member name or message ID in a group (optional in DM)",
+        slot: "who",
       },
     ],
     available: () => true,
@@ -767,14 +774,16 @@ const rows = [
     deliberate: false,
     via: "mind",
     gated: true,
-    after: { type: "look", as: "你确认了一下这个群对私聊的接收度" },
+    after: { type: "look", as: "你确认了一下这个群对私聊的接收情况" },
   },
   {
     kind: "dm-defer",
     name: "plan_group_dm",
-    hint: "先不在私聊里贸然开口，记下打算回到认识的群里顺口问一句对方方不方便私聊",
+    hint: "Hold off on sending a cold DM and record a reminder to ask in the shared group first",
     appliesTo: ["chat"],
-    args: [{ field: "reason", kind: "text", about: "想在群里先问的事由", slot: "事由" }],
+    args: [
+      { field: "reason", kind: "text", about: "What you want to ask in group", slot: "reason" },
+    ],
     available: (chat) => chat.chatType === "private",
     relieves: {},
     intrusiveness: flat(0),
@@ -786,11 +795,55 @@ const rows = [
 
 export const affordances: readonly Affordance[] = rows;
 
-/** 经 Telegram 做的动作（telegram/acts.ts 的执行表每种一项）。 */
+/** 经平台执行的对外动作（telegram/acts.ts、qq/acts.ts 对应的种类）。 */
 export type TelegramAct = Extract<
   Act,
   { kind: Extract<(typeof rows)[number], { via: "telegram" }>["kind"] }
 >;
+
+export type PlatformActKind = TelegramAct["kind"];
+
+/** 所有经平台执行的对外动作种类（按登记表顺序）。 */
+export const PLATFORM_ACT_KINDS: readonly PlatformActKind[] = rows
+  .filter((r) => r.via === "telegram")
+  .map((r) => r.kind);
+
+/**
+ * 平台能力声明（借鉴 Koishi/Satori 的适配器能力模型）：每个平台显式声明自己支持哪些对外动作，
+ * 不支持的不进提示词、不进意愿层打分、也不在 settle 放行。
+ * - acts：本平台实际支持的对外动作集合；
+ * - onlyIn：可选，按会话类型收窄（例如 QQ 贴表情仅限群聊）。
+ * 心里的动作（via: "mind"）和后台查东西（via: "errand"）与平台无关，不受此表限制。
+ */
+export interface PlatformCapabilities {
+  readonly acts: ReadonlySet<PlatformActKind>;
+  readonly onlyIn?: Partial<Record<PlatformActKind, ChatType>>;
+}
+
+/** 按会话查对应平台的能力声明（单平台返回固定值，多平台时由 PlatformHub 按 scope 前缀查）。 */
+export type CapabilityResolver = (scope: string) => PlatformCapabilities | undefined;
+
+/** 把单平台声明或按会话查询函数统一成查询函数。 */
+export function resolveCapabilities(
+  source: PlatformCapabilities | CapabilityResolver | undefined,
+): CapabilityResolver | undefined {
+  if (!source) return undefined;
+  return typeof source === "function" ? source : () => source;
+}
+
+/** 某个动作在给定平台能力与会话类型下是否被平台支持；未传能力声明时默认全部支持。 */
+export function platformSupports(
+  caps: PlatformCapabilities | undefined,
+  kind: ActKind,
+  chatType: ChatType,
+): boolean {
+  if (!caps) return true;
+  if (affordanceOf(kind).via !== "telegram") return true;
+  const pk = kind as PlatformActKind;
+  if (!caps.acts.has(pk)) return false;
+  const only = caps.onlyIn?.[pk];
+  return only === undefined || only === chatType;
+}
 
 const byKind = new Map(affordances.map((a) => [a.kind, a]));
 
@@ -849,7 +902,7 @@ export function leaves(act: Act): boolean {
  * 这是唯一一处按字段名读动作的地方。
  */
 export function argValues(act: Act): Array<{ spec: ArgSpec; value: string | null }> {
-  const fields = act as unknown as Record<string, string | null | undefined>;
+  const fields: Readonly<Record<string, string | null | undefined>> = act;
   return affordanceOf(act.kind).args.map((spec) => ({ spec, value: fields[spec.field] ?? null }));
 }
 

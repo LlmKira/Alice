@@ -42,82 +42,125 @@ export function auditLongRun(
   calls: readonly LongAuditCall[] = [],
 ): LongAuditReport {
   const times = events.map((e) => e.at).filter((t) => Number.isFinite(t));
-  const spanMs = times.length >= 2 ? Math.max(...times) - Math.min(...times) : 0;
+  // 不用 Math.max(...times)：十几万个参数会撑爆调用栈。
+  const spanMs =
+    times.length >= 2
+      ? times.reduce((a, b) => Math.max(a, b)) - times.reduce((a, b) => Math.min(a, b))
+      : 0;
   const days = Number((spanMs / (24 * 3_600_000)).toFixed(2));
+  const { realNames, receivedByGroup } = peopleOf(events);
+  const life = lifeOf(events, realNames);
+  const acts = actsOf(events);
+  const shown = callsOf(calls);
 
-  // 收集真实群友/私聊联系人的名字，用来确定性检验日程表与小事里有没有出现真实人名（life-leak）。
+  const groupRates = Array.from(receivedByGroup.entries(), ([scope, received]) => {
+    const nCalls = shown.callsByGroup.get(scope) ?? 0;
+    return {
+      scope,
+      received,
+      calls: nCalls,
+      ratePer100: received > 0 ? Number(((nCalls / received) * 100).toFixed(2)) : 0,
+    };
+  }).sort((a, b) => b.received - a.received);
+
+  return {
+    days,
+    lifeDays: life.lifeDays,
+    dreamDays: life.dreamDays,
+    lifeLeaks: life.lifeLeaks,
+    curiositiesGenerated: life.curiositiesGenerated,
+    dreamSharesShown: shown.dreamSharesShown,
+    channelSharesShown: shown.channelSharesShown,
+    topicOpens: acts.topicOpens,
+    topicAdvances: acts.topicAdvances,
+    topicCloses: acts.topicCloses,
+    intends: acts.intends,
+    fulfils: acts.fulfils,
+    recalls: acts.recalls,
+    selfNotes: acts.selfNotes,
+    selfReplacements: acts.selfReplacements,
+    groupRates,
+  };
+}
+
+/** 收集真实群友/私聊联系人的名字（确定性检验日程表与小事里有没有出现真实人名，life-leak），和各群收到的条数。 */
+function peopleOf(events: readonly AliceEvent[]) {
   const realNames = new Set<string>();
   const receivedByGroup = new Map<string, number>();
   for (const e of events) {
-    if (e.type === "message.received") {
-      const name = e.senderName.trim();
-      if (name.length >= 2 && !/^(?:u\d+|user|alice)$/i.test(name)) realNames.add(name);
-      if (e.chatType === "group" && !e.isBot) {
-        receivedByGroup.set(e.scope, (receivedByGroup.get(e.scope) ?? 0) + 1);
-      }
+    if (e.type !== "message.received") continue;
+    const name = e.senderName.trim();
+    if (name.length >= 2 && !/^(?:u\d+|user|alice)$/i.test(name)) realNames.add(name);
+    if (e.chatType === "group" && !e.isBot) {
+      receivedByGroup.set(e.scope, (receivedByGroup.get(e.scope) ?? 0) + 1);
     }
   }
+  return { realNames, receivedByGroup };
+}
 
+/** 日程表生成了几天、其中带好奇点的几天，和日程里出现的真实人名。 */
+function lifeOf(events: readonly AliceEvent[], realNames: ReadonlySet<string>) {
   let lifeDays = 0;
   let dreamDays = 0;
   let curiositiesGenerated = 0;
   const lifeLeaks: string[] = [];
-  let topicOpens = 0;
-  let topicAdvances = 0;
-  let topicCloses = 0;
-  let intends = 0;
-  let fulfils = 0;
-  let recalls = 0;
-  let selfNotes = 0;
-  let selfReplacements = 0;
-
   for (const e of events) {
-    if (e.type === "ponder.done" && e.ponder.kind === "life") {
-      lifeDays++;
-      const p = e.ponder;
-      if (p.curiosities?.length) {
-        dreamDays++;
-        curiositiesGenerated += p.curiosities.length;
-      }
-      const texts = [
-        ...Object.values(p.activities).filter((v): v is string => Boolean(v)),
-        ...p.moments.map((m) => m.text),
-        ...p.ongoing,
-        ...(p.curiosities ?? []).flatMap((c) => [c.topic, c.hook]),
-      ];
-      for (const t of texts) {
-        for (const name of realNames) {
-          if (t.includes(name)) lifeLeaks.push(`${p.date}:${name}->${t}`);
-        }
-      }
-    } else if (e.type === "act.done") {
-      switch (e.act.kind) {
-        case "topic-open":
-          topicOpens++;
-          break;
-        case "topic-advance":
-          topicAdvances++;
-          break;
-        case "topic-close":
-          topicCloses++;
-          break;
-        case "intend":
-          intends++;
-          break;
-        case "fulfil":
-          fulfils++;
-          break;
-        case "recall":
-          recalls++;
-          break;
-        case "note-self":
-          selfNotes++;
-          if (e.act.replaces) selfReplacements++;
-          break;
+    if (e.type !== "ponder.done" || e.ponder.kind !== "life") continue;
+    lifeDays++;
+    const p = e.ponder;
+    if (p.curiosities !== undefined && p.curiosities.length > 0) {
+      dreamDays++;
+      curiositiesGenerated += p.curiosities.length;
+    }
+    const texts = [
+      ...Object.values(p.activities).filter((v): v is string => Boolean(v)),
+      ...p.moments.map((m) => m.text),
+      ...p.ongoing,
+      ...(p.curiosities ?? []).flatMap((c) => [c.topic, c.hook]),
+    ];
+    for (const t of texts) {
+      for (const name of realNames) {
+        if (t.includes(name)) lifeLeaks.push(`${p.date}:${name}->${t}`);
       }
     }
   }
+  return { lifeDays, dreamDays, curiositiesGenerated, lifeLeaks };
+}
 
+/** 做成了的长期连贯动作按种类计数。 */
+const ACT_COUNT = {
+  "topic-open": "topicOpens",
+  "topic-advance": "topicAdvances",
+  "topic-close": "topicCloses",
+  intend: "intends",
+  fulfil: "fulfils",
+  recall: "recalls",
+  "note-self": "selfNotes",
+} as const;
+type ActCount = (typeof ACT_COUNT)[keyof typeof ACT_COUNT] | "selfReplacements";
+
+function actsOf(events: readonly AliceEvent[]): Record<ActCount, number> {
+  const n: Record<ActCount, number> = {
+    topicOpens: 0,
+    topicAdvances: 0,
+    topicCloses: 0,
+    intends: 0,
+    fulfils: 0,
+    recalls: 0,
+    selfNotes: 0,
+    selfReplacements: 0,
+  };
+  for (const e of events) {
+    if (e.type !== "act.done") continue;
+    const key = ACT_COUNT[e.act.kind as keyof typeof ACT_COUNT] as ActCount | undefined;
+    if (key) n[key]++;
+    if (e.act.kind === "note-self" && e.act.replaces) n.selfReplacements++;
+  }
+  return n;
+}
+
+/** 发言调用：各群几次，提示词里写了她自己想到的事、频道新帖的各几次。 */
+function callsOf(calls: readonly LongAuditCall[]) {
   let dreamSharesShown = 0;
   let channelSharesShown = 0;
   const callsByGroup = new Map<string, number>();
@@ -130,35 +173,5 @@ export function auditLongRun(
       else if (cause.includes("share")) channelSharesShown++;
     }
   }
-
-  const groupRates = [...receivedByGroup.entries()]
-    .map(([scope, received]) => {
-      const nCalls = callsByGroup.get(scope) ?? 0;
-      return {
-        scope,
-        received,
-        calls: nCalls,
-        ratePer100: received > 0 ? Number(((nCalls / received) * 100).toFixed(2)) : 0,
-      };
-    })
-    .sort((a, b) => b.received - a.received);
-
-  return {
-    days,
-    lifeDays,
-    dreamDays,
-    lifeLeaks,
-    curiositiesGenerated,
-    dreamSharesShown,
-    channelSharesShown,
-    topicOpens,
-    topicAdvances,
-    topicCloses,
-    intends,
-    fulfils,
-    recalls,
-    selfNotes,
-    selfReplacements,
-    groupRates,
-  };
+  return { dreamSharesShown, channelSharesShown, callsByGroup };
 }

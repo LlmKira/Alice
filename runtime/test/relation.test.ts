@@ -1,15 +1,9 @@
 /**
  * 回避按人记（src/mechanisms/pressure/relation.ts，生产）：谁在等她、私聊里的拒绝记在对方身上、意愿层按动作的对象
- * 读哪一个数。闭环性质（A1–A3）在 test/pressure-properties.test.ts，线上足迹在 src/sim/addressed.ts。
+ * 读哪一个数。闭环性质（A1–A3）在 test/pressure-properties.test.ts，线上 footprint 在 src/sim/addressed.ts。
  */
 import { describe, expect, it } from "vitest";
-import {
-  PRODUCTION,
-  relation,
-  willOf,
-  willWake,
-  worldFold,
-} from "../src/mechanisms/pressure/index.js";
+import { PRODUCTION, relation, willWake, worldFold } from "../src/mechanisms/pressure/index.js";
 import { AVERSION_TAU } from "../src/mechanisms/pressure/params.js";
 import {
   aversionToward,
@@ -21,7 +15,7 @@ import {
   stopNotes,
   stopToward,
 } from "../src/mechanisms/pressure/relation.js";
-import { emptyWorld, tierOf, type World } from "../src/mechanisms/pressure/world.js";
+import { emptyWorld, type World } from "../src/mechanisms/pressure/world.js";
 import { affordanceOf, affordances } from "../src/mind/affordances.js";
 import type { AliceEvent, MessageReceived } from "../src/mind/events.js";
 
@@ -132,11 +126,6 @@ describe("the will reads the person for person-directed acts", () => {
   it("leaving is a room act even when someone is waiting", () => {
     const one = fold([msg(T0 + 4 * MIN, { senderId: "contact:2", directed: true })], blocked);
     expect(personAversion(one, GROUP, leave, T0 + 5 * MIN)).toBeNull();
-  });
-
-  it("production reads it; without relation the will reads only the room term", () => {
-    expect(willOf(PRODUCTION).aversion).toBe(personAversion);
-    expect(willOf({ ...PRODUCTION, relation: undefined }).aversion).toBeUndefined();
   });
 });
 
@@ -313,11 +302,8 @@ describe("told to stop: that person's lines no longer wake her by themselves (li
   });
 });
 
-/**
- * 第 4 片的候选（docs/research/relationship.md）：层级从校准过的联系频率分档，而不是排名。
- * 生产保持排名（`relation`），候选是 `relationTier`；量过之前 production 的 tier 不变。
- */
-describe("candidate: tiers from familiarity, not from an unstable rank", () => {
+/** 层级从校准过的联系频率分档，而不是排名（`relationTier`，docs/research/relationship.md）。 */
+describe("tiers from familiarity, not from an unstable rank", () => {
   const DAY = 24 * 60 * MIN;
   const G = "telegram:-101";
   let k = 0;
@@ -340,13 +326,8 @@ describe("candidate: tiers from familiarity, not from an unstable rank", () => {
     };
   };
   const tiered = (events: AliceEvent[], now = events.at(-1)?.at ?? T0, id = "contact:1") => {
-    const w = fold(events, emptyWorld);
     const c = events.reduce(worldFold({ relation: relationTier }), emptyWorld);
-    return {
-      candidate: familiarityTier(c.relations, id, now),
-      production: tierOf(w, id, now),
-      world: c,
-    };
+    return { candidate: familiarityTier(c.relations, id, now), world: c };
   };
 
   it("week one: nobody is in tier ≤ 15, so the tier-unbacked footprint is 0", () => {
@@ -378,15 +359,5 @@ describe("candidate: tiers from familiarity, not from an unstable rank", () => {
     expect(tiered(stale, T0 + 40 * DAY).candidate).toBe(150);
     const week = [0, 1, 2, 3, 4, 5].map((d) => said(T0 + d * DAY));
     expect(tiered(week, T0 + 5 * DAY).candidate).toBe(500);
-  });
-
-  it("production keeps the rank tier until it is measured: the first person to talk is tier 5 half an hour in", () => {
-    const events = [said(T0), said(T0 + 5 * MIN)];
-    const now = T0 + 30 * MIN;
-    expect(tiered(events, now).production).toBe(5);
-    expect(tiered(events, now).candidate).toBe(500);
-    // 候选只改读法：关系本身的折叠和生产是同一份。
-    const prod = fold(events, emptyWorld);
-    expect(tiered(events, now).world.relations.people).toEqual(prod.relations.people);
   });
 });

@@ -280,7 +280,9 @@ describe("switching only between conversations", () => {
 
       let now = events[0]?.at ?? 0;
       const journal: JournaledEvent[] = [];
-      let tick: (() => void) | null = null;
+      let tick = (): void => {
+        throw new Error("the shell scheduled no clock");
+      };
       const ports: ShellPorts = {
         now: () => now,
         append: (event) => void journal.push(event),
@@ -310,7 +312,7 @@ describe("switching only between conversations", () => {
       for (const event of events) {
         while (next <= event.at) {
           now = next;
-          (tick as unknown as () => void)();
+          tick();
           await settle();
           next += 10_000;
         }
@@ -320,7 +322,7 @@ describe("switching only between conversations", () => {
       }
       const live = journal.filter((e): e is ArmSwitched => e.type === "arm.switched");
       expect(live).toEqual(replayed.switches);
-      // 折叠这份日志得到同样的分组。
+      // fold 这份日志得到同样的分组。
       const fold = createFold(mind);
       for (const e of journal) fold.feed(e);
       expect(fold.result().state.arms).toEqual(shell.current.arms);

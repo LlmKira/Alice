@@ -28,30 +28,46 @@ export const SLEEP_MODEL = {
 const c = (minute: number): number =>
   Math.cos((2 * Math.PI * (minute / 60 - SLEEP_MODEL.peakHour)) / 24);
 
+interface SleepMinute {
+  asleep: boolean;
+  depth: number;
+  alert: number;
+}
+
+/** 双过程模型走一分钟（m 是本地的第几分钟）：按此刻的阈值判睡着没有，记下这一分钟，再让 S 升或降。 */
+function stepMinute(s: number, wasAsleep: boolean, m: number): { s: number; row: SleepMinute } {
+  const hi = SLEEP_MODEL.upper + SLEEP_MODEL.amplitude * c(m);
+  const lo = SLEEP_MODEL.lower + SLEEP_MODEL.amplitude * c(m);
+  let asleep = wasAsleep;
+  if (!asleep && s >= hi) asleep = true;
+  else if (asleep && s <= lo) asleep = false;
+  const toSleep = Math.min(1, Math.max(0, (hi - s) / (hi - lo)));
+  const row = {
+    asleep,
+    depth: asleep ? Math.min(1, Math.max(0, (s - lo) / (hi - lo))) : 0,
+    alert: asleep ? 0 : toSleep,
+  };
+  const next = asleep
+    ? s * Math.exp(-1 / (60 * SLEEP_MODEL.fallHours))
+    : 1 - (1 - s) * Math.exp(-1 / (60 * SLEEP_MODEL.riseHours));
+  return { s: next, row };
+}
+
 /**
  * 一天里每一分钟：睡着没有、睡得多深（0 = 马上要醒，1 = 刚睡着）；醒着时离入睡还有多远
  * （alert：(H − S)/(H − L)，刚醒为 1、快睡着为 0；双过程模型里警觉度就是 S 与 C 之差，Åkerstedt & Folkard 1997）。
  */
-const DAY_TABLE: ReadonlyArray<{ asleep: boolean; depth: number; alert: number }> = (() => {
+const DAY_TABLE: readonly SleepMinute[] = (() => {
   let s = 0.5;
   let asleep = false;
-  let table: Array<{ asleep: boolean; depth: number; alert: number }> = [];
+  let table: SleepMinute[] = [];
   for (let day = 0; day < 8; day++) {
     table = [];
     for (let m = 0; m < 24 * 60; m++) {
-      const hi = SLEEP_MODEL.upper + SLEEP_MODEL.amplitude * c(m);
-      const lo = SLEEP_MODEL.lower + SLEEP_MODEL.amplitude * c(m);
-      if (!asleep && s >= hi) asleep = true;
-      else if (asleep && s <= lo) asleep = false;
-      const toSleep = Math.min(1, Math.max(0, (hi - s) / (hi - lo)));
-      table.push({
-        asleep,
-        depth: asleep ? Math.min(1, Math.max(0, (s - lo) / (hi - lo))) : 0,
-        alert: asleep ? 0 : toSleep,
-      });
-      s = asleep
-        ? s * Math.exp(-1 / (60 * SLEEP_MODEL.fallHours))
-        : 1 - (1 - s) * Math.exp(-1 / (60 * SLEEP_MODEL.riseHours));
+      const next = stepMinute(s, asleep, m);
+      table.push(next.row);
+      s = next.s;
+      asleep = next.row.asleep;
     }
   }
   return table;

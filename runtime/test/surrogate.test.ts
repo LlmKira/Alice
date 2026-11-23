@@ -94,12 +94,13 @@ describe("surrogate: estimates", () => {
 describe("surrogate: decisions", () => {
   const rows = Array.from({ length: 200 }, (_, i) => ({
     prompt: group(SOUGHT),
-    acts: (i % 2 === 0
-      ? [
-          { kind: "send", text: "嗯", replyTo: "4" },
-          { kind: "react", messageId: "4", emoji: "👍" },
-        ]
-      : []) as Act[],
+    acts:
+      i % 2 === 0
+        ? ([
+            { kind: "send", text: "嗯", replyTo: "4" },
+            { kind: "react", messageId: "4", emoji: "👍" },
+          ] satisfies Act[])
+        : [],
   }));
   const model = fitSurrogate(rows);
 

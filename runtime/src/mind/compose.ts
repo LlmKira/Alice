@@ -7,8 +7,8 @@
  * - uses：有就读、没有也照常工作的块（Cordis 的 ctx.get）。没有提供者时列进 gaps：
  *   它读到的是那一块的初始值，所以要列出来，不能悄悄发生。
  * - amends：它也写、但归别人提供的块。同一个概念有两个主人，是要合并的地方；列进 shared。
- * 时间上的可组合性（§3.1：拿掉一个部分时撤销它做过的事）不用另做：状态都从 Journal 纯折叠出来，
- * 拿掉一个部分就是不带它重新折叠一遍，没有要撤销的副作用。
+ * 时间上的可组合性（§3.1：移除一个部分时撤销它做过的事）不用另做：状态都从 Journal 纯 fold 出来，
+ * 移除一个部分就是不带它重新 fold 一遍，没有要撤销的副作用。
  */
 
 export interface Coeffects<K extends string = string> {
@@ -31,47 +31,22 @@ export interface Composition<P extends Part<K>, K extends string = string> {
   readonly gaps: ReadonlyArray<{ part: string; key: K }>;
   /** 激活的部分写了别人提供的块（owner 为 null：这一块此刻没有提供者）。 */
   readonly shared: ReadonlyArray<{ part: string; key: K; owner: string | null }>;
-  /** 每一块此刻的提供者（底座和激活的部分）。 */
+  /** 每一块此刻的提供者（base 和激活的部分）。 */
   readonly providers: ReadonlyMap<K, string>;
 }
 
 export class CompositionError extends Error {}
 
 /**
- * 解析一种组成。base 是总在的底座（例如世界折叠），parts 按给的次序。
+ * 解析一种组成。base 是总在的 base（例如世界 fold），parts 按给的次序。
  * 两个部分提供同一块时抛 CompositionError；同一个名字出现两次也是（它们的状态按名字存）。
  */
 export function compose<K extends string, P extends Part<K>>(
   base: Part<K>,
   parts: readonly P[],
 ): Composition<P, K> {
-  const declared = new Map<K, string>();
-  const names = new Set<string>([base.name]);
-  for (const p of [base, ...parts]) {
-    if (p !== base) {
-      if (names.has(p.name)) throw new CompositionError(`两个部分都叫 ${p.name}`);
-      names.add(p.name);
-    }
-    for (const k of p.provides ?? []) {
-      const prior = declared.get(k);
-      if (prior !== undefined) throw new CompositionError(`${k} 有两个提供者：${prior}、${p.name}`);
-      declared.set(k, p.name);
-    }
-  }
-
-  const providers = new Map<K, string>();
-  for (const k of base.provides ?? []) providers.set(k, base.name);
-  const on = new Set<P>();
-  for (let grew = true; grew; ) {
-    grew = false;
-    for (const p of parts) {
-      if (on.has(p) || !(p.requires ?? []).every((k) => providers.has(k))) continue;
-      on.add(p);
-      for (const k of p.provides ?? []) providers.set(k, p.name);
-      grew = true;
-    }
-  }
-
+  checkDeclared(base, parts);
+  const { on, providers } = activate(base, parts);
   const active = parts.filter((p) => on.has(p));
   const live: Part<K>[] = [base, ...active];
   return {
@@ -87,4 +62,41 @@ export function compose<K extends string, P extends Part<K>>(
     ),
     providers,
   };
+}
+
+/** 名字不重复、每一块最多一个提供者（base 也算），否则抛 CompositionError。 */
+function checkDeclared<K extends string>(base: Part<K>, parts: readonly Part<K>[]): void {
+  const declared = new Map<K, string>();
+  const names = new Set<string>([base.name]);
+  for (const p of [base, ...parts]) {
+    if (p !== base) {
+      if (names.has(p.name)) throw new CompositionError(`两个部分都叫 ${p.name}`);
+      names.add(p.name);
+    }
+    for (const k of p.provides ?? []) {
+      const prior = declared.get(k);
+      if (prior !== undefined) throw new CompositionError(`${k} 有两个提供者：${prior}、${p.name}`);
+      declared.set(k, p.name);
+    }
+  }
+}
+
+/** 最小不动点：反复激活所需的块都已有提供者的部分，直到不再增加。 */
+function activate<K extends string, P extends Part<K>>(
+  base: Part<K>,
+  parts: readonly P[],
+): { on: Set<P>; providers: Map<K, string> } {
+  const providers = new Map<K, string>();
+  for (const k of base.provides ?? []) providers.set(k, base.name);
+  const on = new Set<P>();
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const p of parts) {
+      if (on.has(p) || !(p.requires ?? []).every((k) => providers.has(k))) continue;
+      on.add(p);
+      for (const k of p.provides ?? []) providers.set(k, p.name);
+      grew = true;
+    }
+  }
+  return { on, providers };
 }

@@ -5,7 +5,7 @@ import { affordances } from "../src/mind/affordances.js";
 
 /**
  * 能力账本（capabilities.md）是系统范围的唯一事实来源。重写时缺失不会自己报错，
- * 所以这里把账本和代码里的可供性、机制对齐：代码里有而账本里没有、账本说已移植而代码里没有，都失败。
+ * 所以这里把账本和代码里的 affordance、机制对齐：代码里有而账本里没有、账本说已移植而代码里没有，都失败。
  */
 
 const LEDGER = "capabilities.md";
@@ -53,17 +53,20 @@ const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, 
 const rowsOf = (all: Table[], header: string[]) =>
   all.filter((t) => same(t.header, header)).flatMap((t) => t.rows);
 
-type Ref = { space: "affordance" | "mechanism" | "file"; name: string };
+interface Ref {
+  space: "affordance" | "mechanism" | "file";
+  name: string;
+}
 
 function refs(cell: string): Ref[] {
-  return [...cell.matchAll(/`(affordance|mechanism|file):([^`]+)`/g)].map((m) => ({
+  return Array.from(cell.matchAll(/`(affordance|mechanism|file):([^`]+)`/g), (m) => ({
     space: m[1] as Ref["space"],
     name: m[2] as string,
   }));
 }
 
 const testRefs = (cell: string) =>
-  [...cell.matchAll(/`(test\/[^`]+\.test\.ts)`/g)].map((m) => m[1]);
+  Array.from(cell.matchAll(/`(test\/[^`]+\.test\.ts)`/g), (m) => m[1] ?? "");
 const ids = (cell: string) => cell.match(/\b[A-Z]\d{2}\b/g) ?? [];
 
 const kinds = new Set<string>(affordances.map((a) => a.kind));
@@ -123,8 +126,8 @@ describe.skipIf(!hasLedger)("capability ledger", () => {
   it("lists every registered affordance and every mechanism in the code inventory", () => {
     const listed = new Set(inventory.flatMap((r) => r.code.map(show)));
     const missing = [
-      ...[...kinds].map((k) => `affordance:${k}`),
-      ...[...names].map((n) => `mechanism:${n}`),
+      ...Array.from(kinds, (k) => `affordance:${k}`),
+      ...Array.from(names, (n) => `mechanism:${n}`),
     ].filter((r) => !listed.has(r));
     expect(missing).toEqual([]);
   });

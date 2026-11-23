@@ -87,7 +87,7 @@ const DIGITS: Record<string, number> = {
 
 /** 阿拉伯数字或一到九十九的中文数字；"半" = 0.5。 */
 function numberOf(raw: string): number | null {
-  if (/^\d+(\.\d+)?$/.test(raw)) return Number(raw);
+  if (/^\d+(?:\.\d+)?$/.test(raw)) return Number(raw);
   if (raw === "半") return 0.5;
   const m = raw.match(/^([一二两三四五六七八九])?(十)?([一二三四五六七八九])?$/);
   if (!m || raw === "") return null;
@@ -122,7 +122,7 @@ function within(day: number, rest: string): When | null {
     return { from: epochOf(day, window[0]), due: epochOf(day, window[1]) };
   }
   const clock = tail.match(
-    /^(\d{1,2}|[一二两三四五六七八九十]+)(?:点|:|：|时)(半|\d{2}|[一二三四五]十[一二三四五六七八九]?|一刻)?(?:分)?(?:左右|前)?$/,
+    /^(\d{1,2}|[一二两三四五六七八九十]+)[点:：时](半|\d{2}|[一二三四五]十[一二三四五六七八九]?|一刻)?分?(?:左右|前)?$/,
   );
   if (!clock) return null;
   let hour = numberOf(clock[1] as string);
@@ -138,118 +138,167 @@ function within(day: number, rest: string): When | null {
 
 const WEEKDAYS: Record<string, number> = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 日: 7, 天: 7 };
 
+/** 一种说法的读法：认得出返回时间窗；是这种说法但说不通返回 null（不再试别的说法）；不是这种说法返回 undefined。 */
+type Reader = (text: string, today: number, at: number) => When | null | undefined;
+
+/** 马上、一会儿、晚点：从现在算起。 */
+function fromNow(text: string, _today: number, at: number): When | undefined {
+  if (/^(?:马上|立刻|现在)$/.test(text)) return { from: at, due: at + 15 * MIN };
+  if (/^(?:一会儿?|待会儿?|等会儿?|过会儿?|晚点儿?|晚一点|晚些|晚一些|回头)$/.test(text)) {
+    return { from: at + 30 * MIN, due: at + 2 * H };
+  }
+  return undefined;
+}
+
+/** N 分钟 / 小时 / 天 / 周 / 个月 后。 */
+function afterSpan(text: string, today: number, at: number): When | null | undefined {
+  const later = text.match(
+    /^(\d+(?:\.\d+)?|[一二两三四五六七八九十]+|半)个?(分钟|小时|钟头|[天周月]|星期|礼拜)(?:后|以后|之后)$/,
+  );
+  if (!later) return undefined;
+  const n = numberOf(later[1] as string);
+  if (n === null || n <= 0) return null;
+  const unit = later[2] as string;
+  if (unit === "分钟" || unit === "小时" || unit === "钟头") {
+    const due = at + n * (unit === "分钟" ? MIN : H);
+    return { from: due - Math.min(H, (due - at) / 2), due };
+  }
+  const days = unit === "天" ? n : unit === "月" ? n * 30 : n * 7;
+  return within(today + Math.round(days), "");
+}
+
+const DAY_OFFSET: Record<string, number> = {
+  今天: 0,
+  今日: 0,
+  今: 0,
+  明天: 1,
+  明日: 1,
+  明儿: 1,
+  明: 1,
+  后天: 2,
+  大后天: 3,
+};
+
+/** 今天 / 明天 / 后天 / 大后天，及其简称（今晚、明早……），后面可带时段与钟点。 */
+function namedDay(text: string, today: number): When | null | undefined {
+  const named = text.match(/^(今天|今日|今|明天|明日|明儿|明|后天|大后天)(.*)$/);
+  if (!named) return undefined;
+  const word = named[1] as string;
+  const rest = named[2] as string;
+  // "今""明"单字只在后面跟着时段时成立（今晚、明早）。
+  if ((word === "今" || word === "明") && !PERIODS.some(([p]) => p.test(rest))) return null;
+  return within(today + (DAY_OFFSET[word] as number), rest);
+}
+
+/** 周末 / 这周末 / 下周末。 */
+function weekendOf(text: string, today: number): When | undefined {
+  const weekend = text.match(/^([这本下])?个?(?:周末|礼拜天?末)$/);
+  if (!weekend) return undefined;
+  const saturday = today + (6 - weekday(today)) + (weekend[1] === "下" ? 7 : 0);
+  const start = Math.max(saturday, today);
+  return { from: epochOf(start, DAYTIME[0]), due: epochOf(saturday + 1, DAYTIME[1]) };
+}
+
+/** 周X / 星期X / 这周X / 下周X，可带时段与钟点。 */
+function weekdayOf(text: string, today: number): When | null | undefined {
+  const week = text.match(/^([这本下])?个?(?:周|星期|礼拜)([一二三四五六日天])(.*)$/);
+  if (!week) return undefined;
+  const target = WEEKDAYS[week[2] as string] as number;
+  const monday = today - (weekday(today) - 1);
+  let day = monday + (target - 1) + (week[1] === "下" ? 7 : 0);
+  // 没说"这周"、"下周"，而那天已经过了：指下一个。
+  if (!week[1] && day < today) day += 7;
+  return within(day, week[3] as string);
+}
+
+/** 这周 / 下周：一整周。 */
+function wholeWeekOf(text: string, today: number): When | undefined {
+  const wholeWeek = text.match(/^([这本下])个?(?:周|星期|礼拜)$/);
+  if (!wholeWeek) return undefined;
+  const monday = today - (weekday(today) - 1) + (wholeWeek[1] === "下" ? 7 : 0);
+  const start = Math.max(monday, today);
+  return { from: epochOf(start, DAYTIME[0]), due: epochOf(monday + 6, DAYTIME[1]) };
+}
+
+/** y 年 m 月的下一个月 1 号。 */
+function nextMonthStart(y: number, m: number): number {
+  return daysFromCivil(m === 12 ? y + 1 : y, m === 12 ? 1 : m + 1, 1);
+}
+
+/** 下个月 / 月底。 */
+function monthSpan(text: string, today: number): When | undefined {
+  const { y, m } = civilFromDays(today);
+  if (/^下个?月$/.test(text)) {
+    const first = nextMonthStart(y, m);
+    const next = civilFromDays(first);
+    const last = nextMonthStart(next.y, next.m) - 1;
+    return { from: epochOf(first, DAYTIME[0]), due: epochOf(last, DAYTIME[1]) };
+  }
+  if (/^(?:这个?月)?月底$/.test(text)) {
+    const last = nextMonthStart(y, m) - 1;
+    return { from: epochOf(Math.max(today, last - 3), DAYTIME[0]), due: epochOf(last, DAYTIME[1]) };
+  }
+  return undefined;
+}
+
+/** 某年某月某日那一天里的窗；日期不存在返回 null。 */
+function onDate(yy: number, mm: number, dd: number, rest: string): When | null {
+  return validDate(yy, mm, dd) ? within(daysFromCivil(yy, mm, dd), rest) : null;
+}
+
+/** 2026-11-20、2026年11月20日，可带时段与钟点。 */
+function fullDate(text: string): When | null | undefined {
+  const full = text.match(/^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})[日号]?(.*)$/);
+  if (!full) return undefined;
+  return onDate(Number(full[1]), Number(full[2]), Number(full[3]), full[4] as string);
+}
+
+/** 11月20日、11/20，可带时段与钟点；今年的这一天已经过了就指明年。 */
+function monthDayOf(text: string, today: number): When | null | undefined {
+  const monthDay = text.match(/^(\d{1,2})[月/-](\d{1,2})[日号]?(.*)$/);
+  if (!monthDay) return undefined;
+  const [mm, dd] = [Number(monthDay[1]), Number(monthDay[2])];
+  let yy = civilFromDays(today).y;
+  if (!validDate(yy, mm, dd)) return null;
+  if (daysFromCivil(yy, mm, dd) < today) yy++;
+  return onDate(yy, mm, dd, monthDay[3] as string);
+}
+
+/** 20号：这个月的还没过就是这个月，过了就是下个月。 */
+function dayOfMonth(text: string, today: number): When | null | undefined {
+  const dayOnly = text.match(/^(\d{1,2})[日号](.*)$/);
+  if (!dayOnly) return undefined;
+  const dd = Number(dayOnly[1]);
+  const { y, m, d } = civilFromDays(today);
+  const [yy, mm] = dd >= d ? [y, m] : m === 12 ? [y + 1, 1] : [y, m + 1];
+  return onDate(yy, mm, dd, dayOnly[2] as string);
+}
+
+/** 按顺序试的说法；前面的认出来了，后面的就不再试。 */
+const READERS: readonly Reader[] = [
+  fromNow,
+  afterSpan,
+  namedDay,
+  weekendOf,
+  weekdayOf,
+  wholeWeekOf,
+  monthSpan,
+  fullDate,
+  monthDayOf,
+  dayOfMonth,
+];
+
 /** 认得出就返回时间窗，否则 null（= 没有约定时间）。 */
 export function parseWhen(raw: string, at: number): When | null {
   const text = raw
     .trim()
     .replace(/\s+/g, "")
-    .replace(/(之前|以前|前后|左右)$/, "");
+    .replace(/(?:之前|以前|前后|左右)$/, "");
   if (!text) return null;
   const today = localDay(at);
-
-  // 马上、一会儿、晚点：从现在算起。
-  if (/^(马上|立刻|现在)$/.test(text)) return { from: at, due: at + 15 * MIN };
-  if (/^(一会儿?|待会儿?|等会儿?|过会儿?|晚点儿?|晚一点|晚些|晚一些|回头)$/.test(text)) {
-    return { from: at + 30 * MIN, due: at + 2 * H };
-  }
-
-  // N 分钟 / 小时 / 天 / 周 / 个月 后。
-  const later = text.match(
-    /^(\d+(?:\.\d+)?|[一二两三四五六七八九十]+|半)(个)?(分钟|小时|钟头|天|周|星期|礼拜|月)(后|以后|之后)$/,
-  );
-  if (later) {
-    const n = numberOf(later[1] as string);
-    if (n === null || n <= 0) return null;
-    const unit = later[3] as string;
-    if (unit === "分钟" || unit === "小时" || unit === "钟头") {
-      const due = at + n * (unit === "分钟" ? MIN : H);
-      return { from: due - Math.min(H, (due - at) / 2), due };
-    }
-    const days = unit === "天" ? n : unit === "月" ? n * 30 : n * 7;
-    return within(today + Math.round(days), "");
-  }
-
-  // 今天 / 明天 / 后天 / 大后天，及其简称（今晚、明早……），后面可带时段与钟点。
-  const named = text.match(/^(今天|今日|今|明天|明日|明儿|明|后天|大后天)(.*)$/);
-  if (named) {
-    const word = named[1] as string;
-    const offset = word.startsWith("大后")
-      ? 3
-      : word.startsWith("后")
-        ? 2
-        : word.startsWith("明")
-          ? 1
-          : 0;
-    const rest = named[2] as string;
-    // "今""明"单字只在后面跟着时段时成立（今晚、明早）。
-    if ((word === "今" || word === "明") && !PERIODS.some(([p]) => p.test(rest))) return null;
-    return within(today + offset, rest);
-  }
-
-  // 周末 / 这周末 / 下周末。
-  const weekend = text.match(/^(这|本|下)?(个)?(周末|礼拜天?末)$/);
-  if (weekend) {
-    const wd = weekday(today);
-    const saturday = today + (6 - wd) + (weekend[1] === "下" ? 7 : 0);
-    const start = Math.max(saturday, today);
-    return { from: epochOf(start, DAYTIME[0]), due: epochOf(saturday + 1, DAYTIME[1]) };
-  }
-
-  // 周X / 星期X / 这周X / 下周X，可带时段与钟点。
-  const week = text.match(/^(这|本|下)?(个)?(周|星期|礼拜)([一二三四五六日天])(.*)$/);
-  if (week) {
-    const target = WEEKDAYS[week[4] as string] as number;
-    const wd = weekday(today);
-    const monday = today - (wd - 1);
-    let day = monday + (target - 1) + (week[1] === "下" ? 7 : 0);
-    // 没说"这周"、"下周"，而那天已经过了：指下一个。
-    if (!week[1] && day < today) day += 7;
-    return within(day, week[5] as string);
-  }
-
-  // 这周 / 下周：一整周。
-  const wholeWeek = text.match(/^(这|本|下)(个)?(周|星期|礼拜)$/);
-  if (wholeWeek) {
-    const monday = today - (weekday(today) - 1) + (wholeWeek[1] === "下" ? 7 : 0);
-    const start = Math.max(monday, today);
-    return { from: epochOf(start, DAYTIME[0]), due: epochOf(monday + 6, DAYTIME[1]) };
-  }
-
-  // 下个月 / 月底。
-  const { y, m } = civilFromDays(today);
-  if (/^下(个)?月$/.test(text)) {
-    const ny = m === 12 ? y + 1 : y;
-    const nm = m === 12 ? 1 : m + 1;
-    const first = daysFromCivil(ny, nm, 1);
-    const last = daysFromCivil(nm === 12 ? ny + 1 : ny, nm === 12 ? 1 : nm + 1, 1) - 1;
-    return { from: epochOf(first, DAYTIME[0]), due: epochOf(last, DAYTIME[1]) };
-  }
-  if (/^(这个?月)?月底$/.test(text)) {
-    const last = daysFromCivil(m === 12 ? y + 1 : y, m === 12 ? 1 : m + 1, 1) - 1;
-    return { from: epochOf(Math.max(today, last - 3), DAYTIME[0]), due: epochOf(last, DAYTIME[1]) };
-  }
-
-  // 日期：2026-11-20、2026年11月20日、11月20日、11/20、20号。可带时段与钟点。
-  const full = text.match(/^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})[日号]?(.*)$/);
-  if (full) {
-    const [yy, mm, dd] = [Number(full[1]), Number(full[2]), Number(full[3])];
-    return validDate(yy, mm, dd) ? within(daysFromCivil(yy, mm, dd), full[4] as string) : null;
-  }
-  const monthDay = text.match(/^(\d{1,2})(?:月|\/|-)(\d{1,2})[日号]?(.*)$/);
-  if (monthDay) {
-    const [mm, dd] = [Number(monthDay[1]), Number(monthDay[2])];
-    let yy = y;
-    if (!validDate(yy, mm, dd)) return null;
-    // 今年的这一天已经过了：指明年。
-    if (daysFromCivil(yy, mm, dd) < today) yy++;
-    return validDate(yy, mm, dd) ? within(daysFromCivil(yy, mm, dd), monthDay[3] as string) : null;
-  }
-  const dayOnly = text.match(/^(\d{1,2})[日号](.*)$/);
-  if (dayOnly) {
-    const dd = Number(dayOnly[1]);
-    const { d } = civilFromDays(today);
-    const [yy, mm] = dd >= d ? [y, m] : m === 12 ? [y + 1, 1] : [y, m + 1];
-    return validDate(yy, mm, dd) ? within(daysFromCivil(yy, mm, dd), dayOnly[2] as string) : null;
+  for (const read of READERS) {
+    const when = read(text, today, at);
+    if (when !== undefined) return when;
   }
   return nextClock(text, today, at);
 }
@@ -260,9 +309,7 @@ export function parseWhen(raw: string, at: number): When | null {
  * （答应"8点提醒你"的承诺以前认不出来，就没有约定时间，到点不会想起）。
  */
 function nextClock(text: string, today: number, at: number): When | null {
-  if (
-    !/^(?:\d|[一二两三四五六七八九十]|早|一早|上午|中午|下午|午后|傍晚|晚|夜里|今夜)/.test(text)
-  ) {
+  if (!/^(?:[\d一二两三四五六七八九十早晚]|上午|中午|下午|午后|傍晚|夜里|今夜)/.test(text)) {
     return null;
   }
   const first = within(today, text);

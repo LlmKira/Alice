@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { decodeEvent } from "../src/journal.js";
-import type { Gateway } from "../src/llm/gateway.js";
 import { perceiveTone } from "../src/llm/tone.js";
 import { type FamiliarState, familiar } from "../src/mechanisms/familiar.js";
 import { pressureProduction } from "../src/mechanisms/pressure/index.js";
@@ -19,6 +18,7 @@ import { step } from "../src/mind/step.js";
 import { gated } from "../src/ops/gate.js";
 import { createFold, Shell, type ShellPorts } from "../src/shell.js";
 import { parse, replayEvents } from "../src/sim/will-replay.js";
+import { fakeGateway } from "./fake-gateway.js";
 import { modelReply } from "./model-reply.js";
 
 const T0 = Date.parse("2026-11-10T14:00:00+08:00");
@@ -166,7 +166,7 @@ describe("the shell asks for the tone once per wake, only for messages aimed at 
       paused: () => false,
     };
     const shell = new Shell(ports, mechanisms, "P", createFold(mechanisms).result());
-    return { shell, journal, timers, asked };
+    return { shell, ports, journal, timers, asked };
   };
   const settle = async () => {
     for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
@@ -174,7 +174,7 @@ describe("the shell asks for the tone once per wake, only for messages aimed at 
 
   it("judges the waiting directed messages when she wakes there and journals the tone", async () => {
     const h = harness(async (_t, _l, ids) =>
-      Object.fromEntries(ids.map((id) => [id, { tone: "hostile" as Tone }])),
+      Object.fromEntries(ids.map((id) => [id, { tone: "hostile" }])),
     );
     h.shell.dispatch(msg(T0, "在吗"));
     h.shell.dispatch(msg(T0 + 1000, "你好烦"));
@@ -188,12 +188,10 @@ describe("the shell asks for the tone once per wake, only for messages aimed at 
 
   it("the pause gate refuses the tone call (no spending while paused)", async () => {
     let asked = 0;
-    const base = {
-      perceiveTone: async () => {
-        asked++;
-        return {};
-      },
-    } as unknown as ShellPorts;
+    const base = harness(async () => {
+      asked++;
+      return {};
+    }).ports;
     const ports = gated(base, { paused: true, onPause: () => {} });
     await expect(
       ports.perceiveTone?.("private", [], ["1"], new AbortController().signal),
@@ -211,29 +209,23 @@ describe("the shell asks for the tone once per wake, only for messages aimed at 
 
   it("the tone goes to Jev, the three unwelcome questions to the stronger model, in parallel, and both are read back", async () => {
     const posted: Array<{ path: string; body: Record<string, unknown> }> = [];
-    const gateway = {
-      post: async (call: { path: string; body: Record<string, unknown> }) => {
-        posted.push(call);
-        if (call.path === "/systemone")
-          return {
-            body: {
-              answers: {
-                q0: { choice: "hostile" },
-                q1: { choice: "maybe" },
-                q2: { choice: "cold" },
-              },
-            },
-            spent: {} as never,
-          };
-        const content = JSON.stringify({
-          "1": { stop: "yes", hush: "no", aloof: "no" },
-          "2": { stop: "no", hush: "yes", aloof: "no" },
-          "3": { stop: "no", hush: "no", aloof: "no" },
-        });
-        return { body: { choices: [{ message: { content } }] }, spent: {} as never };
-      },
-      charge: () => {},
-    } as unknown as Gateway;
+    const gateway = fakeGateway((call) => {
+      posted.push({ path: call.path, body: call.body as Record<string, unknown> });
+      if (call.path === "/systemone")
+        return {
+          answers: {
+            q0: { choice: "hostile" },
+            q1: { choice: "maybe" },
+            q2: { choice: "cold" },
+          },
+        };
+      const content = JSON.stringify({
+        "1": { stop: "yes", hush: "no", aloof: "no" },
+        "2": { stop: "no", hush: "yes", aloof: "no" },
+        "3": { stop: "no", hush: "no", aloof: "no" },
+      });
+      return { choices: [{ message: { content } }] };
+    });
     const lines = [
       { id: "1", who: "阿凯", text: "别回我了" },
       { id: "2", who: "阿凯", text: "闭嘴吧" },
@@ -252,13 +244,11 @@ describe("the shell asks for the tone once per wake, only for messages aimed at 
   });
 
   it("an unreadable answer from the stronger model leaves only the tone", async () => {
-    const gateway = {
-      post: async (call: { path: string }) =>
-        call.path === "/systemone"
-          ? { body: { answers: { q0: { choice: "neutral" } } }, spent: {} as never }
-          : { body: { choices: [{ message: { content: "不是 JSON" } }] }, spent: {} as never },
-      charge: () => {},
-    } as unknown as Gateway;
+    const gateway = fakeGateway((call) =>
+      call.path === "/systemone"
+        ? { answers: { q0: { choice: "neutral" } } }
+        : { choices: [{ message: { content: "不是 JSON" } }] },
+    );
     expect(
       await perceiveTone(gateway, "group", [{ id: "1", who: "阿凯", text: "嗯" }], ["1"]),
     ).toEqual({ "1": { tone: "neutral" } });
@@ -266,7 +256,7 @@ describe("the shell asks for the tone once per wake, only for messages aimed at 
 
   it("the shell journals stop alongside the tone", async () => {
     const h = harness(async (_t, _l, ids) =>
-      Object.fromEntries(ids.map((id) => [id, { tone: "hostile" as Tone, stop: true as const }])),
+      Object.fromEntries(ids.map((id) => [id, { tone: "hostile", stop: true as const }])),
     );
     h.shell.dispatch(msg(T0, "别回我了"));
     h.timers.at(-1)?.();

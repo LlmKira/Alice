@@ -80,18 +80,7 @@ export async function replayChat(
     }
     if (!startsTurn) continue;
     turn++;
-    const chat: ChatState | undefined = state.chats[e.scope];
-    if (!chat) continue;
-    const trigger = [...chat.timeline].reverse().find((t) => t.sender !== null)?.messageId ?? null;
-    const request = speechRequest(state, chat, e.at, trigger, active);
-    const decision = await speech(request, `${e.scope}#self-${turn}`);
-    if (!decision) continue;
-    const settled = settleDecision(chat, decision, e.at);
-    // 只回放会留下消息的动作；表情、已读不进时间线。
-    const sends: Array<{ text: string; kind: MessageSent["kind"] }> = settled.acts.flatMap(
-      (act) => postedMessage(act) ?? [],
-    );
-    for (const s of sends) {
+    for (const s of await generate(state, e, turn, speech, active)) {
       simId++;
       const sent: MessageSent = {
         type: "message.sent",
@@ -102,18 +91,40 @@ export async function replayChat(
         kind: s.kind,
       };
       if (mode === "closed") feed(sent);
-      out.push({
-        at: e.at,
-        messageId: sent.messageId,
-        speaker: "Alice",
-        text: s.kind === "sticker" ? `[贴纸:${s.text}]` : s.text,
-        contentType: s.kind,
-        generated: true,
-        turn,
-      });
+      out.push(generatedLine(sent, turn));
     }
   }
   return out;
+}
+
+/** 她当年开口的这一刻，新系统这一轮会留下的消息。只回放会留下消息的动作；表情、已读不进时间线。 */
+async function generate(
+  state: AliceState,
+  e: MessageSent,
+  turn: number,
+  speech: SpeechOracle,
+  active: readonly Mechanism[],
+): Promise<Array<{ text: string; kind: MessageSent["kind"] }>> {
+  const chat: ChatState | undefined = state.chats[e.scope];
+  if (!chat) return [];
+  const trigger = [...chat.timeline].reverse().find((t) => t.sender !== null)?.messageId ?? null;
+  const request = speechRequest(state, chat, e.at, trigger, active);
+  const decision = await speech(request, `${e.scope}#self-${turn}`);
+  if (!decision) return [];
+  const settled = settleDecision(chat, decision, e.at);
+  return settled.acts.flatMap((act) => postedMessage(act) ?? []);
+}
+
+function generatedLine(sent: MessageSent, turn: number): TranscriptLine {
+  return {
+    at: sent.at,
+    messageId: sent.messageId,
+    speaker: "Alice",
+    text: sent.kind === "sticker" ? `[贴纸:${sent.text}]` : sent.text,
+    contentType: sent.kind,
+    generated: true,
+    turn,
+  };
 }
 
 async function main(): Promise<void> {
@@ -153,7 +164,7 @@ async function main(): Promise<void> {
       }
     }),
   );
-  const rows = [...results].map(([scope, lines]) => JSON.stringify({ scope, lines }));
+  const rows = Array.from(results, ([scope, lines]) => JSON.stringify({ scope, lines }));
   writeFileSync(join(outDir, `transcripts-${mode}${suffix}.jsonl`), `${rows.join("\n")}\n`);
   const generated = [...results.values()].flat().filter((l) => l.generated).length;
   console.log(

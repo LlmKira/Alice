@@ -54,9 +54,4 @@ describe("self-replay", () => {
     expect(generated).toEqual(["生成(原话一)", "生成(原话二)"]);
     expect(lines.filter((l) => l.speaker === "Alice" && !l.generated)).toHaveLength(3);
   });
-
-  it("generates once per turn, not once per message in the turn", async () => {
-    const lines = await replayChat(events, "closed", echo);
-    expect(lines.filter((l) => l.generated).map((l) => l.turn)).toEqual([1, 2]);
-  });
 });

@@ -79,14 +79,14 @@ export const EXTRINSIC_DRIVES: readonly DriveKey[] = [
 ];
 
 /** 一个 `scope:channel` 的观测：被接了几次、总共几次。 */
-export interface ChannelTaste {
+interface ChannelTaste {
   pos: number;
   total: number;
 }
 
 /** 一次"被接纳"：supervisor 把它交给 affect.ts 的评价入口。 */
 export interface FeedbackAppraisal {
-  word: "被接纳";
+  word: "开心";
   /**
    * 这次往暖里推的增量，(0, MOOD_LIFT_MAX]。
    * 和 affect.ts 的 appraise 不同，这里给的是增量：那边收到的是"推到的效价"。接线时用
@@ -107,7 +107,7 @@ export interface FeedbackAppraisal {
 }
 
 /** 她刚开口、还在等反应的那一轮（每个会话一条；一轮里连着说的几条共用）。 */
-export interface FeedbackOpenTurn {
+interface FeedbackOpenTurn {
   /** 已知的会话类型；`message.sent` 自己不带，按之前收到的消息记，不知道时按群处理。 */
   chatType: ChatType;
   /** 这一轮最后一条她的话的时刻（等反应的窗口从这里算）。 */
@@ -119,7 +119,7 @@ export interface FeedbackOpenTurn {
 }
 
 /** 已经有人接、还在等判口气的一条接话。 */
-export interface FeedbackPendingTone {
+interface FeedbackPendingTone {
   scope: string;
   chatType: ChatType;
   /** 她那一轮的最后一条消息（收到口气后把它那一轮关掉）。 */
@@ -136,7 +136,7 @@ export interface FeedbackPendingTone {
 }
 
 /** 会话的样子：只记评价要用的一点点（群名、在场的人）。 */
-export interface FeedbackChatMemory {
+interface FeedbackChatMemory {
   chatType: ChatType;
   title: string | null;
   present: readonly string[];
@@ -144,7 +144,7 @@ export interface FeedbackChatMemory {
 
 /**
  * 回流的状态。`open` 是还在等反应的那一轮，`pending` 是已接上、等口气的接话，`taste` 是分享口味，
- * `boost` 是这次事件刚判出来的一次正向评价（下一次折叠清掉，supervisor 只在事件后读一次）。
+ * `boost` 是这次事件刚判出来的一次正向评价（下一次 fold 清掉，supervisor 只在事件后读一次）。
  */
 export interface ReceptionFeedbackState {
   open: Readonly<Record<string, FeedbackOpenTurn>>;
@@ -256,7 +256,7 @@ function appraisalOf(o: {
   present: readonly string[];
 }): FeedbackAppraisal {
   return {
-    word: "被接纳",
+    word: "开心",
     valence: MOOD_LIFT_MAX * surpriseOf(o.usual),
     why: acceptedWhy({
       chatType: o.chatType,
@@ -294,8 +294,8 @@ function settle(state: ReceptionFeedbackState, at: number): ReceptionFeedbackSta
   for (const [scope, turn] of Object.entries(state.open)) {
     if (at - turn.at > RECEPTION_WINDOW[turn.chatType]) {
       changed = true;
-      const turnId = turn.ids[turn.ids.length - 1];
-      if (turn.channel && !awaitsTone(state, scope, turnId)) {
+      const turnId = turn.ids.at(-1);
+      if (turn.channel && (turnId === undefined || !awaitsTone(state, scope, turnId))) {
         taste = withTaste(taste, scope, turn.channel, false);
       }
     } else {
@@ -362,7 +362,7 @@ function toneVerdict(event: MessagePerceived): "warm" | "cold" | null {
 }
 
 /**
- * 折叠一个事件。它只读事件和接线时给的上下文，时钟只来自 `event.at`；同一个事件日志回放出同样的结果。
+ * fold 一个事件。它只读事件和接线时给的上下文，时钟只来自 `event.at`；同一个事件日志回放出同样的结果。
  * `context.channel` 只在 `message.sent` 上读，`context.usualUptake` 在接住她的那条事件上读。
  */
 export function reduceFeedback(
@@ -371,7 +371,7 @@ export function reduceFeedback(
   context: FeedbackContext = {},
 ): ReceptionFeedbackState {
   const settled = settle(state, event.at);
-  // 上一次事件的正向评价只活到下一次折叠：supervisor 折完一个事件就读一次。
+  // 上一次事件的正向评价只活到下一次 fold：supervisor 折完一个事件就读一次。
   const base: ReceptionFeedbackState = settled.boost ? { ...settled, boost: null } : settled;
 
   switch (event.type) {
@@ -451,7 +451,7 @@ function onMessageReceived(
   const directed = event.directed || event.chatType === "private";
   if (!replies && !directed && event.at - turn.at > UPTAKE_LINK) return next;
 
-  const turnId = turn.ids[turn.ids.length - 1] ?? event.messageId;
+  const turnId = turn.ids.at(-1) ?? event.messageId;
   const key = pendingKey(event.scope, event.messageId);
   const pending: FeedbackPendingTone = {
     scope: event.scope,
@@ -524,7 +524,7 @@ function onReactionReceived(
   const turn = state.open[event.scope];
   if (!turn || !turn.ids.includes(event.messageId)) return state;
   const negative = NEGATIVE_REACTIONS.has(event.emoji);
-  const turnId = turn.ids[turn.ids.length - 1] ?? event.messageId;
+  const turnId = turn.ids.at(-1) ?? event.messageId;
   let next = closeOpen(
     { ...state, pending: withoutTurn(state.pending, event.scope, turnId) },
     event.scope,
@@ -560,7 +560,7 @@ function onReactionReceived(
 }
 
 /**
- * 这次事件刚判出来的一次正向评价；没有就是 null。下一次折叠会清掉它，所以每次事件后读一次。
+ * 这次事件刚判出来的一次正向评价；没有就是 null。下一次 fold 会清掉它，所以每次事件后读一次。
  */
 export function pendingMoodBoost(state: ReceptionFeedbackState): FeedbackAppraisal | null {
   return state.boost;
@@ -628,7 +628,7 @@ export function splitRelief(
 
 /**
  * 正向回流（ADR-276 环节二、五）：开口后被暖心地接住，推暖心情、记住频道口味；心情推内在的劲（不影响义务）。
- * 组成里要读 chats、affect（amends affect，在 affect 之后折叠）和可选 posts（分享口味）。
+ * 组成里要读 chats、affect（amends affect，在 affect 之后 fold）和可选 posts（分享口味）。
  */
 export const positiveLoop: PressureFeature = feature({
   name: "positive-loop",

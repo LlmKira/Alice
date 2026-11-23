@@ -19,7 +19,7 @@ export function hash32(text: string): number {
   return h >>> 0;
 }
 
-/** 字符串 → [0, 1)（FNV-1a）：回放的桩、替身和回应模型按 (会话, 时刻, 哪一项) 确定地抽样。 */
+/** 字符串 → [0, 1)（FNV-1a）：回放的 stub、替身和回应模型按 (会话, 时刻, 哪一项) 确定地抽样。 */
 export function unit(key: string): number {
   return fnv1a(key) / 2 ** 32;
 }

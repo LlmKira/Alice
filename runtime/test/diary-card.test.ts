@@ -105,7 +105,7 @@ describe("a diary entry she has already had her say about stops pulling in that 
   it("the diary keeps all three, and reflecting in the group she still sees what she wrote", () => {
     const events = [...threeEntries, sent(later - 2 * MIN, GROUP, "我回来啦"), ...scrolled(later)];
     const world = Object.values(run(events).mechanisms).find(
-      (m) => m !== null && typeof m === "object" && "diary" in (m as object),
+      (m) => m !== null && typeof m === "object" && "diary" in m,
     ) as { diary: Array<{ text: string }> };
     expect(world.diary.map((e) => e.text)).toEqual(NEWS);
     let state: AliceState = emptyState;

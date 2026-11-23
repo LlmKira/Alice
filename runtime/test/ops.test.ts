@@ -197,7 +197,7 @@ describe("operator pause in the shell", () => {
       "speech.failed",
     ]);
     expect(h.journal.at(-1)).toMatchObject({ reason: "paused" });
-    // 先写日志再 step：从 Journal 折叠出的状态就是运行中的状态。
+    // 先写日志再 step：从 Journal fold 出的状态就是运行中的状态。
     const fold = createFold(mechanisms);
     for (const event of h.journal) fold.feed(event);
     expect(fold.result().state).toEqual(h.shell.current);
@@ -427,6 +427,29 @@ describe("operator control", () => {
 });
 
 describe("self-check alerts", () => {
+  it("name the network cause, not just fetch failed", async () => {
+    const gateway = createGateway({
+      apiKey: "k",
+      charge: () => undefined,
+      fetch: () =>
+        Promise.reject(
+          new TypeError("fetch failed", {
+            cause: Object.assign(new Error("other side closed"), { code: "ECONNRESET" }),
+          }),
+        ),
+    });
+    await expect(
+      gateway.post({
+        kind: "speech",
+        model: "m",
+        path: "/chat/completions",
+        body: {},
+        timeoutMs: 1000,
+        tokens: () => ({ promptTokens: 0, completionTokens: 0, reasoningTokens: 0 }),
+      }),
+    ).rejects.toThrow("network: TypeError: fetch failed (ECONNRESET other side closed)");
+  });
+
   it("are rate limited and carry the count of what was held back", () => {
     let now = T0;
     const sent: string[] = [];
@@ -503,5 +526,19 @@ describe("self-check alerts", () => {
     expect(watch.connected).toBe(false);
     watch.connection("connected");
     expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("聊天连接断了约 5 分钟");
+  });
+
+  it("names the platform that dropped when several are attached", () => {
+    let now = T0;
+    const sent: string[] = [];
+    const watch = new Watch(
+      () => now,
+      (text) => void sent.push(text),
+    );
+    watch.connection("qq:offline");
+    now += 3 * 60_000;
+    watch.connection("connected");
+    expect(sent[0]).toContain("QQ 连接断了约 3 分钟");
   });
 });

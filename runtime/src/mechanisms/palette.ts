@@ -1,9 +1,10 @@
 import type { Act, ActKind } from "../mind/affordances.js";
-import type { ChatType } from "../mind/events.js";
+import type { AliceEvent, ChatType } from "../mind/events.js";
 import type { Contribution, Mechanism } from "../mind/mechanism.js";
 import type { ChatState } from "../mind/state.js";
+import type { DecisionStyle } from "../speech/decision.js";
 import { fnv1a as hash } from "./hash.js";
-import { POOL, POOL_CHARM, POOL_DIVERSE, RARE } from "./palette-pool.js";
+import { POOL, POOL_AUTHENTIC, POOL_CHARM, POOL_DIVERSE, RARE } from "./palette-pool.js";
 
 /**
  * 示例的情绪寄存器调色盘（生产，取代 examples；示例本身在 palette-pool.ts）。
@@ -87,7 +88,7 @@ export const GROUP_SILENT: readonly Example[] = [
 ];
 
 /** 私聊里的轻回应与沉默示范：在私聊里也看得见贴纸、表情和停手，不再只有纯打字示例。 */
-export const PRIVATE_LIGHT: readonly Example[] = [
+const PRIVATE_LIGHT: readonly Example[] = [
   {
     register: "平淡",
     chat: "private",
@@ -107,6 +108,18 @@ export const PRIVATE_LIGHT: readonly Example[] = [
     chat: "private",
     scene: "你刚才已经连着发了两条，对方还没接上来",
     acts: [],
+    source: "context",
+  },
+];
+
+/** 私聊真我静默/感受示范：仅在本会话确实被刺伤时给出“委屈得什么都不想回”，避免无关表情贴纸冲淡真伤感。 */
+const PRIVATE_AUTHENTIC_SILENT: readonly Example[] = [
+  ...PRIVATE_LIGHT.filter((e) => e.acts.length === 0),
+  {
+    register: "委屈",
+    chat: "private",
+    scene: "对方话讲得太重，你委屈得接不下去、什么都不想回",
+    acts: [{ kind: "feel", mood: "委屈难过", why: "话太伤人" }],
     source: "context",
   },
 ];
@@ -140,7 +153,7 @@ function relevance(e: Example, recent: Set<string>): number {
 const RECENT = 10;
 const PRUNE_ACTIVE_TIMELINE = 10;
 
-export interface PaletteOptions {
+interface PaletteOptions {
   /** 按 calls + 15 分钟窗口轮换（替代按天锁死）。 */
   perCall?: boolean;
   /** 跳过字面二元组相关度排序，防止常见词把同一条示例锁在第一位。 */
@@ -151,6 +164,14 @@ export interface PaletteOptions {
   privateLight?: boolean;
   /** 私聊里最多轮换保留几条日常开口示范（不传则全留，保持生产不变）。 */
   privateSlots?: number;
+  /** 私聊轻回应与沉默池覆盖（默认 PRIVATE_LIGHT）。 */
+  privateSilentPool?: readonly Example[];
+  /** 删掉群里 4 条"这种时候不说话"的偏平示范，只留轻回应（贴纸/点表情）与真实开口（PLAN 第 40 件）。 */
+  dropQuietSilent?: boolean;
+  /** 按当下心境过滤允许参与轮换的寄存器，缓解极端受伤时仍出现兴奋打趣示例的偏差。 */
+  allowedRegisters?: ReadonlySet<Register>;
+  /** 候选发言口吻（例如 "charm-sticker"），不设则保持默认。 */
+  style?: DecisionStyle;
 }
 
 function pick(
@@ -182,9 +203,11 @@ function pick(
       }))
       .sort((a, b) => b.r - a.r || b.h - a.h)
       .map((x) => x.e);
-  const rotation = REGISTERS.filter((r) => pool.some((e) => e.register === r)).sort(
-    (a, b) => hash(`${key}|${a}`) - hash(`${key}|${b}`),
-  );
+  const rotation = REGISTERS.filter(
+    (r) =>
+      (!options.allowedRegisters || options.allowedRegisters.has(r)) &&
+      pool.some((e) => e.register === r),
+  ).sort((a, b) => hash(`${key}|${a}`) - hash(`${key}|${b}`));
   const pruneGroup =
     options.pruneActive === true &&
     chat.chatType === "group" &&
@@ -195,13 +218,17 @@ function pick(
   const rare: Array<{ scene: string; acts: Act[]; code?: string }> = RARE.filter((e) =>
     offered.includes(e.needs),
   ).map((e) => ({ scene: e.scene, acts: e.acts, ...(e.code ? { code: e.code } : {}) }));
+  const silentSource = options.privateSilentPool ?? PRIVATE_LIGHT;
   const privateLight =
     options.privateLight === true && chat.chatType === "private"
-      ? PRIVATE_LIGHT.filter((e) => e.acts.every((a) => offered.includes(a.kind)))
+      ? silentSource.filter((e) => e.acts.every((a) => offered.includes(a.kind)))
       : [];
+  const groupSilent = options.dropQuietSilent
+    ? GROUP_SILENT.filter((e) => e.acts.length > 0)
+    : GROUP_SILENT;
   const all: Array<{ scene: string; acts: Act[]; code?: string }> = [
     ...chosen,
-    ...(chat.chatType === "group" ? GROUP_SILENT : privateLight),
+    ...(chat.chatType === "group" ? groupSilent : privateLight),
     ...rare,
   ];
   return all
@@ -210,10 +237,7 @@ function pick(
 }
 
 /** 一套示例的调色盘：同一份挑法，示例池由调用方给。 */
-export function createPalette(
-  examples: readonly Example[],
-  options: PaletteOptions = {},
-): Mechanism {
+function createPalette(examples: readonly Example[], options: PaletteOptions = {}): Mechanism {
   return {
     name: "palette",
     contribute: (chat, now, _state, offered): Contribution[] => [
@@ -222,6 +246,7 @@ export function createPalette(
         kind: "reference",
         text: `你平时${chat.chatType === "group" ? "在群里" : "私聊时"}的几种回法`,
         examples: pick(chat, now, examples, offered, options),
+        ...(options.style ? { style: options.style } : {}),
       },
     ],
   };
@@ -233,12 +258,6 @@ export function createPalette(
  * 输出永远是同一种写法。
  */
 export const palette: Mechanism = createPalette(POOL);
-
-/**
- * 候选（out-charm.md 改法 3B，eval-artifacts/charm/）：换掉那六个偏平的示范、加三段有脑洞/小账本/骨气的示例。
- * 生产 palette 与 POOL 都不动。
- */
-export const paletteCharm: Mechanism = createPalette(POOL_CHARM);
 
 /** 候选（diversity 消融）：扩充去口癖群聊池 + 按调用与 15 分钟窗轮换 + 取消字面锁死。 */
 export const paletteDiverse: Mechanism = createPalette(POOL_DIVERSE, {
@@ -252,3 +271,183 @@ export const paletteComposite: Mechanism = createPalette(POOL, {
   privateLight: true,
   privateSlots: 4,
 });
+
+/** 候选（ADR-297 魅力+贴纸闭环）：保留活跃群开口示范、删去 4 条僵硬沉默示范、启用开放口吻 charm-sticker。 */
+export const paletteCharmV2: Mechanism = createPalette(POOL_CHARM, {
+  perCall: true,
+  pruneActive: false,
+  dropQuietSilent: true,
+  privateLight: true,
+  privateSlots: 5,
+  style: "charm-sticker",
+});
+
+/** 情绪感知调色盘状态：纯函数 fold 事件，按两小时半衰期自然消退，不读写外部时钟。 */
+interface PaletteMood {
+  valence: number;
+  at: number;
+  hurtScopes: Readonly<Record<string, number>>;
+}
+
+const MOOD_HALF_LIFE_MS = 2 * 60 * 60_000;
+const INITIAL_PALETTE_MOOD: PaletteMood = { valence: 0, at: 0, hurtScopes: {} };
+
+const HURT_REGISTERS: ReadonlySet<Register> = new Set([
+  "委屈",
+  "认真",
+  "平淡",
+  "有主见",
+  "害羞",
+  "关心",
+  "温柔",
+]);
+
+/** 当前会话正被刺伤时的聚焦寄存器：不混入闲聊日常，避免多数偏差把破防时刻拉回敷衍套话。 */
+const DEEP_HURT_REGISTERS: ReadonlySet<Register> = new Set(["委屈", "认真", "有主见"]);
+
+const WARM_REGISTERS: ReadonlySet<Register> = new Set([
+  "逗人",
+  "兴奋",
+  "害羞",
+  "温柔",
+  "撒娇",
+  "分享",
+  "有主见",
+  "嘴硬",
+]);
+
+function decayValence(state: PaletteMood, now: number): number {
+  if (state.at <= 0 || now <= state.at) return state.valence;
+  return state.valence * 0.5 ** ((now - state.at) / MOOD_HALF_LIFE_MS);
+}
+
+function clampUnit(v: number): number {
+  return Math.max(-1, Math.min(1, v));
+}
+
+function pruneHurt(scopes: Readonly<Record<string, number>>, now: number): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [k, at] of Object.entries(scopes)) {
+    if (now - at < MOOD_HALF_LIFE_MS) out[k] = at;
+  }
+  return out;
+}
+
+function isPaletteMood(v: unknown): v is PaletteMood {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    "valence" in v &&
+    "at" in v &&
+    "hurtScopes" in v &&
+    typeof v.valence === "number" &&
+    typeof v.at === "number"
+  );
+}
+
+function readMood(state: unknown): PaletteMood {
+  return isPaletteMood(state) ? state : INITIAL_PALETTE_MOOD;
+}
+
+function withHurt(
+  state: PaletteMood,
+  at: number,
+  valence: number,
+  scope?: string,
+  clear = false,
+): PaletteMood {
+  const hurtScopes = pruneHurt(state.hurtScopes, at);
+  if (scope) {
+    if (clear) delete hurtScopes[scope];
+    else hurtScopes[scope] = at;
+  }
+  return { valence: clampUnit(valence), at, hurtScopes };
+}
+
+function reducePerceived(
+  state: PaletteMood,
+  decayed: number,
+  event: Extract<AliceEvent, { type: "message.perceived" }>,
+): PaletteMood {
+  if (event.tone === "hostile") return withHurt(state, event.at, decayed - 0.45, event.scope);
+  if (event.tone === "cold" || event.aloof) {
+    return withHurt(state, event.at, decayed - 0.25, event.scope);
+  }
+  if (event.tone === "friendly") {
+    const nextValence = clampUnit(decayed + 0.25);
+    return withHurt(state, event.at, nextValence, nextValence >= 0 ? event.scope : undefined, true);
+  }
+  return state;
+}
+
+function reduceAct(
+  state: PaletteMood,
+  decayed: number,
+  event: Extract<AliceEvent, { type: "act.done" }>,
+): PaletteMood {
+  if (event.act.kind === "feel" && event.valence !== undefined) {
+    const hurtScope = event.valence < -0.25 ? event.scope : undefined;
+    return withHurt(state, event.at, decayed * 0.3 + event.valence * 0.7, hurtScope);
+  }
+  if (event.act.kind === "let-go") {
+    return withHurt(state, event.at, Math.max(decayed, -0.05), event.scope, true);
+  }
+  return state;
+}
+
+function reducePaletteMood(raw: unknown, event: AliceEvent): PaletteMood {
+  const state = readMood(raw);
+  const decayed = decayValence(state, event.at);
+  if (event.type === "message.perceived") return reducePerceived(state, decayed, event);
+  if (event.type === "act.done") return reduceAct(state, decayed, event);
+  if (
+    event.type === "ponder.done" &&
+    event.ponder.kind === "reflect" &&
+    event.ponder.mood?.valence !== undefined
+  ) {
+    return withHurt(state, event.at, decayed * 0.4 + event.ponder.mood.valence * 0.6);
+  }
+  return state;
+}
+
+/**
+ * 候选（真我情感调色盘）：去道具词、补干净害羞/委屈与沉默退场示范，
+ * 并按当下真实心境与本会话受伤余韵调节参与轮换的寄存器，避免受伤时刻仍喂进亢奋笑话示例。
+ */
+export const paletteAuthentic: Mechanism = {
+  name: "palette",
+  initial: INITIAL_PALETTE_MOOD,
+  reduce: reducePaletteMood,
+  contribute: (chat, now, state, offered): Contribution[] => {
+    const moodState = readMood(state);
+    const moodNow = decayValence(moodState, now);
+    const hurtAt = moodState.hurtScopes[chat.scope];
+    const isHurtHere = hurtAt !== undefined && now - hurtAt < MOOD_HALF_LIFE_MS;
+    const allowedRegisters = isHurtHere
+      ? DEEP_HURT_REGISTERS
+      : moodNow < -0.15
+        ? HURT_REGISTERS
+        : moodNow > 0.25
+          ? WARM_REGISTERS
+          : undefined;
+    return [
+      {
+        mechanism: "palette",
+        kind: "reference",
+        text: `你平时${chat.chatType === "group" ? "在群里" : "私聊时"}的几种回法`,
+        examples: pick(chat, now, POOL_AUTHENTIC, offered, {
+          perCall: true,
+          noRelevance: true,
+          pruneActive: false,
+          dropQuietSilent: true,
+          privateLight: true,
+          privateSilentPool: isHurtHere ? PRIVATE_AUTHENTIC_SILENT : PRIVATE_LIGHT,
+          privateSlots: isHurtHere ? 3 : 5,
+          ...(allowedRegisters ? { allowedRegisters } : {}),
+          style: "default",
+        }),
+        style: "default",
+      },
+    ];
+  },
+};

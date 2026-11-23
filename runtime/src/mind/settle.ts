@@ -41,14 +41,20 @@ export function settleDecision(chat: ChatState, decision: SpeechDecision, at: nu
       }
       budget--;
       recentSends.push(at);
-    } else {
-      const key = JSON.stringify(act);
-      if (seen.has(key)) continue;
-      seen.add(key);
+    } else if (!firstSeen(seen, act)) {
+      continue;
     }
     acts.push(act);
     const member = memberAfter(row);
     if (member !== undefined) current = { ...current, member };
   }
   return { acts, recentSends, dropped };
+}
+
+/** 不留消息的动作在一次决定里只做一次：第一次见到时记下并返回 true。 */
+function firstSeen(seen: Set<string>, act: Act): boolean {
+  const key = JSON.stringify(act);
+  if (seen.has(key)) return false;
+  seen.add(key);
+  return true;
 }

@@ -1,10 +1,4 @@
 import { describe, expect, it } from "vitest";
-import {
-  GROUP_SILENT,
-  PRIVATE_LIGHT,
-  palette,
-  paletteComposite,
-} from "../src/mechanisms/palette.js";
 import { createDesire, shownShare } from "../src/mechanisms/pressure/desire.js";
 import {
   createPressure,
@@ -14,7 +8,6 @@ import {
 } from "../src/mechanisms/pressure/index.js";
 import { INNER_EXAMPLES_COMPOSITE } from "../src/mechanisms/pressure/inner.js";
 import type { World } from "../src/mechanisms/pressure/world.js";
-import type { ActKind } from "../src/mind/affordances.js";
 import { affordances } from "../src/mind/affordances.js";
 import { emptyChat, emptyState, type TimelineEntry } from "../src/mind/state.js";
 import { step } from "../src/mind/step.js";
@@ -34,36 +27,7 @@ const line = (at: number, text: string): TimelineEntry => ({
   replyToMessageId: null,
 });
 
-describe("loop-v2 Slice 1: composite examples & private light actions", () => {
-  it("paletteComposite trims private examples to 4 registers + PRIVATE_LIGHT (sticker, react, silence)", () => {
-    const dm = emptyChat("telegram:101", "private", true);
-    const offered: ActKind[] = ["send", "sticker", "react", "think"];
-    const comp = paletteComposite.contribute?.(
-      dm,
-      local(15, 20),
-      paletteComposite.initial,
-      offered,
-    )[0];
-    const prod = palette.contribute?.(dm, local(15, 20), palette.initial, offered)[0];
-    expect(comp?.examples?.length).toBeLessThan(prod?.examples?.length ?? 99);
-    const scenes = new Set((comp?.examples ?? []).map((e) => e.scene));
-    for (const light of PRIVATE_LIGHT) expect(scenes.has(light.scene)).toBe(true);
-    expect(comp?.examples?.some((e) => e.acts.some((a) => a.kind === "sticker"))).toBe(true);
-    expect(comp?.examples?.some((e) => e.acts.some((a) => a.kind === "react"))).toBe(true);
-    expect(comp?.examples?.some((e) => e.acts.length === 0)).toBe(true);
-  });
-
-  it("paletteComposite prunes active group speaking examples while keeping GROUP_SILENT", () => {
-    const timeline = Array.from({ length: 12 }, (_, i) => line(local(15, 19) + i * MIN, `话 ${i}`));
-    const grp = { ...emptyChat("telegram:-100", "group", true), timeline };
-    const comp = paletteComposite.contribute?.(grp, local(15, 19, 15), paletteComposite.initial, [
-      "send",
-      "sticker",
-      "react",
-    ])[0];
-    expect(comp?.examples?.length).toBe(GROUP_SILENT.length);
-  });
-
+describe("loop-v2: composite inner-thought examples", () => {
   it("thought({ composite: true }) avoids 1-2-3 templates and covers open_topic + feel/sticker without say", () => {
     const dm = emptyChat("telegram:101", "private", true);
     const mind = createPressure(affordances, {

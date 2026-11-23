@@ -7,7 +7,7 @@ import {
   speechOutcome,
 } from "./interpret.js";
 import type { JournaledEvent } from "./journal.js";
-import { executeToolReply, type QueryKind } from "./llm/ptc.js";
+import { executePtcTurn, type QueryKind } from "./llm/ptc.js";
 import type { Perceived, ToneLine } from "./llm/tone.js";
 import { type Act, affordanceOf } from "./mind/affordances.js";
 import { type Effect, SELF_SCOPE } from "./mind/effects.js";
@@ -24,8 +24,10 @@ import {
 } from "./mind/rotation.js";
 import { type AliceState, emptyState } from "./mind/state.js";
 import { step, towardHer } from "./mind/step.js";
+import type { SpeechFormat } from "./speech/decision.js";
 import { parseDecision } from "./speech/decision.js";
 import { parseLifeDay, renderLifeDayPrompt } from "./speech/life-day.js";
+import { executeNativeTurn } from "./speech/native.js";
 import { renderSpeechPrompt, type SpeechPrompt } from "./speech/prompt.js";
 import { parseReflect, renderReflectPrompt } from "./speech/reflect.js";
 
@@ -34,77 +36,85 @@ import { parseReflect, renderReflectPrompt } from "./speech/reflect.js";
  * step() 返回的副作用在这里执行，结果作为新事件送回来。
  */
 export interface ShellPorts {
-  now(): number;
+  now: () => number;
   /** 写进 Journal。抛错时外壳停下（报给 fatal），因为没写进日志的事件不能送进 step()。 */
-  append(event: JournaledEvent): void;
+  append: (event: JournaledEvent) => void;
   /**
-   * 一个写进了日志的事件 step 完之后（state 是 step 之后的）：日志的投影只从这里更新，启动折叠时
+   * 一个写进了日志的事件 step 完之后（state 是 step 之后的）：日志的投影只从这里更新，启动 fold 时
    * createFold 调同一个钩子，所以投影里不会有日志里没有的东西。不能抛错（抛了算 Journal 失败）。
    */
-  journaled(event: AliceEvent, state: AliceState): void;
+  journaled: (event: AliceEvent, state: AliceState) => void;
   /**
    * 发言和想一想都走这里（同一网关、同一模型，提示词里带各自的输出上限）；call 说明是哪个会话的哪次调用。
    * 下面三个端口都收外壳的 signal：停机时中止，还没开始的按 signal.reason（Failed interrupted）没做，
    * 在途的尽快结束（结果未知）。
    */
-  callModel(prompt: SpeechPrompt, call: ModelCall, signal: AbortSignal): Promise<string>;
+  callModel: (prompt: SpeechPrompt, call: ModelCall, signal: AbortSignal) => Promise<string>;
   /**
    * 在会话里执行一个对外动作（telegram/acts.ts）：发出的消息的 id、看了才知道的东西，或者只是做了。
    * 抛 Failed 表示确定没做成，其他错误表示结果未知。
    */
-  act(scope: string, act: Act, signal: AbortSignal): Promise<ActOutcome>;
+  act: (scope: string, act: Act, signal: AbortSignal) => Promise<ActOutcome>;
   /**
    * 后台办一件交出去的事（登记表 via: "errand"）：context 是她做这个决定时看到的提示词（执行代理在她的上下文上
    * 接着干，前缀相同也能用上提示缓存）。返回写给她看的结果和花费；没办成时抛 Failed（mind/failure.ts，
    * 带原因和已花的 usage），其他错误记为结果未知；没有这类事的执行者时抛 Failed unavailable。
    * signal 中止时（暂停、停机）尽快按 signal.reason 没办成。
    */
-  background(
+  background: (
     scope: string,
     act: Act,
     context: SpeechPrompt | null,
     signal: AbortSignal,
-  ): Promise<BackgroundDone>;
+  ) => Promise<BackgroundDone>;
   /**
    * PTC 轮内查询（search_album / find_chats / look_up）：程序 await tools.x() 时当场跑，
    * 返回值直接回给同一段代码，结果同时记成 act.done（inline: true）进 Journal。
    */
-  query?(
+  query?: (
     scope: string,
     kind: QueryKind,
     act: Act,
     prompt: SpeechPrompt,
     signal: AbortSignal,
-  ): Promise<{ value: unknown; result: string; found?: FoundPlace[]; usage?: BackgroundUsage }>;
+  ) => Promise<{ value: unknown; result: string; found?: FoundPlace[]; usage?: BackgroundUsage }>;
   /**
    * 判口气（llm/tone.ts）：ids 这几条冲着她的消息对她的口气，lines 是给判别看的最近记录。
    * 答不出的那条不在结果里。不给就不判。
    */
-  perceiveTone?(
+  perceiveTone?: (
     chatType: "private" | "group",
     lines: readonly ToneLine[],
     ids: readonly string[],
     signal: AbortSignal,
-  ): Promise<Record<string, Perceived>>;
+  ) => Promise<Record<string, Perceived>>;
   /**
    * 她写下的心情（她自己的词）是好是坏、有多强（llm/tone.ts perceiveMood），效价 [−1, 1]；判不出是 null。
-   * 不给就不判：心情只记下词，不折进她的心情。
+   * 不给就不判：心情只记下词，不 fold 进她的心情。
    */
-  perceiveMood?(
+  perceiveMood?: (
     mood: { word: string; why: string | null },
     signal: AbortSignal,
-  ): Promise<number | null>;
-  /** 可选：读取此刻手头可用贴纸的简短描述，让模型知道自己能发哪些贴纸（纯本地读取）。 */
-  stickers?(): readonly string[];
+  ) => Promise<number | null>;
+  /** 可选：读取某个会话所属平台此刻可用贴纸的简短描述，让模型知道自己能发哪些贴纸（纯本地读取）。 */
+  stickers?: (scope?: string) => readonly string[];
+  /** 可选：本地 SQLite FTS5 聊天原文检索（受众规则在代码层先过滤），补足 recall 的更早记忆。 */
+  searchArchive?: (
+    scope: string,
+    query: string | null,
+    subject: string | null,
+  ) => ReadonlyArray<{ at: number; scope: string; chatType: string; who: string; text: string }>;
+  /** 可选：读取她个人桌面（desk）最近笔记摘要，供每日生活与做梦自然承接。 */
+  readDeskSummary?: () => Promise<readonly string[]>;
   /** delayMs 之后调用 fire；返回取消函数。 */
-  schedule(delayMs: number, fire: () => void): () => void;
-  fatal(error: unknown): void;
-  log(message: string, fields?: Record<string, unknown>): void;
+  schedule: (delayMs: number, fire: () => void) => () => void;
+  fatal: (error: unknown) => void;
+  log: (message: string, fields?: Record<string, unknown>) => void;
   /**
    * 操作员暂停（src/ops/gate.ts）：为 true 时时钟不走。模型调用和对外动作由端口自己拒绝（Failed paused），
    * 外壳按普通失败写回；入站照常先写日志再 step。
    */
-  paused(): boolean;
+  paused: () => boolean;
 }
 
 /** 一次模型调用是哪个会话的哪次、是发言还是想一想（花费分类、提示日志用）。 */
@@ -120,7 +130,7 @@ export interface PendingTimer {
   at: number;
 }
 
-/** 从日志折叠出的状态，加上进程停下时还没有结果的计时和发言调用。 */
+/** 从日志 fold 出的状态，加上进程停下时还没有结果的计时和发言调用。 */
 export interface Folded {
   state: AliceState;
   timers: PendingTimer[];
@@ -130,7 +140,7 @@ export interface Folded {
 /**
  * 按日志顺序重放 step()，丢弃副作用：发言调用和发送在上一次运行里已经执行过（或结果未知），
  * 永远不在启动时重发。只记下最后仍在等的计时器，交给 Shell.start 重新挂上。
- * journaled：日志的投影（相册、转发书架、限额、自检）在这里跟着折叠，和运行时同一个钩子（ShellPorts.journaled）。
+ * journaled：日志的投影（相册、转发书架、限额、自检）在这里跟着 fold，和运行时同一个钩子（ShellPorts.journaled）。
  */
 export function createFold(
   mind: Mind,
@@ -164,6 +174,31 @@ export function createFold(
   };
 }
 
+/** 发言里查成了的一件事（等这次发言结束再写进 Journal）。 */
+interface DoneQuery {
+  at: number;
+  act: Act;
+  result: string;
+  found?: FoundPlace[];
+  usage?: BackgroundUsage;
+}
+
+/** 发言里没查成的一件事。 */
+interface FailedQuery {
+  act: Act;
+  failure: Failure;
+  usage?: BackgroundUsage;
+  error: unknown;
+}
+
+/** 她写的程序里每次查询的去向：有没有出错、错有没有被程序自己接住、之后有没有接着做动作。 */
+interface CodeQuery {
+  act: Act;
+  error?: string;
+  uncaught?: true;
+  actedAfter?: true;
+}
+
 /** 判口气时给 Jev 看的最近几行。 */
 const TONE_LINES = 15;
 
@@ -190,7 +225,7 @@ export class Shell {
     private readonly ports: ShellPorts,
     /** 一套机制，或生产和候选两套轮换（mind/rotation.ts）：换组在每个时钟格之前算，写进日志再 step。 */
     private readonly mind: Mind,
-    private readonly persona: string,
+    private persona: string,
     private readonly folded: Folded,
     /** 时钟间隔：时间本身也是事件（意愿层的节律、冷却随沉默增长都靠它），和回放一样写进日志。 */
     private readonly clockMs = 10_000,
@@ -199,12 +234,24 @@ export class Shell {
      * 不给就不抽（测试）；index.ts 用启动时取的种子。
      */
     private readonly noise: (() => Record<string, number>) | null = null,
+    /** 可选发言提示词模式覆盖；未传时遵循环境变量 ALICE_SPEECH_FORMAT（native 默认开启 concisePeople，默认 code 保持测试兼容）。 */
+    private readonly speechOptions: {
+      format?: SpeechFormat;
+      concisePeople?: boolean;
+    } = process.env.ALICE_SPEECH_FORMAT === "native"
+      ? { format: "native", concisePeople: true }
+      : {},
   ) {
     this.state = folded.state;
   }
 
   get current(): AliceState {
     return this.state;
+  }
+
+  /** 启动拿到平台真实账号显示名后，同步更新人格开头名字。 */
+  setPersona(persona: string): void {
+    this.persona = persona;
   }
 
   /** 挂回上次没到点的计时器；上次停下时还在等的发言调用记为失败（失败不重试）。 */
@@ -288,29 +335,32 @@ export class Shell {
     if (this.dispatching) return;
     this.dispatching = true;
     try {
-      for (let next = this.queue.shift(); next; next = this.queue.shift()) {
-        // 时钟格只在引起了动作时写日志（journal.ts JournaledEvent）；其余的只让时间往前走，
-        // 它们结算的东西（反应窗口）按窗口终点计时，折叠时由下一个事件补上，结果相同。
-        if (next.type !== "clock.tick") this.ports.append(next);
-        // 冲着她的消息（回复她的也算，和心智同一个判断）等叫醒时判口气。
-        const seen = towardHer(this.state, next);
-        if (seen.type === "message.received" && seen.directed && this.ports.perceiveTone) {
-          this.unjudged.set(seen.scope, [...(this.unjudged.get(seen.scope) ?? []), seen.messageId]);
-        }
-        const result = step(this.state, next, this.mind);
-        const woken = next.type === "clock.tick" ? result.effects[0]?.scope : undefined;
-        if (next.type === "clock.tick" && woken) this.ports.append({ ...next, scope: woken });
-        this.state = result.state;
-        if (next.type !== "clock.tick" || woken) this.ports.journaled(next, this.state);
-        // 停下之后只记下在途的事的结果，不再开始新的。
-        if (!this.stopped) this.perform(result.effects);
-      }
+      for (let next = this.queue.shift(); next; next = this.queue.shift()) this.stepOne(next);
     } catch (error) {
       this.queue.length = 0;
       this.ports.fatal(error);
     } finally {
       this.dispatching = false;
     }
+  }
+
+  /** 队列里的一个事件：写日志、step、更新投影，没停下就执行它的副作用。抛错由 dispatch 接住。 */
+  private stepOne(next: AliceEvent): void {
+    // 时钟格只在引起了动作时写日志（journal.ts JournaledEvent）；其余的只让时间往前走，
+    // 它们结算的东西（反应窗口）按窗口终点计时，fold 时由下一个事件补上，结果相同。
+    if (next.type !== "clock.tick") this.ports.append(next);
+    // 冲着她的消息（回复她的也算，和心智同一个判断）等叫醒时判口气。
+    const seen = towardHer(this.state, next);
+    if (seen.type === "message.received" && seen.directed && this.ports.perceiveTone) {
+      this.unjudged.set(seen.scope, [...(this.unjudged.get(seen.scope) ?? []), seen.messageId]);
+    }
+    const result = step(this.state, next, this.mind);
+    const woken = next.type === "clock.tick" ? result.effects[0]?.scope : undefined;
+    if (next.type === "clock.tick" && woken) this.ports.append({ ...next, scope: woken });
+    this.state = result.state;
+    if (next.type !== "clock.tick" || woken) this.ports.journaled(next, this.state);
+    // 停下之后只记下在途的事的结果，不再开始新的。
+    if (!this.stopped) this.perform(result.effects);
   }
 
   /**
@@ -346,10 +396,6 @@ export class Shell {
           break;
         case "set-timer":
           this.arm(effect.scope, effect.timerId, effect.at);
-          break;
-        case "glance":
-          // 看一眼不调模型，也不会失败：当场记下（排在这一格之后、下一个事件之前）。
-          this.dispatch({ type: "chat.glanced", at: this.ports.now(), scope: effect.scope });
           break;
         case "act": {
           // 交出去办的事在后台办，不排进发送队列（办几分钟也不耽误她在这里说话）。
@@ -437,7 +483,7 @@ export class Shell {
     const perceive = this.ports.perceiveTone;
     const { scope } = request;
     const waiting = this.unjudged.get(scope);
-    if (!perceive || !waiting?.length) return;
+    if (!perceive || !waiting || waiting.length === 0) return;
     this.unjudged.delete(scope);
     const lines: ToneLine[] = request.timeline.slice(-TONE_LINES).map((e) => ({
       id: e.messageId,
@@ -464,121 +510,164 @@ export class Shell {
     );
   }
 
+  /** 机制自己能答的查询（不出本机）：第一个答出来的算数，都不答是 undefined。 */
+  private localQuery(
+    scope: string,
+    kind: QueryKind,
+    args: Record<string, unknown>,
+    now: number,
+  ): unknown {
+    const chat = this.state.chats[scope];
+    if (!chat) return undefined;
+    for (const m of mechanismsIn(this.mind, this.state, scope)) {
+      const local = m.query?.(kind, args, chat, now, this.state.mechanisms[m.name]);
+      if (local !== undefined) return local;
+    }
+    return undefined;
+  }
+
+  /** 一次发言里查过的东西逐条写回 Journal：成功的记 act.done，失败的记 act.failed。 */
+  private reportQueries(
+    scope: string,
+    doneQueries: readonly DoneQuery[],
+    failedQueries: readonly FailedQuery[],
+    ptcQueries: readonly CodeQuery[] | null,
+  ): void {
+    // 查询成功但之后没接着做出对外动作（比如只写 const res = await tools.look_up(...) 就结束了），
+    // 省略 inline 让 step.ts 补唤醒一次，免得查到了东西却哑火。
+    const doneRecords = (ptcQueries ?? []).filter((q) => q.error === undefined);
+    for (const [i, d] of doneQueries.entries()) {
+      const rec = doneRecords[i];
+      const needsFollowUp =
+        affordanceOf(d.act.kind).via === "errand" && (ptcQueries === null || !rec?.actedAfter);
+      this.dispatch({
+        type: "act.done",
+        at: d.at,
+        scope,
+        act: d.act,
+        result: d.result,
+        ...(d.found ? { found: d.found } : {}),
+        ...(d.usage ? { usage: d.usage } : {}),
+        ...(needsFollowUp ? {} : { inline: true as const }),
+      });
+    }
+    // 只在查询失败没被 run_code 自己的 try/catch 接住时省略 inline，让 step.ts 记 wakeAgain: true，
+    // 免得前面已经说出去一句“等我查一下”后对方干等下文；被程序自己接住处理过的照常标 inline: true。
+    const records = (ptcQueries ?? []).filter((q) => q.error !== undefined);
+    for (const [i, f] of failedQueries.entries()) {
+      const uncaught = ptcQueries === null || records[i]?.uncaught === true;
+      this.dispatch({
+        type: "act.failed",
+        at: this.ports.now(),
+        scope,
+        act: f.act,
+        ...f.failure,
+        ...(f.usage ? { usage: f.usage } : {}),
+        ...(uncaught ? {} : { inline: true as const }),
+      });
+    }
+  }
+
   private async speak(effect: Extract<Effect, { type: "call-speech" }>): Promise<void> {
     const { scope, callId, request } = effect;
     this.judgeTone(request);
     const event = await speechOutcome(
       effect,
       async () => {
-        const stickers = this.ports.stickers?.();
-        const req = stickers?.length ? { ...request, stickers } : request;
-        const prompt = renderSpeechPrompt(this.persona, req);
-        this.lastPrompt.set(scope, prompt);
+        const stickers = this.ports.stickers?.(request.scope);
+        const req = stickers && stickers.length > 0 ? { ...request, stickers } : request;
         const call = { scope, callId, kind: "speech" } as const;
-        const raw = await this.ports.callModel(prompt, call, this.abort.signal);
         const queryPort = this.ports.query;
-        const usesLocalQuery =
-          (request.affordances.includes("recall") && raw.includes("recall")) ||
-          (request.affordances.includes("dm-check") && raw.includes("check_dm"));
-        if (!queryPort && !usesLocalQuery) return parseDecision(raw, request);
-        const doneQueries: Array<{
-          at: number;
-          act: Act;
-          result: string;
-          found?: FoundPlace[];
-          usage?: BackgroundUsage;
-        }> = [];
-        const failedQueries: Array<{
-          act: Act;
-          failure: Failure;
-          usage?: BackgroundUsage;
-          error: unknown;
-        }> = [];
-        let ptcQueries: ReadonlyArray<{
-          act: Act;
-          error?: string;
-          uncaught?: true;
-          actedAfter?: true;
-        }> | null = null;
+        const doneQueries: DoneQuery[] = [];
+        const failedQueries: FailedQuery[] = [];
+        let ptcQueries: readonly CodeQuery[] | null = null;
+        const runQuery = async (
+          kind: QueryKind,
+          args: Record<string, unknown>,
+          signal: AbortSignal,
+          promptForErrand: SpeechPrompt,
+        ): Promise<unknown> => {
+          const act = buildQueryAct(kind, args);
+          try {
+            const now = this.ports.now();
+            const local = this.runLocalQuery(scope, kind, args, now);
+            if (local !== undefined) {
+              doneQueries.push({
+                at: now,
+                act,
+                result: JSON.stringify(local).slice(0, 600),
+              });
+              return local;
+            }
+            if (!queryPort)
+              throw new Failed({ reason: "unavailable" }, `no query port for ${kind}`);
+            const res = await queryPort(scope, kind, act, promptForErrand, signal);
+            doneQueries.push({
+              at: this.ports.now(),
+              act,
+              result: res.result,
+              ...(res.found ? { found: res.found } : {}),
+              ...(res.usage ? { usage: res.usage } : {}),
+            });
+            return res.value;
+          } catch (error) {
+            const failure =
+              error instanceof Failed ? error.failure : { reason: "outcome_unknown" as const };
+            const usage = error instanceof Failed ? error.usage : undefined;
+            failedQueries.push({ act, failure, ...(usage ? { usage } : {}), error });
+            throw error;
+          }
+        };
         try {
-          const ptc = await executeToolReply(raw, request, {
+          if (this.speechOptions.format === "native") {
+            const initialPrompt = renderSpeechPrompt(this.persona, req, this.speechOptions);
+            let latestPrompt: SpeechPrompt = initialPrompt;
+            const turn = await executeNativeTurn({
+              persona: this.persona,
+              request: req,
+              initialPrompt,
+              signal: this.abort.signal,
+              callModel: (prompt) => {
+                latestPrompt = prompt;
+                this.lastPrompt.set(scope, prompt);
+                return this.ports.callModel(prompt, call, this.abort.signal);
+              },
+              onQuery: (kind, args, signal) => runQuery(kind, args, signal, latestPrompt),
+            });
+            ptcQueries = turn.queries;
+            return turn.decision;
+          }
+          const prompt = renderSpeechPrompt(this.persona, req);
+          this.lastPrompt.set(scope, prompt);
+          let cachedFirstRaw: string | undefined;
+          if (!queryPort) {
+            cachedFirstRaw = await this.ports.callModel(prompt, call, this.abort.signal);
+            const usesLocalQuery =
+              (req.affordances.includes("recall") && cachedFirstRaw.includes("recall")) ||
+              (req.affordances.includes("dm-check") && cachedFirstRaw.includes("check_dm"));
+            if (!usesLocalQuery) return parseDecision(cachedFirstRaw, req);
+          }
+          const ptc = await executePtcTurn({
+            persona: this.persona,
+            request: req,
+            initialPrompt: prompt,
             signal: this.abort.signal,
             timeoutMs: 90_000,
-            onQuery: async (kind, _args, signal) => {
-              const act = buildQueryAct(kind, _args);
-              try {
-                const chat = this.state.chats[scope];
-                const now = this.ports.now();
-                if (chat) {
-                  for (const m of mechanismsIn(this.mind, this.state, scope)) {
-                    const local = m.query?.(kind, _args, chat, now, this.state.mechanisms[m.name]);
-                    if (local !== undefined) {
-                      doneQueries.push({
-                        at: now,
-                        act,
-                        result: JSON.stringify(local).slice(0, 600),
-                      });
-                      return local;
-                    }
-                  }
-                }
-                if (!queryPort)
-                  throw new Failed({ reason: "unavailable" }, `no query port for ${kind}`);
-                const res = await queryPort(scope, kind, act, prompt, signal);
-                doneQueries.push({
-                  at: this.ports.now(),
-                  act,
-                  result: res.result,
-                  ...(res.found ? { found: res.found } : {}),
-                  ...(res.usage ? { usage: res.usage } : {}),
-                });
-                return res.value;
-              } catch (error) {
-                const failure =
-                  error instanceof Failed ? error.failure : { reason: "outcome_unknown" as const };
-                const usage = error instanceof Failed ? error.usage : undefined;
-                failedQueries.push({ act, failure, ...(usage ? { usage } : {}), error });
-                throw error;
+            callModel: async (roundPrompt) => {
+              if (cachedFirstRaw !== undefined && roundPrompt === prompt) {
+                const raw = cachedFirstRaw;
+                cachedFirstRaw = undefined;
+                return raw;
               }
+              this.lastPrompt.set(scope, roundPrompt);
+              return this.ports.callModel(roundPrompt, call, this.abort.signal);
             },
+            onQuery: (kind, args, signal) => runQuery(kind, args, signal, prompt),
           });
           ptcQueries = ptc.queries;
           return ptc.decision;
         } finally {
-          // 查询成功但之后没接着做出对外动作（比如只写 const res = await tools.look_up(...) 就结束了），
-          // 省略 inline 让 step.ts 补唤醒一次，免得查到了东西却哑火。
-          const doneRecords = (ptcQueries ?? []).filter((q) => q.error === undefined);
-          for (const [i, d] of doneQueries.entries()) {
-            const rec = doneRecords[i];
-            const needsFollowUp =
-              affordanceOf(d.act.kind).via === "errand" &&
-              (ptcQueries === null || !rec?.actedAfter);
-            this.dispatch({
-              type: "act.done",
-              at: d.at,
-              scope,
-              act: d.act,
-              result: d.result,
-              ...(d.found ? { found: d.found } : {}),
-              ...(d.usage ? { usage: d.usage } : {}),
-              ...(needsFollowUp ? {} : { inline: true as const }),
-            });
-          }
-          // 只在查询失败没被 run_code 自己的 try/catch 接住时省略 inline，让 step.ts 记 wakeAgain: true，
-          // 免得前面已经说出去一句“等我查一下”后对方干等下文；被程序自己接住处理过的照常标 inline: true。
-          const records = (ptcQueries ?? []).filter((q) => q.error !== undefined);
-          for (const [i, f] of failedQueries.entries()) {
-            const uncaught = ptcQueries === null || records[i]?.uncaught === true;
-            this.dispatch({
-              type: "act.failed",
-              at: this.ports.now(),
-              scope,
-              act: f.act,
-              ...f.failure,
-              ...(f.usage ? { usage: f.usage } : {}),
-              ...(uncaught ? {} : { inline: true as const }),
-            });
-          }
+          this.reportQueries(scope, doneQueries, failedQueries, ptcQueries);
         }
       },
       () => this.ports.now(),
@@ -603,7 +692,8 @@ export class Shell {
           kind: "ponder",
         } as const;
         if (request.kind === "life") {
-          const prompt = renderLifeDayPrompt(this.persona, request);
+          const deskNotes = (await this.ports.readDeskSummary?.().catch(() => [])) ?? [];
+          const prompt = renderLifeDayPrompt(this.persona, request, deskNotes);
           const raw = await this.ports.callModel(prompt, call, this.abort.signal);
           return parseLifeDay(raw, request);
         }
@@ -624,12 +714,12 @@ export class Shell {
           ? { callId, entries: ponder.entries.length }
           : { callId, kind: "life", date: ponder.date, moments: ponder.moments.length },
       );
-      this.dispatch(event);
     } else this.ports.log("ponder failed", { callId, reason: event.reason, error: event.error });
+    this.dispatch(event);
   }
 
   /** 按顺序执行一次决定里的动作（interpret.ts deliver）。 */
-  private deliver(batch: readonly ActEffect[]): Promise<void> {
+  private async deliver(batch: readonly ActEffect[]): Promise<void> {
     return deliver(batch, {
       now: () => this.ports.now(),
       emit: (event) => this.dispatch(event),
@@ -640,6 +730,24 @@ export class Shell {
   }
 
   /** 每个会话只留最新的计时器：旧的即使触发，step() 也会因为 id 对不上而忽略。 */
+  private runLocalQuery(
+    scope: string,
+    kind: QueryKind,
+    args: Record<string, unknown>,
+    now: number,
+  ): unknown {
+    const local = this.localQuery(scope, kind, args, now);
+    if (local === undefined || kind !== "recall" || !this.ports.searchArchive) return local;
+    const archive = this.ports.searchArchive(
+      scope,
+      typeof args.query === "string" ? args.query : null,
+      typeof args.subject === "string" ? args.subject : null,
+    );
+    return archive.length > 0 && typeof local === "object" && local !== null
+      ? { ...(local as Record<string, unknown>), archive }
+      : local;
+  }
+
   private arm(scope: string, timerId: string, at: number): void {
     this.timers.get(scope)?.();
     const cancel = this.ports.schedule(Math.max(0, at - this.ports.now()), () => {

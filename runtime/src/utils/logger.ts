@@ -59,7 +59,7 @@ export function createLogger(tag: string) {
  * 停机时关掉错误日志：等缓冲区里最后几条刷进 alice-errors.log，之后的 warn / error 只走终端。
  * （不关的话进程退出时那几条就丢了：tail 日志的人正好看不到停机前后的报错。）
  */
-export function closeLogger(): Promise<void> {
+export async function closeLogger(): Promise<void> {
   const stream = _errorStream;
   _errorStream = null;
   if (!stream) return Promise.resolve();

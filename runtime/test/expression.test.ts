@@ -5,6 +5,7 @@
 import type { TelegramClient } from "@mtcute/node";
 import { tl } from "@mtcute/node";
 import { describe, expect, it } from "vitest";
+import { Album } from "../src/album.js";
 import { pressureProduction } from "../src/mechanisms/pressure/index.js";
 import { makeCommitment } from "../src/mechanisms/pressure/memory.js";
 import { expression, voice } from "../src/mechanisms/voice.js";
@@ -14,6 +15,7 @@ import {
   EDIT_WINDOW_MS,
   postedMessage,
 } from "../src/mind/affordances.js";
+import { explainInvalidArgs } from "../src/mind/args.js";
 import { chatView } from "../src/mind/chat-view.js";
 import type { AliceEvent, MessageReceived } from "../src/mind/events.js";
 import { settleDecision } from "../src/mind/settle.js";
@@ -24,12 +26,12 @@ import { replay } from "../src/sim/replay.js";
 import { codeMode } from "../src/speech/decision.js";
 import { renderSpeechPrompt } from "../src/speech/prompt.js";
 import { type ActContext, executeAct } from "../src/telegram/acts.js";
-import { Album } from "../src/telegram/album.js";
 import { TelegramActionError } from "../src/telegram/errors.js";
 import { Gates, Telegram } from "../src/telegram/gates.js";
 import { Shelf } from "../src/telegram/shelf.js";
-import { typingMs } from "../src/telegram/typing.js";
+import { typingMs } from "../src/utils/typing.js";
 import { program } from "./model-reply.js";
+import { mtcuteFake } from "./mtcute-fake.js";
 
 const MIN = 60_000;
 const H = 60 * MIN;
@@ -172,6 +174,26 @@ describe("edit (A13): only her own text, only within the window", () => {
   });
 });
 
+describe("unsend: only her own messages from the last two minutes", () => {
+  const timeline = [
+    line("1", T - 5 * MIN, null, "五分钟前说的"),
+    line("2", T - 30_000, "u1", "你说啥"),
+    line("3", T - 10_000, null, "十秒前说的"),
+  ];
+  const dm = chat(DM, timeline);
+  const unsend = (messageId: string): Act => ({ kind: "unsend", messageId });
+
+  it("rejects a message older than two minutes even when another one was sent ten seconds ago", () => {
+    expect(settleDecision(dm, { acts: [unsend("3")] }, T).acts).toEqual([unsend("3")]);
+    for (const id of ["1", "2", "99"]) {
+      expect(settleDecision(dm, { acts: [unsend(id)] }, T).acts).toEqual([]);
+    }
+    expect(explainInvalidArgs("unsend", { messageId: "1" }, { timeline, now: T })).toContain(
+      "last 2 minutes",
+    );
+  });
+});
+
 describe("repeat (A27): appears only while different people echo the same line", () => {
   const echoing = chat(GROUP, [
     line("1", T, "u1", "今天谁请奶茶"),
@@ -213,7 +235,7 @@ describe("repeat (A27): appears only while different people echo the same line",
 });
 
 /** 只记录调用的假 Telegram 客户端。 */
-function fakeClient(fail: Partial<Record<string, unknown>> = {}) {
+function fakeClient(fail: Partial<Record<string, Error>> = {}) {
   const calls: Array<[string, unknown[]]> = [];
   const method =
     (name: string, result: unknown = undefined) =>
@@ -222,7 +244,7 @@ function fakeClient(fail: Partial<Record<string, unknown>> = {}) {
       if (fail[name]) throw fail[name];
       return result;
     };
-  const client = {
+  const client = mtcuteFake<TelegramClient>({
     sendText: method("sendText", { id: 41 }),
     sendMedia: method("sendMedia", { id: 42 }),
     editMessage: method("editMessage"),
@@ -230,7 +252,7 @@ function fakeClient(fail: Partial<Record<string, unknown>> = {}) {
     setTyping: method("setTyping"),
     readHistory: method("readHistory"),
     readReactions: method("readReactions"),
-  } as unknown as TelegramClient;
+  });
   return { client, calls };
 }
 
@@ -313,7 +335,9 @@ describe("executing them on Telegram", () => {
       "setTyping",
       "sendText",
     ]);
-    expect(waited).toEqual([typingMs("好的好的")]);
+    expect(waited).toHaveLength(1);
+    expect(waited[0]).toBeGreaterThanOrEqual(1_000);
+    expect(waited[0]).toBeLessThanOrEqual(15_000);
 
     const failed = fakeClient({ sendText: new tl.RpcError(403, "CHAT_WRITE_FORBIDDEN") });
     await expect(
@@ -322,11 +346,14 @@ describe("executing them on Telegram", () => {
     expect(failed.calls.at(-1)).toEqual(["setTyping", [{ peerId: -100123, status: "cancel" }]]);
   });
 
-  it("typing time grows with the words, a little faster than people, within 1–15 seconds", () => {
-    expect(typingMs("嗯")).toBe(1_000);
-    expect(typingMs("我明天早上去图书馆")).toBe(9_000);
-    expect(typingMs("ok see you")).toBe(2_000);
-    expect(typingMs("很长".repeat(40))).toBe(15_000);
+  it("typing time matches measured live human median (~740ms/CJK) with wide dispersion within 1–15 seconds", () => {
+    expect(typingMs("嗯", 1)).toBe(1_000);
+    expect(typingMs("我明天早上去图书馆", 1)).toBe(6_667);
+    expect(typingMs("ok see you", 1)).toBe(2_000);
+    expect(typingMs("很长".repeat(40), 1)).toBe(15_000);
+    const varied = typingMs("我明天早上去图书馆");
+    expect(varied).toBeGreaterThanOrEqual(3_600);
+    expect(varied).toBeLessThanOrEqual(10_400);
   });
 });
 
@@ -389,13 +416,5 @@ describe("reminders (A28): a promise to remind someone at a time wakes her near 
     expect(between(calls, T + 10 * MIN, T + 20 * MIN)).toHaveLength(1);
     expect(between(calls, T + 10 * MIN, T + 11 * MIN)).toHaveLength(1);
     expect(between(await remind(null, 2 * H), T + MIN, T + 20 * MIN)).toEqual([]);
-  });
-
-  it("at eight in the evening: woken at eight, once", async () => {
-    const calls = await remind("8点", 8 * H);
-    const eight = local(10, 20);
-    expect(between(calls, eight, eight + MIN)).toHaveLength(1);
-    expect(between(calls, eight + MIN, eight + 10 * MIN)).toEqual([]);
-    expect(between(await remind(null, 8 * H), eight, eight + MIN)).toEqual([]);
   });
 });

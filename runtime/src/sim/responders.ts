@@ -49,35 +49,16 @@ export interface ResponderModel {
 
 /** 线上 Journal 里她的群里一轮（同一时刻或 90 秒内连着发、中间没人插话）被别人引用回复的次数，按热闹程度。 */
 export function fitHer(events: readonly AliceEvent[]): NonNullable<ResponderModel["her"]> {
-  const groups = new Map<string, AliceEvent[]>();
-  for (const e of events) {
-    const inGroup =
-      (e.type === "message.received" && e.chatType === "group") ||
-      (e.type === "message.sent" && e.scope.startsWith("telegram:-"));
-    if (!inGroup) continue;
-    const list = groups.get(e.scope) ?? [];
-    list.push(e);
-    groups.set(e.scope, list);
-  }
   const out: NonNullable<ResponderModel["her"]> = {};
-  for (const list of groups.values()) {
+  for (const list of groupStreams(events).values()) {
     list.sort((a, b) => a.at - b.at);
     for (let i = 0; i < list.length; i++) {
       const e = list[i] as AliceEvent;
       const prev = list[i - 1];
       if (e.type !== "message.sent") continue;
       if (prev?.type === "message.sent" && e.at - prev.at <= TURN_GAP) continue;
-      // 这一轮到下一次隔了 90 秒以上为止：再往后的那条自己开一轮，不算进这一轮。
-      const ids = new Set<string>();
-      let j = i;
-      while (
-        list[j]?.type === "message.sent" &&
-        (j === i || (list[j] as AliceEvent).at - (list[j - 1] as AliceEvent).at <= TURN_GAP)
-      ) {
-        ids.add((list[j] as MessageSent).messageId);
-        j++;
-      }
-      const end = (list[j - 1] as AliceEvent).at;
+      const { ids, next } = herTurn(list, i);
+      const end = (list[next - 1] as AliceEvent).at;
       const before = list.filter(
         (m) => m.type === "message.received" && m.at < e.at && m.at >= e.at - WINDOW,
       ).length;
@@ -86,7 +67,7 @@ export function fitHer(events: readonly AliceEvent[]): NonNullable<ResponderMode
       out[heat] = c;
       c.turns++;
       const replied = list
-        .slice(j)
+        .slice(next)
         .some(
           (m) =>
             m.type === "message.received" &&
@@ -98,6 +79,38 @@ export function fitHer(events: readonly AliceEvent[]): NonNullable<ResponderMode
     }
   }
   return out;
+}
+
+/** 每个群里别人的消息和她发的消息，按会话分开。 */
+function groupStreams(events: readonly AliceEvent[]): Map<string, AliceEvent[]> {
+  const groups = new Map<string, AliceEvent[]>();
+  for (const e of events) {
+    const inGroup =
+      (e.type === "message.received" && e.chatType === "group") ||
+      (e.type === "message.sent" && e.scope.startsWith("telegram:-"));
+    if (!inGroup) continue;
+    const list = groups.get(e.scope) ?? [];
+    list.push(e);
+    groups.set(e.scope, list);
+  }
+  return groups;
+}
+
+/**
+ * 从 i 开始她的一轮：到下一次隔了 90 秒以上为止，再往后的那条自己开一轮，不算进这一轮。
+ * 返回这一轮的消息编号和这一轮之后第一条的下标。
+ */
+function herTurn(list: readonly AliceEvent[], i: number): { ids: Set<string>; next: number } {
+  const ids = new Set<string>();
+  let j = i;
+  while (
+    list[j]?.type === "message.sent" &&
+    (j === i || (list[j] as AliceEvent).at - (list[j - 1] as AliceEvent).at <= TURN_GAP)
+  ) {
+    ids.add((list[j] as MessageSent).messageId);
+    j++;
+  }
+  return { ids, next: j };
 }
 
 interface Msg {
@@ -126,42 +139,8 @@ export function fitResponders(events: readonly AliceEvent[]): ResponderModel {
     msgs.sort((a, b) => a.at - b.at);
     let i = 0;
     while (i < msgs.length) {
-      const first = msgs[i] as Msg;
-      let j = i;
-      while (
-        j + 1 < msgs.length &&
-        (msgs[j + 1] as Msg).sender === first.sender &&
-        (msgs[j + 1] as Msg).at - (msgs[j] as Msg).at <= TURN_GAP
-      )
-        j++;
-      const end = (msgs[j] as Msg).at;
-      const ids = new Set(msgs.slice(i, j + 1).map((m) => m.id));
-      let before = 0;
-      const speakers: string[] = [];
-      for (let k = i - 1; k >= 0 && (msgs[k] as Msg).at >= first.at - WINDOW; k--) {
-        before++;
-        const s = (msgs[k] as Msg).sender;
-        if (s !== first.sender && !speakers.includes(s)) speakers.push(s);
-      }
-      const heat = heatOf(before);
-      const cellKey = `${heat}|${first.re !== null}`;
-      const cell = model.cells[cellKey] ?? { turns: 0, replied: 0 };
-      model.cells[cellKey] = cell;
-      cell.turns++;
-      const reply = msgs
-        .slice(j + 1)
-        .find(
-          (m) =>
-            m.at <= end + WINDOW && m.sender !== first.sender && m.re !== null && ids.has(m.re),
-        );
-      if (reply) {
-        cell.replied++;
-        model.delays[heat].push(reply.at - end);
-        if (speakers.length > 0) {
-          model.last.n++;
-          if (reply.sender === speakers[0]) model.last.hits++;
-        }
-      }
+      const j = turnEnd(msgs, i);
+      countTurn(model, msgs, i, j);
       i = j + 1;
     }
   }
@@ -171,6 +150,57 @@ export function fitResponders(events: readonly AliceEvent[]): ResponderModel {
     model.delays[h] = d.filter((_, k) => k % step === 0);
   }
   return model;
+}
+
+/** 从 i 开始的一轮的最后一条的下标。 */
+function turnEnd(msgs: readonly Msg[], i: number): number {
+  const first = msgs[i] as Msg;
+  let j = i;
+  while (
+    j + 1 < msgs.length &&
+    (msgs[j + 1] as Msg).sender === first.sender &&
+    (msgs[j + 1] as Msg).at - (msgs[j] as Msg).at <= TURN_GAP
+  )
+    j++;
+  return j;
+}
+
+/** 一轮（msgs[i..j]）之前 10 分钟里的条数，和说过话的别人（最近的在前）。 */
+function lookBack(msgs: readonly Msg[], i: number): { before: number; speakers: string[] } {
+  const first = msgs[i] as Msg;
+  let before = 0;
+  const speakers: string[] = [];
+  for (let k = i - 1; k >= 0 && (msgs[k] as Msg).at >= first.at - WINDOW; k--) {
+    before++;
+    const s = (msgs[k] as Msg).sender;
+    if (s !== first.sender && !speakers.includes(s)) speakers.push(s);
+  }
+  return { before, speakers };
+}
+
+/** 把一轮（msgs[i..j]）记进模型：这一格的轮数、有没有人回、隔多久、回的是不是最后说话的那个人。 */
+function countTurn(model: ResponderModel, msgs: readonly Msg[], i: number, j: number): void {
+  const first = msgs[i] as Msg;
+  const end = (msgs[j] as Msg).at;
+  const ids = new Set(msgs.slice(i, j + 1).map((m) => m.id));
+  const { before, speakers } = lookBack(msgs, i);
+  const heat = heatOf(before);
+  const cellKey = `${heat}|${first.re !== null}`;
+  const cell = model.cells[cellKey] ?? { turns: 0, replied: 0 };
+  model.cells[cellKey] = cell;
+  cell.turns++;
+  const reply = msgs
+    .slice(j + 1)
+    .find(
+      (m) => m.at <= end + WINDOW && m.sender !== first.sender && m.re !== null && ids.has(m.re),
+    );
+  if (!reply) return;
+  cell.replied++;
+  model.delays[heat].push(reply.at - end);
+  if (speakers.length > 0) {
+    model.last.n++;
+    if (reply.sender === speakers[0]) model.last.hits++;
+  }
 }
 
 /** 她这一轮被引用回复的概率（加一平滑）。 */

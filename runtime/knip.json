@@ -1,0 +1,22 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "src/import-history.ts",
+    "src/sim/*.ts",
+    "scenes/*.ts"
+  ],
+  "project": [
+    "src/**/*.ts",
+    "scenes/*.ts",
+    "test/**/*.ts"
+  ],
+  "ignoreBinaries": [
+    "ffmpeg",
+    "pm2"
+  ],
+  "ignoreIssues": {
+    "src/mechanisms/pressure/params.ts": [
+      "duplicates"
+    ]
+  }
+}

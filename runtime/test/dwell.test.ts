@@ -1,12 +1,12 @@
 /**
- * 候选 dwell（她在这段对话里，mechanisms/pressure/turn.ts）坏掉了会很糟的几条：
+ * 生产的 dwell（她在这段对话里，mechanisms/pressure/turn.ts）坏掉了会很糟的几条：
  * - 会话的终止都在：她看过、决定不说就放下；对话走过她 K 轮就放下；冷下来就放下——热闹的群不会每条都叫醒她；
  * - 参与身份要别人给：她说完还没人说话时不算在对话里（对着空气接着说不按被邀请算）；
- * - 对话还在时，5 分钟之后别人没点她名的话仍让她再看一眼（floor 做不到的那一段）；
- * - 只在群里：私聊的状态不写；起止写在状态里（Journal 折叠出来读得到）。
+ * - 对话还在时，5 分钟之后别人没点她名的话仍让她再看一眼（2 月按 5 分钟算的延续窗做不到的那一段）；
+ * - 只在群里：私聊的状态不写；起止写在状态里（Journal fold 出来读得到）。
  */
 import { describe, expect, it } from "vitest";
-import { createPressure, dwell, floor, PRODUCTION } from "../src/mechanisms/pressure/index.js";
+import { createPressure, dwell, PRODUCTION } from "../src/mechanisms/pressure/index.js";
 import { GROUP_ABSENCE_ROUNDS } from "../src/mechanisms/pressure/params.js";
 import { inDwell } from "../src/mechanisms/pressure/turn.js";
 import { NO_DWELL, type World } from "../src/mechanisms/pressure/world.js";
@@ -56,9 +56,9 @@ const say = (text: string): SpeechDecision => ({ acts: [{ kind: "send", text, re
 const quiet: SpeechDecision = { acts: [] };
 const withDwell = createPressure(affordances, { ...PRODUCTION, floor: dwell() });
 
-/** 只折叠世界（不叫醒、不调模型）。 */
+/** 只 fold 世界（不叫醒、不调模型）。 */
 function fold(events: readonly AliceEvent[]): World {
-  const reduce = withDwell.reduce as (w: World, e: AliceEvent) => World;
+  const reduce = (w: World, e: AliceEvent) => withDwell.reduce?.(w, e) as World;
   return events.reduce(reduce, withDwell.initial as World);
 }
 
@@ -143,7 +143,7 @@ describe("dwell: inside the conversation", () => {
     const events: AliceEvent[] = [msg(T0, { directed: true, senderId: "contact:2" })];
     for (let i = 1; i <= 8; i++)
       events.push(msg(T0 + i * 3 * M, { senderId: `contact:${(i % 3) + 1}` }));
-    // 她上一次开口 5 分钟以后，一条没点她名的话叫醒了她：按 5 分钟算的 floor 在这一刻已经放下了。
+    // 她上一次开口 5 分钟以后，一条没点她名的话叫醒了她。
     const lateWake = async (mechanism: typeof withDwell) => {
       let last = -1;
       let late = false;
@@ -160,6 +160,5 @@ describe("dwell: inside the conversation", () => {
       return late;
     };
     expect(await lateWake(withDwell)).toBe(true);
-    expect(await lateWake(createPressure(affordances, { ...PRODUCTION, floor }))).toBe(false);
   });
 });

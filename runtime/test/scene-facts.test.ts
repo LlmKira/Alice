@@ -1,5 +1,5 @@
 /**
- * 聊天现场的客观事实（2026-11-14 进生产，mechanisms/scene-facts.ts、pressure/context.ts mentions）：每样事实在该出现的
+ * 聊天现场的客观事实（mechanisms/scene-facts.ts、pressure/context.ts mentions）：每样事实在该出现的
  * 那一刻出现、内容对；消融组 no-scene-facts 在同样的事件上和以前的生产逐字一样（每条"消融组里没有"的断言就是这样事实不再
  * 送达时变红的那一条）。
  */

@@ -48,11 +48,15 @@ export interface Contribution {
   unsoughtLanguage?: string;
   /** marks：按消息编号。 */
   marks?: Readonly<Record<string, MessageMarks>>;
-  /** 发言提示的决策口吻（例如 Verbalized Sampling "vs"、"composite"）；不设则由默认口吻决定。 */
-  style?: "default" | "charm" | "vs" | "composite";
+  /** 发言提示的决策口吻（例如 Verbalized Sampling "vs"、"composite"、"charm-sticker"）；不设则由默认口吻决定。 */
+  style?: "default" | "charm" | "charm-sticker" | "vs" | "composite";
+  /** 这一轮带进发言卡的可选贴纸画面描述列表（从事件或贴纸库来）。 */
+  stickers?: readonly string[];
+  /** 实验性：把机制产生的自身心理事件（念头、当下心情等）按时间戳穿插回聊天时间线原位。 */
+  inline?: ReadonlyArray<{ at: number; text: string }>;
 }
 
-/** 一条消息在 Telegram 上看得到的样子（都可以没有）。 */
+/** 一条消息在聊天平台上看得到的样子（都可以没有）。 */
 export interface MessageMarks {
   /** 表情反应，按人数从多到少，只留前几种。 */
   reactions?: ReadonlyArray<{ emoji: string; count: number }>;
@@ -75,71 +79,71 @@ export interface PersonNote {
  * Alice 的一项可拆卸行为。必须是纯函数：同样的状态、事件和时间给出同样的结果。
  * 消融某个机制，就是不把它放进传给 step() 的列表。
  *
- * 机制只能软引导：往提示词里放事实或示例（contribute），或者给出唤醒分数（wake）。
+ * 机制只能软引导：往提示词里放事实或示例（contribute），或者给出 wake score（wake）。
  * 不能过滤或改写发言模型的输出。
  *
- * 需要跨会话记忆的机制带自己的状态 S：从 `initial` 开始，每个事件经 `reduce` 折叠一次，
+ * 需要跨会话记忆的机制带自己的状态 S：从 `initial` 开始，每个事件经 `reduce` fold 一次，
  * 所以删掉派生状态后能从事件日志原样重建。
  */
 export interface Mechanism<S = unknown> {
   name: string;
   initial?: S;
-  reduce?(state: S, event: AliceEvent): S;
+  reduce?: (state: S, event: AliceEvent) => S;
   /** 0–1。任一机制达到 WAKE_THRESHOLD 即唤醒。 */
-  wake?(chat: ChatState, event: AliceEvent, now: number, state: S): number;
-  /**
-   * 没有机制要叫醒她时（wake 都不到阈值），这个会话此刻是不是只要看一眼（System 1：不调模型，只缓解看了
-   * 就缓解的东西）。核心只在时钟格上、空闲的会话里问；任一机制说是就看（step 发 glance 副作用）。
-   */
-  glance?(chat: ChatState, event: AliceEvent, now: number, state: S): boolean;
+  wake?: (chat: ChatState, event: AliceEvent, now: number, state: S) => number;
   /** 唤醒后先等多少毫秒的安静再开口（取各机制的最大值；0 = 立刻）。 */
-  patience?(chat: ChatState, event: AliceEvent, now: number, state: S): number;
+  patience?: (chat: ChatState, event: AliceEvent, now: number, state: S) => number;
   /** 为这个会话往发言提示词里加的内容；offered 是这一轮提示词里给她的动作（能力事实按它写）。 */
-  contribute?(chat: ChatState, now: number, state: S, offered: readonly ActKind[]): Contribution[];
+  contribute?: (
+    chat: ChatState,
+    now: number,
+    state: S,
+    offered: readonly ActKind[],
+  ) => Contribution[];
   /**
    * 记录怎么排（上下文组装的候选）：trigger 是叫醒她的那条。给出时记录照它写，不给（null）就是时间线的
    * 最后 TIMELINE_LIMIT 条；一组里只该有一个机制给。
    */
-  layout?(chat: ChatState, now: number, state: S, trigger: string | null): LogItem[] | null;
+  layout?: (chat: ChatState, now: number, state: S, trigger: string | null) => LogItem[] | null;
   /**
-   * 这个机制给她的能力（登记表里 gated 的行，例如记下打算、发语音）：心里的事由机制折进自己的状态，
+   * 这个机制给她的能力（登记表里 gated 的行，例如记下打算、发语音）：心里的事由机制 fold 进自己的状态，
    * 所以只有机制在列时，提示词里才出现这些动作。
    */
   affordances?: readonly ActKind[];
   /** 这个会话里实际给哪些（affordances 的子集，灰度用）；不写就是全部。 */
-  affordancesIn?(scope: string, state: S, now: number): readonly ActKind[];
+  affordancesIn?: (scope: string, state: S, now: number) => readonly ActKind[];
   /**
-   * 此刻在这个会话里做不到的事（群里禁发的那几种消息）：从这一轮给她的动作里拿掉，和登记表 available 一样
+   * 此刻在这个会话里做不到的事（群里禁发的那几种消息）：从这一轮给她的动作里去掉，和登记表 available 一样
    * 只写做不做得到。
    */
-  withholds?(chat: ChatState, now: number, state: S): readonly ActKind[];
+  withholds?: (chat: ChatState, now: number, state: S) => readonly ActKind[];
   /**
    * 要不要单独想一想（每天醒来想想自己；心情变了之后把那段经历写进日记）。核心只在时钟格、没有正在进行的
    * 想一想时问，并给出各会话的只读状态（反思要读那段对话）；结果作为 ponder.done / ponder.failed 回来，
-   * 经 reduce 折进机制自己的状态。
+   * 经 reduce fold 进机制自己的状态。
    */
-  ponder?(now: number, state: S, chats: AliceState["chats"]): PonderAsk | null;
+  ponder?: (now: number, state: S, chats: AliceState["chats"]) => PonderAsk | null;
   /**
    * 她此刻想去、但还没有会话的地方（还没开过的私聊、只看过预览的群）。核心只在时钟格问，先把它建成一个
    * 空会话，再照常问各机制要不要在那里醒；动作仍然只作用于那个会话。
    */
-  opens?(now: number, state: S): Opening | null;
+  opens?: (now: number, state: S) => Opening | null;
   /**
-   * 她此刻在看手机，一眼扫过各个会话（候选 life-l2-glance-scan：瞄一眼的那 15 秒）。核心只在时钟格问：
+   * 她此刻在看手机，一眼扫过各个会话（life-body 瞄一眼手机的那 15 秒）。核心只在时钟格问：
    * 是的话，时钟格没叫醒的空闲会话里，有别人新说的话的，拿最新那条按此刻再问一次要不要醒（和 stillWakes
    * 同一条路），醒了就以它开口。所以一眼能回好几个会话。
    */
-  scans?(now: number, state: S): boolean;
+  scans?: (now: number, state: S) => boolean;
   /** 她此刻是不是正在睡觉（由睡眠机制回答，供外壳判定是否暂停主动拉取外部榜单等）。 */
-  asleep?(now: number, state: S): boolean;
+  asleep?: (now: number, state: S) => boolean;
   /** 在 PTC 沙箱里按需只读查询该机制的状态（如 recall 翻记忆）；不产生副作用，纯函数。 */
-  query?(
+  query?: (
     kind: string,
     args: Readonly<Record<string, unknown>>,
     chat: ChatState,
     now: number,
     state: S,
-  ): unknown;
+  ) => unknown;
   /** 要外壳提供的服务（errand：执行代理）。外壳没有时这个机制不激活（composeMind）。 */
   requires?: readonly string[];
 }
@@ -175,6 +179,7 @@ export type PonderAsk = OmitEach<PonderRequest, "at">;
 
 /** 让带状态的机制以统一的类型进入注册表。 */
 export function defineMechanism<S>(mechanism: Mechanism<S>): Mechanism {
+  // 注册表只按名字取状态再交回同一个机制，所以在这里抹掉 S。
   return mechanism as Mechanism;
 }
 

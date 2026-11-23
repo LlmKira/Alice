@@ -1,7 +1,6 @@
 /**
  * 生产的内心独白读回（记忆流第 1 片，docs/research/memory-stream.md）：她写下的想法读回到这段对话结束，
  * 不按 10 分钟，每个会话都开。群里的界线是 dwell（她开口后的那段会话），私聊里是"更早的聊天"分段的 10 分钟。
- * 对照是 inner（每个会话都开、读回 10 分钟）。
  */
 import { describe, expect, it } from "vitest";
 import { mechanisms } from "../src/mechanisms/registry.js";
@@ -9,7 +8,6 @@ import type { AliceEvent, MessageReceived } from "../src/mind/events.js";
 import type { Mechanism } from "../src/mind/mechanism.js";
 import { type ChatState, emptyState } from "../src/mind/state.js";
 import { speechRequest, step } from "../src/mind/step.js";
-import { arms } from "../src/sim/will-arms.js";
 import { renderSpeechPrompt } from "../src/speech/prompt.js";
 
 const MIN = 60_000;
@@ -17,7 +15,6 @@ const T = Date.UTC(2026, 10, 10, 7, 0);
 const DM = "telegram:1";
 const GROUP = "telegram:-5";
 const candidate = mechanisms;
-const window = arms({}).inner as readonly Mechanism[];
 
 let n = 0;
 function msg(at: number, scope: string, sender = "u1"): MessageReceived {
@@ -69,8 +66,6 @@ describe("stance readback for the length of the conversation", () => {
     ];
     const at = T + 25 * MIN;
     expect(card(events, GROUP, at, candidate)).toContain("想过：这个说法不对，我得站出来");
-    // 对照：10 分钟的窗口早过了。
-    expect(card(events, GROUP, at, window)).not.toContain("想过：");
     // 她开口之后别人又说了 K 条以上：这段对话从她身边过去了。
     const passed = [...events];
     for (let i = 0; i < 12; i++) passed.push(msg(T + 24 * MIN + (i + 1) * 10_000, GROUP, "u2"));
@@ -95,7 +90,6 @@ describe("stance readback for the length of the conversation", () => {
       msg(T + 18 * MIN, DM),
     ];
     expect(card(events, DM, T + 19 * MIN, candidate)).toContain("想过：其实我只是想要一点尊重");
-    expect(card(events, DM, T + 19 * MIN, window)).not.toContain("想过：");
     const quiet = [...events, msg(T + 40 * MIN, DM)];
     expect(card(quiet, DM, T + 41 * MIN, candidate)).not.toContain("想过：");
   });

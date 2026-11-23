@@ -13,7 +13,7 @@
  * - 抽样：按 (会话, 时刻, 哪一项) 的哈希确定地抽，同一个输入永远同一个决定。
  *
  * 用法：
- *   tsx src/sim/surrogate.ts fit <model.json> <prompts.jsonl>...    拟合（跳过桩的输出、跳过旧版式）
+ *   tsx src/sim/surrogate.ts fit <model.json> <prompts.jsonl>...    拟合（跳过 stub 的输出、跳过旧 layout）
  *   tsx src/sim/surrogate.ts check <model.json> <prompts.jsonl>...  留出检验：各分组的预测对实测
  */
 import { readFileSync, writeFileSync } from "node:fs";
@@ -63,31 +63,48 @@ export function features(prompt: SpeechPrompt): Features {
   const log = cut >= 0 ? user.slice(0, cut) : user;
   const anchor = cut >= 0 ? user.slice(cut) : "";
   const lines = log.split("\n").filter((l) => /^\d\d:\d\d \[/.test(l));
-  let own = 0;
-  for (let i = lines.length - 1; i >= 0 && / <你> /.test(lines[i] as string); i--) own++;
   const voices = new Set(
     lines
       .slice(-15)
       .map((l) => /\] <([^>]+)> /.exec(l)?.[1])
       .filter((s) => s !== undefined && s !== "你"),
   );
-  const gap = /离最后一条已经过了 (\d+) 分钟/.exec(anchor);
-  const hours = /离最后一条已经过了[^）]*小时/.test(anchor);
-  const minutes = gap ? Number(gap[1]) : 0;
   const hour = Number(/现在是 (\d\d):/.exec(anchor)?.[1] ?? 12);
   return {
     chat: /^[─ ]*Telegram 群/.test(user) ? "group" : "private",
-    sought: /这会儿没人(点|找)你/.test(user) ? "unsought" : "sought",
+    sought: /这会儿没人[点找]你/.test(user) ? "unsought" : "sought",
     triggered: /\[[^\]\n]+\] 之后/.test(anchor) ? "message" : "clock",
     crowd: voices.size >= 4 ? "crowd" : "few",
-    own: own === 0 ? "0" : own === 1 ? "1" : "2+",
-    gap: hours ? "hours" : minutes > 10 ? "long" : minutes > 0 ? "minutes" : "now",
-    energy: /刚睡醒|被消息吵醒/.test(user) ? "woke" : /有点累|犯懒/.test(user) ? "low" : "ok",
+    own: ownRun(lines),
+    gap: gapOf(anchor),
+    energy: energyOf(user),
     foreign: /如要说话请用/.test(anchor) ? "yes" : "no",
     night: hour >= 23 || hour < 4,
     // 去睡的那一行：Code Mode 的 SDK 里是 go_to_bed，2026-11-13 之前的提示词里是 [去睡了]（拟合用的旧记录）。
     canBed: /go_to_bed: |\[去睡了\]/.test(system),
   };
+}
+
+/** 记录最后连着几条是她的：0、1、2+。 */
+function ownRun(lines: readonly string[]): string {
+  let own = 0;
+  for (let i = lines.length - 1; i >= 0 && / <你> /.test(lines[i] as string); i--) own++;
+  if (own === 0) return "0";
+  return own === 1 ? "1" : "2+";
+}
+
+/** 离最后一条多久：几小时、十分钟以上、几分钟、刚刚。 */
+function gapOf(anchor: string): string {
+  if (/离最后一条已经过了[^）]*小时/.test(anchor)) return "hours";
+  const gap = /离最后一条已经过了 (\d+) 分钟/.exec(anchor);
+  const minutes = gap ? Number(gap[1]) : 0;
+  if (minutes > 10) return "long";
+  return minutes > 0 ? "minutes" : "now";
+}
+
+function energyOf(user: string): string {
+  if (/刚睡醒|被消息吵醒/.test(user)) return "woke";
+  return /有点累|犯懒/.test(user) ? "low" : "ok";
 }
 
 export function outcomeOf(acts: readonly Act[]): Outcome {
@@ -142,7 +159,7 @@ const emptyCell = (): Cell => ({
   feel: 0,
   sticker: 0,
   quote: 0,
-  sends: Array(MAX_SENDS + 1).fill(0),
+  sends: Array.from<number>({ length: MAX_SENDS + 1 }).fill(0),
 });
 
 const keyOf = (f: Features, depth: number = FEATURES.length) =>
@@ -160,12 +177,7 @@ export function fitSurrogate(
     const c = model.cells[keyOf(f)] ?? emptyCell();
     model.cells[keyOf(f)] = c;
     model.rows++;
-    c.n++;
-    for (const k of BINARY) c[k] += o[k] ? 1 : 0;
-    if (o.spoke) {
-      for (const k of GIVEN_SPOKE) c[k] += o[k] ? 1 : 0;
-      (c.sends[o.sends] as number)++;
-    }
+    countInto(c, o);
     if (f.night && f.canBed) {
       const b = model.bed[f.chat] ?? { n: 0, bed: 0 };
       model.bed[f.chat] = b;
@@ -176,6 +188,15 @@ export function fitSurrogate(
     if (o.word) model.words[o.word] = (model.words[o.word] ?? 0) + 1;
   }
   return model;
+}
+
+/** 把一次调用的结果记进它的分组。 */
+function countInto(c: Cell, o: Outcome): void {
+  c.n++;
+  for (const k of BINARY) c[k] += o[k] ? 1 : 0;
+  if (!o.spoke) return;
+  for (const k of GIVEN_SPOKE) c[k] += o[k] ? 1 : 0;
+  (c.sends[o.sends] as number)++;
 }
 
 /** 某一级分组（前 depth 项相同）的合计。 */
@@ -261,28 +282,7 @@ export function decide(
   if (offered.has("think") && u("think") < e.think) acts.push({ kind: "think", thought: "……" });
   if (offered.has("feel") && u("feel") < e.feel)
     acts.push({ kind: "feel", mood: pick(model.moods, u("mood")) ?? "平静", why: null });
-  if (u("spoke") < e.spoke) {
-    const total = e.sends.reduce((a, b) => a + b, 0);
-    let sends = 0;
-    let acc = 0;
-    const v = u("sends");
-    for (let i = 0; i < e.sends.length; i++) {
-      acc += (e.sends[i] as number) / total;
-      if (v < acc) {
-        sends = i;
-        break;
-      }
-    }
-    const sticker = offered.has("sticker") && u("sticker") < e.sticker;
-    if (sends === 0 && !sticker) sends = 1;
-    for (let i = 0; i < sends; i++)
-      acts.push({
-        kind: "send",
-        text: "嗯",
-        replyTo: i === 0 && target && u("quote") < e.quote ? target : null,
-      });
-    if (sticker) acts.push({ kind: "sticker", word: pick(model.words, u("word")) ?? "happy" });
-  }
+  if (u("spoke") < e.spoke) acts.push(...spoken(model, e, offered, target, u));
   if (offered.has("react") && target && u("react") < e.react)
     acts.push({ kind: "react", messageId: target, emoji: "👍" });
   const bed = model.bed[f.chat];
@@ -291,8 +291,41 @@ export function decide(
   return { acts };
 }
 
+/** 开口时说的：按分布抽几条文字（第一条可能引用），带不带贴纸；什么都没抽到时说一条。 */
+function spoken(
+  model: SurrogateModel,
+  e: Estimate,
+  offered: ReadonlySet<string>,
+  target: string | null,
+  u: (what: string) => number,
+): Act[] {
+  let sends = drawIndex(e.sends, u("sends"));
+  const sticker = offered.has("sticker") && u("sticker") < e.sticker;
+  if (sends === 0 && !sticker) sends = 1;
+  const acts: Act[] = [];
+  for (let i = 0; i < sends; i++)
+    acts.push({
+      kind: "send",
+      text: "嗯",
+      replyTo: i === 0 && target && u("quote") < e.quote ? target : null,
+    });
+  if (sticker) acts.push({ kind: "sticker", word: pick(model.words, u("word")) ?? "happy" });
+  return acts;
+}
+
+/** 按权重抽一个下标（v 在 0..1）；落不进任何一格时是 0。 */
+function drawIndex(weights: readonly number[], v: number): number {
+  const total = weights.reduce((a, b) => a + b, 0);
+  let acc = 0;
+  for (let i = 0; i < weights.length; i++) {
+    acc += (weights[i] as number) / total;
+    if (v < acc) return i;
+  }
+  return 0;
+}
+
 /**
- * 日志里一行：渲染好的提示词和她的动作。桩的输出（只有"嗯"）和旧版式跳过：只收卡片版式（context-v2 起，
+ * 日志里一行：渲染好的提示词和她的动作。stub 的输出（只有"嗯"）和旧 layout 跳过：只收卡片 layout（context-v2 起，
  * 开头一行是会话、下面有"· 我这边"或"· 你这边"），那以前的运行多是 flash-lite，模型也不一样。
  */
 export function readRows(paths: readonly string[]) {

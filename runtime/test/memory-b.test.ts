@@ -1,6 +1,5 @@
 /**
  * memory-b（eval-artifacts/memory-b/）。坏掉了会很糟的几件：
- * - 生产没有 [记住]（no-remember 已上线）；她照写了也不会被说出去。
  * - 她自己说过的事（2026-11-12 进生产）：反思也问她自己说出口的事，关于人的事那一条不变；她自己的事送进卡片，
  *   受众规则和日记同一条（私聊里说的不出那个私聊，群里说的只到那个群和当时在场的人的私聊），在它自己的会话里
  *   那段对话还在时间线上时不再写；对不上了的旧的一条被换掉；结果写进 Journal 读得回来。
@@ -16,10 +15,8 @@ import type { Mechanism } from "../src/mind/mechanism.js";
 import { type AliceState, type ChatState, emptyState } from "../src/mind/state.js";
 import { speechRequest, step } from "../src/mind/step.js";
 import { arms } from "../src/sim/will-arms.js";
-import { codeMode } from "../src/speech/decision.js";
 import { renderSpeechPrompt } from "../src/speech/prompt.js";
 import { parseReflect, renderReflectPrompt } from "../src/speech/reflect.js";
-import { program } from "./model-reply.js";
 
 const MIN = 60_000;
 const H = 60 * MIN;
@@ -103,21 +100,6 @@ const base = [
   msg(T + 4 * MIN, GROUP2, "u3", "另一个群"),
 ];
 
-describe("remembering is gone (no-remember, in production since 2026-11-12)", () => {
-  it("the prompt never mentions it, and a tools.remember she writes anyway is not said", () => {
-    const at = T + 10 * MIN;
-    const cand = requestAt(base, DM_A, at, pressureProduction);
-    expect(promptAt(base, DM_A, at, pressureProduction)).not.toContain("tools.remember");
-    // 其余心里的能力照旧。
-    expect(cand.affordances).toEqual(expect.arrayContaining(["intend", "fulfil", "let-go"]));
-    const code =
-      'await tools.remember({ fact: "她养了只猫" });\nawait tools.say({ text: "好呀" });';
-    const { decision, defects } = codeMode.parse(program(code), cand);
-    expect(decision.acts).toEqual([{ kind: "send", text: "好呀", replyTo: null }]);
-    expect(defects.map((d) => d.kind)).toEqual(["unknown"]);
-  });
-});
-
 describe("the reflection also asks for what she said about herself", () => {
   const talk = [0, 1, 2, 3].map((k) => msg(T + k * 10_000, DM_A, "u1", `在吗${k}`));
   const tick: AliceEvent = { type: "clock.tick", at: T + 10 * MIN };
@@ -127,8 +109,6 @@ describe("the reflection also asks for what she said about herself", () => {
     expect(ask.learn?.self).toEqual({ known: [] });
     const prompt = renderReflectPrompt("PERSONA", ask);
     expect(prompt.system).toContain('"self": [{"said"');
-    expect(prompt.system).toContain("稳定的喜好、平时的习惯、你这边真实的近况");
-    expect(prompt.system).toContain("当场的玩笑和逗人的夸张话属于那一刻");
     const without = run([...talk, tick], noSelf).asks[0] as ReflectRequest;
     expect(without.learn?.self).toBeUndefined();
     const plain = renderReflectPrompt("PERSONA", without);

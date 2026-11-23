@@ -4,7 +4,7 @@
  * 只写在场的人（私聊的对方；群里时间线上最近说话的人）和这个会话里的承诺；别处知道的事注明出处，
  * 让她自己掂量能不能在这里说。
  */
-import { type ActKind, isSilent } from "../../mind/affordances.js";
+import { type Act, type ActKind, isSilent } from "../../mind/affordances.js";
 import type { AliceEvent } from "../../mind/events.js";
 import type { Contribution, PersonNote } from "../../mind/mechanism.js";
 import { type ChatState, onTimeline } from "../../mind/state.js";
@@ -16,6 +16,7 @@ import {
   advanceTopic,
   type ClosedCommitment,
   type Commitment,
+  type Commitments,
   chatSubject,
   closeTopic,
   consider,
@@ -362,11 +363,7 @@ function recall(
  * 记忆给她的心里的能力：打算和做完。关于人的事只由反思记（people.ts），不给她"记住"这项能力，13 个场景 ×6 次 opus 成对
  * 197 胜 150 负，关于人的事每次反思持平（eval-artifacts/memory-b/）。
  */
-export const MEMORY_AFFORDANCES = [
-  "intend",
-  "fulfil",
-  "let-go",
-] as const satisfies readonly ActKind[];
+const MEMORY_AFFORDANCES = ["intend", "fulfil", "let-go"] as const satisfies readonly ActKind[];
 
 /**
  * 她在心里记下的一笔（memory.ts）：答应或打算做的事、做完了。关于人的事由反思记（people.ts）。
@@ -381,35 +378,11 @@ function remembered<W extends View<"chats.commitments" | "relations">>(
   switch (event.type) {
     case "act.done": {
       const { act, scope, at } = event;
-      const chat = w.chats[scope];
       switch (act.kind) {
-        case "intend": {
-          if (!chat) return w;
-          // 要去别处做的，记在那个会话里（那里的劲、那里的卡片），带上在哪、对谁答应的；认不出地方就记在这里。
-          const target = act.where ? placeNamed(w, scope, act.where) : null;
-          const node = target ? w.chats[target] : undefined;
-          if (target && node) {
-            const to =
-              chat.chatType === "private" ? chat.partner : (chat.recentFrom.at(-1) ?? null);
-            const made = makeCommitment(act, at, { scope, to });
-            return put(w, target, {
-              ...node,
-              commitments: intend(expire(node.commitments, at), made, at),
-            });
-          }
-          const commitments = intend(expire(chat.commitments, at), makeCommitment(act, at), at);
-          return put(w, scope, { ...chat, commitments });
-        }
-        case "fulfil": {
-          // 先在这里找；在群里答应、到私聊里做完的，按内容去别的会话找。
-          const order = [scope, ...Object.keys(w.chats).filter((s) => s !== scope)];
-          for (const s of order) {
-            const node = w.chats[s];
-            const next = node && fulfil(expire(node.commitments, at), act.what, at, s === scope);
-            if (node && next) return put(w, s, { ...node, commitments: next });
-          }
-          return w;
-        }
+        case "intend":
+          return intended(w, act, scope, at);
+        case "fulfil":
+          return fulfilled(w, act.what, scope, at);
         default:
           return w;
       }
@@ -418,36 +391,88 @@ function remembered<W extends View<"chats.commitments" | "relations">>(
       const node = w.chats[event.scope];
       if (!node) return w;
       // 到时候了她在这里开口：答应过的事此刻在她眼前，压力从这里重新长起（做没做由她自己说）。
-      const commitments = consider(expire(node.commitments, event.at), event.at);
-      return commitments === node.commitments ? w : put(w, event.scope, { ...node, commitments });
+      return withCommitments(
+        w,
+        event.scope,
+        node,
+        consider(expire(node.commitments, event.at), event.at),
+      );
     }
-    case "speech.decided": {
-      const { scope, at } = event;
-      const prevBefore = before.chats[scope];
-      const node = w.chats[scope];
-      if (!prevBefore || !node) return w;
-      // 发言调用有了结果：到点的闹钟算响过了（memory.ts rang）。
-      let commitments = rang(node.commitments, at);
-      // 没人找她时想过要不要说、决定先不：到时候了的承诺也从此刻重新长起。
-      if (isSilent(event.decision.acts) && !isSolicited(prevBefore, at)) {
-        commitments = consider(expire(commitments, at), at);
-      }
-      return commitments === node.commitments ? w : put(w, scope, { ...node, commitments });
-    }
-    case "speech.failed": {
-      const { scope, at } = event;
-      const prevBefore = before.chats[scope];
-      const node = w.chats[scope];
-      if (!prevBefore || !node) return w;
-      let commitments = rang(node.commitments, at);
-      if (!isSolicited(prevBefore, at)) {
-        commitments = consider(expire(commitments, at), at);
-      }
-      return commitments === node.commitments ? w : put(w, scope, { ...node, commitments });
-    }
+    case "speech.decided":
+      return afterCall(before, w, event.scope, event.at, isSilent(event.decision.acts));
+    case "speech.failed":
+      return afterCall(before, w, event.scope, event.at, true);
     default:
       return w;
   }
+}
+
+/** 答应或打算做一件事。要去别处做的，记在那个会话里（那里的劲、那里的卡片），带上在哪、对谁答应的；认不出地方就记在这里。 */
+function intended<W extends View<"chats.commitments" | "relations">>(
+  w: W,
+  act: Extract<Act, { kind: "intend" }>,
+  scope: string,
+  at: number,
+): W {
+  const chat = w.chats[scope];
+  if (!chat) return w;
+  const target = act.where ? placeNamed(w, scope, act.where) : null;
+  const node = target ? w.chats[target] : undefined;
+  if (target && node) {
+    const to = chat.chatType === "private" ? chat.partner : (chat.recentFrom.at(-1) ?? null);
+    const made = makeCommitment(act, at, { scope, to });
+    return put(w, target, {
+      ...node,
+      commitments: intend(expire(node.commitments, at), made, at),
+    });
+  }
+  const commitments = intend(expire(chat.commitments, at), makeCommitment(act, at), at);
+  return put(w, scope, { ...chat, commitments });
+}
+
+/** 做完一件事：先在这里找；在群里答应、到私聊里做完的，按内容去别的会话找。 */
+function fulfilled<W extends View<"chats.commitments" | "relations">>(
+  w: W,
+  what: string,
+  scope: string,
+  at: number,
+): W {
+  const order = [scope, ...Object.keys(w.chats).filter((s) => s !== scope)];
+  for (const s of order) {
+    const node = w.chats[s];
+    const next = node && fulfil(expire(node.commitments, at), what, at, s === scope);
+    if (node && next) return put(w, s, { ...node, commitments: next });
+  }
+  return w;
+}
+
+/**
+ * 发言调用有了结果（决定了，或没成）：到点的闹钟算响过了（memory.ts rang）。quiet 是这次没有可见的行动：
+ * 没人找她时想过要不要说、决定先不，到时候了的承诺也从此刻重新长起。
+ */
+function afterCall<W extends View<"chats.commitments" | "relations">>(
+  before: W,
+  w: W,
+  scope: string,
+  at: number,
+  quiet: boolean,
+): W {
+  const prevBefore = before.chats[scope];
+  const node = w.chats[scope];
+  if (!prevBefore || !node) return w;
+  const rung = rang(node.commitments, at);
+  const commitments = quiet && !isSolicited(prevBefore, at) ? consider(expire(rung, at), at) : rung;
+  return withCommitments(w, scope, node, commitments);
+}
+
+/** 换上这个会话新的承诺；没变就原样返回世界。 */
+function withCommitments<W extends View<"chats.commitments" | "relations">>(
+  w: W,
+  scope: string,
+  node: ChatNode,
+  commitments: Commitments,
+): W {
+  return commitments === node.commitments ? w : put(w, scope, { ...node, commitments });
 }
 
 /**
@@ -468,7 +493,7 @@ export const memory: PressureFeature = feature({
 });
 
 /** 她自己开始、推进、了结的事（候选 topics，R04）。 */
-export const TOPIC_AFFORDANCES = [
+const TOPIC_AFFORDANCES = [
   "topic-open",
   "topic-advance",
   "topic-close",
@@ -544,7 +569,7 @@ export const recallTools: PressureFeature = feature({
       people[name] = list;
       if (list.length < RECALL_LIMIT) list.push(r.text);
     }
-    const day = (world.life as unknown as LifeBodyState | undefined)?.day;
+    const day = (world.life as Partial<LifeBodyState> | undefined)?.day;
     const schedule = day
       ? {
           date: day.date,

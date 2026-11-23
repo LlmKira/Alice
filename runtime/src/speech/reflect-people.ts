@@ -1,6 +1,6 @@
 /**
  * 反思时顺手记下关于人的事（people，mechanisms/pressure/people.ts）：在同一次反思调用里多要对方说出来的具体的事
- * （R05）。不加调用次数。群印象（R08）2026-11-13 拿掉了。
+ * （R05）。不加调用次数。群印象（R08）2026-11-13 删了。
  * 只记具体的事，不写性格画像、不打信任分：画像总结会加重谄媚（OP-Bench 转述，PLAN"连续性"）。
  * 更新照 Mem0 的做法放进同一次调用：她看得到自己已经记得的事，对不上了就写出被改掉的那条旧的原文
  * （2 月 update_fact 也要逐字给出旧内容）。
@@ -48,11 +48,7 @@ const SAID_RULE =
 const bare = (s: string) => s.replace(/[\s\p{P}\p{S}]/gu, "").toLowerCase();
 
 /** said 照抄的几个字，在这个人（who 是 people 的下标，她自己是 null）这段对话里的原话里找得到。 */
-export function quoted(
-  lines: ReflectRequest["lines"],
-  who: number | null,
-  said: string | null,
-): boolean {
+function quoted(lines: ReflectRequest["lines"], who: number | null, said: string | null): boolean {
   const words = said ? bare(said) : "";
   if ([...words].length < 2) return false;
   return lines.some((l) => l.who === who && bare(l.text).includes(words));

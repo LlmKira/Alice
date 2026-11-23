@@ -5,8 +5,8 @@ import {
   type Mechanism,
   type PersonNote,
 } from "../mind/mechanism.js";
+import type { ChatState } from "../mind/state.js";
 import { localDay } from "../mind/when.js";
-import { presentPeople } from "./closeness.js";
 import {
   type FamiliarKind,
   familiarKind,
@@ -14,12 +14,20 @@ import {
   joinedAt,
   knownFor,
   pooled,
+  type Relation,
   type RelationStore,
   rankOf,
   reduceStore,
   watchedAWeek,
   whoSeeks,
 } from "./pressure/relation.js";
+
+/** 时间线上说过话的人：id → 名字。 */
+function presentPeople(chat: ChatState): Map<string, string> {
+  const present = new Map<string, string>();
+  for (const t of chat.timeline) if (t.sender) present.set(t.sender.id, t.sender.name);
+  return present;
+}
 
 /**
  * 熟悉：关系远近的事实只说她真的知道的（closeness 的候选替身，S02；eval-artifacts/familiar/prereg.md）。
@@ -36,7 +44,7 @@ import {
  *   不写"很亲近"：那是全体里的排名，记录不全时第一个和她说话的人就排第一。
  * 只写事实，不写该怎么对谁。第 3 片起，看见的事实（第一次看见、有往来的日子、群里的入群提示、机器人标记）由
  * relation 的 `relations` 折一份（pressure/relation.ts reduceStore），这里只拿同一份几何做卡片；机制之间不读彼此的
- * 状态（mind/mechanism.ts），所以它按同一份折叠函数折自己的那一份，输出与搬进来之前逐字节相同。
+ * 状态（mind/mechanism.ts），所以它按同一份 fold 函数 fold 自己的那一份，输出与搬进来之前逐字节相同。
  * 代价（tier）不在这里：生产仍由 ranking 给，候选第 4 片由熟悉度给（pressure/relation.ts familiarityTier）。
  * 纯函数，时间只来自事件。
  */
@@ -61,8 +69,8 @@ export interface FamiliarOptions {
 
 const empty: FamiliarState = { people: {}, groups: {}, partners: {} };
 
-/** 折叠一个事件：看见的事实与亲近分数用 relation 的同一份（reduceStore），这里另记私聊的对方。 */
-export function reduceFamiliar(state: FamiliarState, event: AliceEvent): FamiliarState {
+/** fold 一个事件：看见的事实与亲近分数用 relation 的同一份（reduceStore），这里另记私聊的对方。 */
+function reduceFamiliar(state: FamiliarState, event: AliceEvent): FamiliarState {
   const partners =
     event.type === "message.received" &&
     event.chatType === "private" &&
@@ -77,16 +85,19 @@ export function reduceFamiliar(state: FamiliarState, event: AliceEvent): Familia
   return { ...store, partners };
 }
 
-/** Telegram 的 id：人是正数，群和频道是负数。 */
-const isChat = (id: string): boolean => id.startsWith("-");
+/** 是会话不是人：Telegram 的群和频道是负数 id；会话种类写在 id 里的平台写成 group:… / channel:…。 */
+const isChat = (id: string): boolean =>
+  id.startsWith("-") || id.startsWith("group:") || id.startsWith("channel:");
 
-/** 什么时候进的群（一周以内才写）。 */
-function joinedWhen(at: number, now: number): string {
+/** 什么时候进的群；一周以前进的、没见过入群提示的为 null。 */
+function recentlyJoined(store: RelationStore, id: string, now: number): string | null {
+  const at = joinedAt(store, id);
+  if (at === null || now - at >= PRIOR_DAYS * DAY_MS) return null;
   const n = localDay(now) - localDay(at);
   return n <= 0 ? "今天刚进群" : n === 1 ? "昨天刚进群" : `${n} 天前进的群`;
 }
 
-/** 排名分层（和 closeness.ts 的 LAYERS 同一张表）：没来往过或排在 150 名以外为 null。 */
+/** 排名分层（Dunbar 5 / 15 / 50 / 150，原 closeness 机制的 LAYERS）：没来往过或排在 150 名以外为 null。 */
 const LAYERS: ReadonlyArray<readonly [maxRank: number, fact: string]> = [
   [5, "很亲近，我们几乎天天聊"],
   [15, "常聊"],
@@ -108,6 +119,69 @@ function rankedLine(
   return [rank, `${name}：${layer[1]}${more ? `；${more}` : ""}`];
 }
 
+/** 记录开始之前就在一个群里的人（先验）是朋友。 */
+const friendOf = (dm: boolean): string => (dm ? "和我在同一个群里的朋友" : "这个群里的朋友");
+
+/** 在场的一个人放进哪一组：排序的那组（按频率或排名）、"群里的朋友"那组、排在最后的那组；不写他为 null。 */
+type Placement =
+  | { group: "ranked"; key: number; relation: string }
+  | { group: "old" | "rest"; relation: string }
+  | null;
+
+/** 一次 contribute 里所有人共用的事实。 */
+interface Scene {
+  store: RelationStore;
+  mu: Record<Kind, number>;
+  today: number;
+  now: number;
+  dm: boolean;
+}
+
+/** 没有校准：有往来的人按排名分层写，其余只写群里的朋友和刚进群。 */
+function placeByRank(
+  scene: Scene,
+  id: string,
+  who: string,
+  c: Kind,
+  joined: string | null,
+): Placement {
+  const line = rankedLine(scene.store, id, who, scene.now);
+  if (line) {
+    const [rank, text] = line;
+    return { group: "ranked", key: rank, relation: text.slice(who.length + 1) };
+  }
+  if (c === "old") return { group: "old", relation: friendOf(scene.dm) };
+  if (joined) return { group: "rest", relation: joined };
+  return null;
+}
+
+function placeByFrequency(
+  scene: Scene,
+  id: string,
+  r: Relation,
+  c: Kind,
+  joined: string | null,
+): Placement {
+  const { store, today, now, dm } = scene;
+  const f = frequency(r.seen, scene.mu[c], today);
+  if (c === "old") {
+    return f
+      ? { group: "ranked", key: -f.p, relation: `${f.word}，也是${dm ? "" : "这个"}群里的朋友` }
+      : { group: "old", relation: friendOf(dm) };
+  }
+  if (joined) return { group: "rest", relation: joined };
+  // 只在私聊里见过的人：以前认不认识说不准，看满一周、说得出频率才说；认识多久也说不准，不说。
+  if (c === "unknown" && !f) return null;
+  if (r.seen.toHerDays.length === 0) return null;
+  if (!f) {
+    return { group: "rest", relation: watchedAWeek(r.seen, today) ? "聊过一次" : "刚认识" };
+  }
+  const since = c === "new" ? knownFor(store, id, now) : null;
+  const seeks = whoSeeks(store, id);
+  const more = [since, seeks].filter(Boolean).join("，");
+  return { group: "ranked", key: -f.p, relation: `${f.word}${more ? `；${more}` : ""}` };
+}
+
 export function createFamiliar(name: string, options: FamiliarOptions): Mechanism {
   const kind = (store: RelationStore, id: string): Kind =>
     options.prior ? familiarKind(store, id) : "unknown";
@@ -117,7 +191,7 @@ export function createFamiliar(name: string, options: FamiliarOptions): Mechanis
     reduce: reduceFamiliar,
     contribute(chat, now, state): Contribution[] {
       const today = localDay(now);
-      // Telegram 标着的机器人不算人；以频道（或匿名管理员）身份发的消息，发言人是一个会话，也不是人：
+      // 平台标着的机器人不算人；以频道（或匿名管理员）身份发的消息，发言人是一个会话，也不是人：
       // 只留在记录里说过话的人（和 relation 的 relations 同一份几何）。
       const people = Object.fromEntries(
         Object.entries(state.people).filter(([id, r]) => r.seen.count > 0 && !r.bot && !isChat(id)),
@@ -125,55 +199,24 @@ export function createFamiliar(name: string, options: FamiliarOptions): Mechanis
       const store: RelationStore = { people, groups: state.groups };
       const mu = pooled(people, today, (id) => kind(store, id));
       const dm = chat.chatType === "private";
+      const scene: Scene = { store, mu, today, now, dm };
       // 每一行同时按人记下（PersonNote：关系就是冒号后面那段），发言层可以把记得的事并到他名下。
       const ranked: Array<[number, PersonNote]> = [];
       const old: PersonNote[] = [];
       const rest: PersonNote[] = [];
-      const note = (id: string, who: string, relation: string): PersonNote => ({
-        id,
-        name: who,
-        relation,
-      });
       for (const [id, who] of presentPeople(chat)) {
         const r = people[id];
         if (!r) continue;
         const c = kind(store, id);
-        const joinedAt_ = joinedAt(store, id);
-        const joined =
-          c === "new" && joinedAt_ !== null && now - joinedAt_ < PRIOR_DAYS * DAY_MS
-            ? joinedWhen(joinedAt_, now)
-            : null;
-        const friend = dm ? "和我在同一个群里的朋友" : "这个群里的朋友";
-        if (!options.calibrated) {
-          const line = rankedLine(store, id, who, now);
-          if (line) {
-            const [rank, text] = line;
-            ranked.push([rank, note(id, who, text.slice(who.length + 1))]);
-          } else if (c === "old") old.push(note(id, who, friend));
-          else if (joined) rest.push(note(id, who, joined));
-          continue;
-        }
-        const f = frequency(r.seen, mu[c], today);
-        if (c === "old") {
-          if (f) ranked.push([-f.p, note(id, who, `${f.word}，也是${dm ? "" : "这个"}群里的朋友`)]);
-          else old.push(note(id, who, friend));
-          continue;
-        }
-        if (joined) {
-          rest.push(note(id, who, joined));
-          continue;
-        }
-        // 只在私聊里见过的人：以前认不认识说不准，看满一周、说得出频率才说；认识多久也说不准，不说。
-        if (c === "unknown" && !f) continue;
-        if (r.seen.toHerDays.length === 0) continue;
-        if (!f) {
-          rest.push(note(id, who, watchedAWeek(r.seen, today) ? "聊过一次" : "刚认识"));
-          continue;
-        }
-        const since = c === "new" ? knownFor(store, id, now) : null;
-        const seeks = whoSeeks(store, id);
-        const more = [since, seeks].filter(Boolean).join("，");
-        ranked.push([-f.p, note(id, who, `${f.word}${more ? `；${more}` : ""}`)]);
+        const joined = c === "new" ? recentlyJoined(store, id, now) : null;
+        const place = options.calibrated
+          ? placeByFrequency(scene, id, r, c, joined)
+          : placeByRank(scene, id, who, c, joined);
+        if (!place) continue;
+        const note: PersonNote = { id, name: who, relation: place.relation };
+        if (place.group === "ranked") ranked.push([place.key, note]);
+        else if (place.group === "old") old.push(note);
+        else rest.push(note);
       }
       ranked.sort((a, b) => a[0] - b[0]);
       const notes = [...ranked.map(([, n]) => n), ...old, ...rest];
@@ -183,10 +226,7 @@ export function createFamiliar(name: string, options: FamiliarOptions): Mechanis
       // 老面孔是"见过的人"，人格里那一档是先保持距离；"想不起来"把对方定成本该记得却记不得的人，认人失败是丢脸的事
       // （Goffman 的面子），人对这种处境的反应是尴尬和防御——少说，免得露馅。开发集里只差这一行的配对（s28 两次）
       // 就是生产开口、它不开口（eval-artifacts/familiar/prereg.md 修订 4）。
-      if (old.length > 0)
-        lines.push(
-          `${old.map((n) => n.name).join("、")}：${dm ? "和我在同一个群里的朋友" : "这个群里的朋友"}`,
-        );
+      if (old.length > 0) lines.push(`${old.map((n) => n.name).join("、")}：${friendOf(dm)}`);
       lines.push(...rest.map((n) => `${n.name}：${n.relation}`));
       if (lines.length === 0) return [];
       return [

@@ -9,11 +9,8 @@
 import { spawn } from "node:child_process";
 import type { SpokenVoice } from "../telegram/actions.js";
 
-export const CALL_SAMPLE_RATE = 48_000;
+const CALL_SAMPLE_RATE = 48_000;
 const SAMPLE_BYTES = 2;
-/** 20 ms = 960 个采样 = 1920 字节。 */
-export const CALL_FRAME_SAMPLES = 960;
-export const CALL_FRAME_BYTES = CALL_FRAME_SAMPLES * SAMPLE_BYTES;
 
 /**
  * 通话里怎么说话。外壳把这段放进 reply 的提示词。
@@ -39,7 +36,7 @@ export interface VoiceReply {
   end?: boolean;
 }
 
-export interface UtteranceMeta {
+interface UtteranceMeta {
   durationMs: number;
   peakRms: number;
 }
@@ -229,7 +226,7 @@ export function pcm48kToWav(pcm: Uint8Array): Buffer {
   return Buffer.concat([header, body]);
 }
 
-function runFfmpeg(args: string[], input: Uint8Array, signal?: AbortSignal): Promise<Buffer> {
+async function runFfmpeg(args: string[], input: Uint8Array, signal?: AbortSignal): Promise<Buffer> {
   const { promise, resolve, reject } = Promise.withResolvers<Buffer>();
   const ff = spawn("ffmpeg", args, { stdio: ["pipe", "pipe", "pipe"] });
   const out: Buffer[] = [];
@@ -259,7 +256,7 @@ function runFfmpeg(args: string[], input: Uint8Array, signal?: AbortSignal): Pro
 }
 
 /** 48 kHz PCM → OGG/Opus（transcribeVoice 认的那种容器；32 kbps、语音模式）。 */
-export function pcm48kToOgg(pcm: Uint8Array, signal?: AbortSignal): Promise<Buffer> {
+export async function pcm48kToOgg(pcm: Uint8Array, signal?: AbortSignal): Promise<Buffer> {
   return runFfmpeg(
     [
       "-hide_banner",
@@ -296,7 +293,7 @@ export function pcm48kToOgg(pcm: Uint8Array, signal?: AbortSignal): Promise<Buff
  * OGG/Opus → 48 kHz、16 位、单声道 PCM，直接能喂给 ntgcalls 的 sendExternalFrame。
  * 合成那边（MiniMax speech-2.8-hd，多语种自动增强）给的就是 OGG，不用管原采样率和语言。
  */
-export function oggToPcm48k(ogg: Uint8Array, signal?: AbortSignal): Promise<Buffer> {
+export async function oggToPcm48k(ogg: Uint8Array, signal?: AbortSignal): Promise<Buffer> {
   return runFfmpeg(
     [
       "-hide_banner",
@@ -334,13 +331,13 @@ export interface VoiceCallDeps {
    * 转写：进来的是 OGG/Opus，回来是对方说的原话。
    * 保持原语言逐字听写（transcribeVoice 就是这么问的），不要翻译成中文再往下走。
    */
-  asr(audio: Uint8Array): Promise<string>;
+  asr: (audio: Uint8Array) => Promise<string>;
   /** 看完整通话记录接一句；多语言由调用方按 CALL_TONE 提示，按对方语言回。 */
-  reply(history: readonly VoiceTurn[], callerText: string): Promise<string | VoiceReply>;
+  reply: (history: readonly VoiceTurn[], callerText: string) => Promise<string | VoiceReply>;
   /** 合成一句（MiniMax speech-2.8-hd 的 OGG）；signal 中止时尽快抛。 */
-  speak(text: string, signal: AbortSignal): Promise<SpokenVoice>;
+  speak: (text: string, signal: AbortSignal) => Promise<SpokenVoice>;
   /** 把合成好的 48 kHz PCM 放进通话（通常接 TelegramPhoneCalls.sendAudioFrames）。 */
-  sendFrame(pcm48kMono: Buffer, signal: AbortSignal): Promise<void>;
+  sendFrame: (pcm48kMono: Buffer, signal: AbortSignal) => Promise<void>;
   /** 接通时返回一句招呼就替她说出来；返回空就不说。 */
   onConnect?: () => string | undefined | Promise<string | undefined>;
   onEnd?: (reason: string) => void;

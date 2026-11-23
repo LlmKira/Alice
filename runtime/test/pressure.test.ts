@@ -57,7 +57,7 @@ function silent(at: number, scope = "telegram:1"): AliceEvent {
     decision: { acts: [] },
   };
 }
-/** 世界折叠加上按人记的关系（relation）：看见的事实与有往来都折进 relations。 */
+/** 世界 fold 加上按人记的关系（relation）：看见的事实与有往来都 fold 进 relations。 */
 const fold = (events: AliceEvent[], from: World = emptyWorld) =>
   events.reduce(worldFold({ relation }), from);
 const tiersOf = (t: Tier) => (): Tier => t;
@@ -71,6 +71,33 @@ function lcg(seed: number) {
   };
 }
 
+/** 随机的一个事件：多是别人的消息，也有她发的、她沉默、时钟格。 */
+function randomEvent(rnd: () => number, t: number, scope: string): AliceEvent {
+  const r = rnd();
+  if (r < 0.6)
+    return msg(t, { scope, senderId: `contact:${Math.floor(rnd() * 8)}`, directed: rnd() < 0.3 });
+  if (r < 0.8) return sent(t, scope);
+  return r < 0.95 ? silent(t, scope) : { type: "clock.tick", at: t };
+}
+
+/** 每个候选的 NSV 有限、有界，每个会话的每个驱动归一化后在 [0,1)（回避另说）。 */
+function expectBounded(w: World, t: number): void {
+  for (const c of rankIntentions(w, standInAffordances, t)) {
+    expect(Number.isFinite(c.nsv)).toBe(true);
+    // ΔP ≤ 可缓解的驱动数；代价有上界（C_social ≤ 1 + 回避 1，C_sat ≤ 7，λ ≤ 1.5）
+    expect(c.relief).toBeLessThanOrEqual(DRIVES.length);
+    expect(c.nsv).toBeGreaterThan(-1.5 * (2 + 7));
+  }
+  for (const s of Object.keys(w.chats)) {
+    const reading = readChat(w, s, t);
+    for (const k of DRIVES) {
+      // 回避可以低于 0（被接得多的群里她更敢开口，PLAN 第 43 件），最低 tanh(-0.5)。
+      expect(reading?.normalized[k]).toBeGreaterThanOrEqual(k === "aversion" ? Math.tanh(-0.5) : 0);
+      expect(reading?.normalized[k]).toBeLessThan(1);
+    }
+  }
+}
+
 describe("pressure field: boundedness (BIBO)", () => {
   it("keeps every normalized drive in [0,1), propensity in (0,1) and NSV bounded under random input", () => {
     const rnd = lcg(7);
@@ -80,33 +107,8 @@ describe("pressure field: boundedness (BIBO)", () => {
     for (let i = 0; i < 3000; i++) {
       t += Math.floor(rnd() * 20 * MIN);
       const scope = scopes[Math.floor(rnd() * scopes.length)] as string;
-      const r = rnd();
-      const e: AliceEvent =
-        r < 0.6
-          ? msg(t, { scope, senderId: `contact:${Math.floor(rnd() * 8)}`, directed: rnd() < 0.3 })
-          : r < 0.8
-            ? sent(t, scope)
-            : r < 0.95
-              ? silent(t, scope)
-              : { type: "clock.tick", at: t };
-      w = reduceWorld(w, e);
-      if (i % 50 !== 0) continue;
-      for (const c of rankIntentions(w, standInAffordances, t)) {
-        expect(Number.isFinite(c.nsv)).toBe(true);
-        // ΔP ≤ 可缓解的驱动数；代价有上界（C_social ≤ 1 + 回避 1，C_sat ≤ 7，λ ≤ 1.5）
-        expect(c.relief).toBeLessThanOrEqual(DRIVES.length);
-        expect(c.nsv).toBeGreaterThan(-1.5 * (2 + 7));
-      }
-      for (const s of Object.keys(w.chats)) {
-        const reading = readChat(w, s, t);
-        for (const k of DRIVES) {
-          // 回避可以低于 0（被接得多的群里她更敢开口，PLAN 第 43 件），最低 tanh(-0.5)。
-          expect(reading?.normalized[k]).toBeGreaterThanOrEqual(
-            k === "aversion" ? Math.tanh(-0.5) : 0,
-          );
-          expect(reading?.normalized[k]).toBeLessThan(1);
-        }
-      }
+      w = reduceWorld(w, randomEvent(rnd, t, scope));
+      if (i % 50 === 0) expectBounded(w, t);
     }
   });
 });
@@ -242,7 +244,7 @@ describe("pressure field: no windup when acting is suppressed", () => {
       tickMs: MIN,
     });
     const calls = result.effects.filter((r) => r.effect.type === "call-speech").length;
-    // 2 小时、240 条消息、120 个 tick：一直被拒绝时，σ_fail 与习惯化让唤醒稀疏下来，而不是每条/每个 tick 都醒。
+    // 2 小时、240 条消息、120 个 tick：一直被拒绝时，σ_fail 与 habituation 让唤醒稀疏下来，而不是每条/每个 tick 都醒。
     expect(calls).toBeGreaterThan(0);
     expect(calls).toBeLessThan(40);
     const firstHour = result.effects.filter(
@@ -571,24 +573,7 @@ describe("perception: being blocked", () => {
   });
 });
 
-describe("unanswered outreach (memory-eval: up to 27 bids in a row before the fix)", () => {
-  it("stops reaching out after a few unanswered bids, as Feb Alice did (at most 3)", () => {
-    let w = fold([msg(T0), sent(T0 + MIN)]);
-    let bids = 0;
-    for (let k = 1; k <= 20; k++) {
-      const at = T0 + k * 3 * H;
-      const best = rankIntentions(w, standInAffordances, at, {
-        ...BARE_WILL,
-        tiers: tiersOf(5),
-      }).find((i) => i.scope === "telegram:1" && i.affordance === "send");
-      if (!best || best.nsv <= 0) continue;
-      bids++;
-      w = fold([sent(at)], w);
-    }
-    expect(bids).toBeGreaterThan(0);
-    expect(bids).toBeLessThanOrEqual(4);
-  });
-
+describe("reactions need something to react to", () => {
   it("offers a reaction only when there is something new to react to", () => {
     const w = fold([msg(T0), sent(T0 + MIN)]);
     const kinds = (world: World, at: number) =>

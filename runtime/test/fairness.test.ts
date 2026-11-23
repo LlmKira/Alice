@@ -270,7 +270,7 @@ describe("first-DM pacing", () => {
       { scope, sourceGroup: GROUP, sentAt: T0 + H, replied: false },
     ]);
 
-    // 折叠之后（lastAliceAt 已是这条的时刻）也记同一笔：这里不读她上次开口的时刻。
+    // fold 之后（lastAliceAt 已是这条的时刻）也记同一笔：这里不读她上次开口的时刻。
     const afterFold: FairnessWorld = {
       ...world,
       chats: { ...world.chats, [scope]: chatOf("private", "1", { lastAliceAt: T0 + H }) },

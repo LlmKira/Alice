@@ -1,6 +1,7 @@
 import type { TelegramClient } from "@mtcute/node";
 import { tl } from "@mtcute/node";
 import { describe, expect, it } from "vitest";
+import { Album } from "../src/album.js";
 import { itemId } from "../src/mechanisms/pressure/reach.js";
 import { mechanisms } from "../src/mechanisms/registry.js";
 import type { Act } from "../src/mind/affordances.js";
@@ -9,15 +10,15 @@ import { presentIn } from "../src/mind/presence.js";
 import { emptyState } from "../src/mind/state.js";
 import { createFold } from "../src/shell.js";
 import { type ActContext, executeAct } from "../src/telegram/acts.js";
-import { Album } from "../src/telegram/album.js";
 import { TelegramActionError } from "../src/telegram/errors.js";
 import { Acquaintances } from "../src/telegram/first-dm.js";
 import { Gates, Telegram } from "../src/telegram/gates.js";
 import { Shelf } from "../src/telegram/shelf.js";
+import { mtcuteFake } from "./mtcute-fake.js";
 
 /** 只记录调用的假 Telegram 客户端。 */
 function fakeClient(
-  fail: Partial<Record<string, unknown>> = {},
+  fail: Partial<Record<string, Error>> = {},
   joined: { status: string } = { status: "ok" },
 ) {
   const calls: Array<[string, unknown[]]> = [];
@@ -28,7 +29,7 @@ function fakeClient(
       if (fail[name]) throw fail[name];
       return result;
     };
-  const client = {
+  const client = mtcuteFake<TelegramClient>({
     sendText: method("sendText", { id: 41 }),
     sendMedia: method("sendMedia", { id: 42 }),
     readHistory: method("readHistory"),
@@ -38,7 +39,7 @@ function fakeClient(
     joinChat: method("joinChat", joined),
     forwardMessagesById: method("forwardMessagesById", [{ id: 43 }]),
     getChat: method("getChat"),
-  } as unknown as TelegramClient;
+  });
   return { client, calls };
 }
 
@@ -86,7 +87,7 @@ describe("executeAct", () => {
     expect(calls.find(([n]) => n === "sendText")?.[1]).toEqual([
       -100123,
       "在",
-      { replyTo: 7, abortSignal: expect.any(AbortSignal) },
+      { replyTo: 7, abortSignal: expect.any(AbortSignal) as AbortSignal },
     ]);
   });
 
@@ -248,6 +249,34 @@ describe("executeAct", () => {
     expect(calls.filter(([n]) => n === "forwardMessagesById").length).toBe(6);
   });
 
+  it("burst limit allows 6 messages per minute including recovered history without double-counting", async () => {
+    const now = 1_771_000_000_000;
+    const gates = new Gates(() => now);
+    // 启动恢复：窗口内已有 2 条历史发出记录
+    for (let i = 0; i < 2; i++) {
+      gates.observe({
+        type: "message.sent",
+        at: now - (20 - i) * 1000,
+        scope: "telegram:-100123",
+        messageId: String(i + 1),
+        kind: "text",
+        text: "历史消息",
+      });
+    }
+    const { client, calls } = fakeClient();
+    const to = ctx(client, -100123, gates);
+    // 运行期应还能发出 4 条（合计 6 条），第 5 条（第 7 条）才被拦截
+    for (let i = 0; i < 4; i++) {
+      await executeAct(to, { kind: "send", text: `第${i + 1}条`, replyTo: null });
+    }
+    await expect(
+      executeAct(to, { kind: "send", text: "第5条超限", replyTo: null }),
+    ).rejects.toMatchObject({
+      code: "outgoing_burst_limited",
+    });
+    expect(calls.filter(([n]) => n === "sendText").length).toBe(4);
+  });
+
   it("looking up a group by a name nobody has is a typed failure", async () => {
     const missing = fakeClient({ getChat: new tl.RpcError(400, "USERNAME_NOT_OCCUPIED") });
     await expect(
@@ -307,7 +336,7 @@ describe("executeAct", () => {
       replyToMessageId: null,
       directed: false,
     });
-    // 只从折叠（写进了日志的事件）喂：和运行时同一个钩子。
+    // 只从 fold（写进了日志的事件）喂：和运行时同一个钩子。
     const shelf = new Shelf();
     const fold = createFold(mechanisms, (event, state) => shelf.observe(event, state));
     fold.feed(say("1", "201"));

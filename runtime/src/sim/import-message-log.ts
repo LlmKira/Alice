@@ -22,7 +22,7 @@ interface MessageLogRow {
 
 /** 旧库会话 id 有 "channel:telegram:-100…" 和 "channel:-100…" 两种写法，统一成 "telegram:<id>"。 */
 export function scopeOf(chatId: string): string {
-  return `telegram:${chatId.replace(/^channel:(telegram:)?/, "")}`;
+  return `telegram:${chatId.replace(/^channel:(?:telegram:)?/, "")}`;
 }
 
 export function toEvent(row: MessageLogRow, index: number): AliceEvent {

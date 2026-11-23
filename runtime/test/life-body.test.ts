@@ -67,7 +67,7 @@ function bodyAt(now: number, o: Partial<LifeBodyState> = {}): LifeBodyState {
 
 const worldOf = (life: LifeBodyState): World => ({
   ...emptyWorld,
-  life: life as unknown as LifeState,
+  life: life as LifeState,
 });
 
 const reduceFeature = (before: World, event: AliceEvent): World =>
@@ -482,9 +482,7 @@ describe("the feature contract", () => {
     const glancingBody = { ...reading, glanceAt: gAt };
     expect(bodyGlancing(glancingBody, gAt + 5_000)).toBe(true);
     expect(bodyBusyCost(glancingBody, gAt + 5_000)).toBe(0);
-    expect(
-      lifeBody.scans?.({ ...emptyWorld, life: glancingBody as unknown as LifeState }, gAt + 5_000),
-    ).toBe(true);
+    expect(lifeBody.scans?.(worldOf(glancingBody), gAt + 5_000)).toBe(true);
     expect(bodyGlancing(glancingBody, gAt + 20_000)).toBe(false);
   });
 

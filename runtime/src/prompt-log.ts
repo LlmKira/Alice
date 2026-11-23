@@ -1,6 +1,6 @@
 /**
  * 每轮提示日志：她每次调用模型时看到的提示和写出的原文，按天写成 JSONL（runtime/prompt-logs/，gitignore）。
- * 用途是上线后的足迹分析和回流成新场景（2 月的 prompt-logs 是回看 2 月的唯一一手材料）。写失败只记一次警告，
+ * 用途是上线后的 footprint 分析和回流成新场景（2 月的 prompt-logs 是回看 2 月的唯一一手材料）。写失败只记一次警告，
  * 不影响她说话。
  */
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -17,7 +17,7 @@ type Call = (prompt: SpeechPrompt, call: ModelCall, signal: AbortSignal) => Prom
 export function withPromptLog(
   callModel: Call,
   dir: string,
-  stamp: { sha: string; model: string },
+  stamp: { sha: string; model: string | ((prompt: SpeechPrompt, call: ModelCall) => string) },
   warn: (error: unknown) => void,
 ): Call {
   let warned = false;
@@ -33,11 +33,14 @@ export function withPromptLog(
   };
   return async (prompt, call, signal) => {
     const at = Date.now();
+    const resolveModel = () =>
+      typeof stamp.model === "function" ? stamp.model(prompt, call) : stamp.model;
     try {
       const raw = await callModel(prompt, call, signal);
       write({
         at,
-        ...stamp,
+        sha: stamp.sha,
+        model: resolveModel(),
         ...call,
         ms: Date.now() - at,
         system: prompt.system,
@@ -48,7 +51,8 @@ export function withPromptLog(
     } catch (error) {
       write({
         at,
-        ...stamp,
+        sha: stamp.sha,
+        model: resolveModel(),
         ...call,
         ms: Date.now() - at,
         system: prompt.system,

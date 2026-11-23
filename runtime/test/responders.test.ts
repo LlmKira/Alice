@@ -44,15 +44,16 @@ describe("responders: fitting", () => {
 });
 
 describe("responders: replies to her in the live journal", () => {
+  const mine = (at: number, id: string): MessageSent => ({
+    type: "message.sent",
+    at,
+    scope: G,
+    messageId: id,
+    text: "嗯",
+    kind: "text",
+  });
+
   it("counts her group turns and the quote replies to them, and uses those rates for her", () => {
-    const mine = (at: number, id: string): MessageSent => ({
-      type: "message.sent",
-      at,
-      scope: G,
-      messageId: id,
-      text: "嗯",
-      kind: "text",
-    });
     const events: AliceEvent[] = [
       msg(T0, "a"),
       mine(T0 + 10 * S, "h1"),
@@ -67,14 +68,6 @@ describe("responders: replies to her in the live journal", () => {
   });
 
   it("a line of hers more than 90 s after her last starts its own turn and is not counted twice", () => {
-    const mine = (at: number, id: string): MessageSent => ({
-      type: "message.sent",
-      at,
-      scope: G,
-      messageId: id,
-      text: "嗯",
-      kind: "text",
-    });
     // 她说完，三分钟没人接，她又说一句；别人回的是第二句。
     const events: AliceEvent[] = [
       msg(T0, "a"),

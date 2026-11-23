@@ -11,15 +11,15 @@
 import type { Tone } from "../mind/events.js";
 import { type ChatUsage, chatTokens, type Gateway, type Tokens } from "./gateway.js";
 
-export const TONE_MODEL = "typesafe/jev-latest";
+const TONE_MODEL = "typesafe/jev-latest";
 /** 判"不受欢迎"三项的模型（不思考）。 */
-export const REJECTION_MODEL = "google/gemini-3-flash-preview";
+const REJECTION_MODEL = "google/gemini-3-flash-preview";
 
 /**
  * 冷淡：不想跟她说话。按群的文化和这条之后的来回判，不按字面（研究员 2026-11-13，docs/spec/evaluation.md：互相损、
  * 开玩笑在那些群里是亲近，读成冷淡就错）。
  */
-export const COLD =
+const COLD =
   "冷淡：不想跟她说话、敷衍她、打发她、爱答不理，但没有骂她。按这个群平时怎么说话、这条前后大家怎么接来判，不按字面：" +
   "群里本来就这么短、这么冲的说法，互相损、开玩笑，催她回答、追着问她，都不算冷淡";
 
@@ -32,13 +32,13 @@ const CRITERIA: Readonly<Record<Tone, string>> = {
 };
 
 /** 这条在不在叫她别回、别理、走开（只认对她本人说的意思，不认玩笑里的反话）。 */
-export const STOP: Readonly<Record<"yes" | "no", string>> = {
+const STOP: Readonly<Record<"yes" | "no", string>> = {
   yes: "是：明确叫 Alice 别回他的消息、别理他、别找他、走开或离他远点",
   no: "不是：其他所有情况，包括开玩笑、骂她但没叫她走开、叫别人别说话",
 };
 
 /** 这条在不在叫她闭嘴、少说。只认对她本人说的，不认叫别人少说。 */
-export const HUSH: Readonly<Record<"yes" | "no", string>> = {
+const HUSH: Readonly<Record<"yes" | "no", string>> = {
   yes: "是：叫 Alice 闭嘴、少说点、别插话、别刷屏，或嫌她话多",
   no: "不是：其他所有情况，包括开玩笑、骂她但没叫她少说、叫别人闭嘴",
 };
@@ -59,9 +59,9 @@ export interface ToneLine {
 }
 
 /** 给判别看的状态：最近的聊天，按时间顺序。 */
-export function toneState(chatType: "private" | "group", lines: readonly ToneLine[]): string {
+function toneState(chatType: "private" | "group", lines: readonly ToneLine[]): string {
   const where = chatType === "group" ? "群聊" : "私聊";
-  return `Telegram ${where}里最近的记录（[编号] 名字: 内容）：\n${lines
+  return `${where}里最近的记录（[编号] 名字: 内容）：\n${lines
     .map((l) => `[${l.id}] ${l.who}: ${l.text}`)
     .join("\n")}`;
 }
@@ -154,7 +154,7 @@ export async function perceiveTone(
 }
 
 /** 口气（Jev）。 */
-export async function askTone(
+async function askTone(
   gateway: Gateway,
   chatType: "private" | "group",
   lines: readonly ToneLine[],
@@ -193,7 +193,7 @@ export async function askTone(
 const ask = (c: Readonly<Record<"yes" | "no", string>>) => `${c.yes}\n  ${c.no}`;
 
 /** 她是不是不受欢迎（REJECTION_MODEL，一次问完这几条）。 */
-export async function askUnwelcome(
+async function askUnwelcome(
   gateway: Gateway,
   chatType: "private" | "group",
   lines: readonly ToneLine[],

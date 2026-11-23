@@ -11,6 +11,7 @@ import type { AliceEvent } from "../src/mind/events.js";
 import { emptyChat } from "../src/mind/state.js";
 import { Groups } from "../src/telegram/catch-up.js";
 import { bindTelegramWorldAdapter } from "../src/telegram/world-adapter.js";
+import { mtcuteFake } from "./mtcute-fake.js";
 
 const SELF = "42";
 const GROUP_ID = -1009;
@@ -23,11 +24,11 @@ function adapter(atStart: string[] | null) {
   const groups = new Groups();
   if (atStart) groups.started(atStart);
   let now = T0;
-  const dispatcher = {
+  const dispatcher = mtcuteFake<Dispatcher>({
     onNewMessage: () => {},
     onRawUpdate: () => {},
     onChatMemberUpdate: () => {},
-  } as unknown as Dispatcher;
+  });
   const { receive } = bindTelegramWorldAdapter(dispatcher, {
     selfId: SELF,
     now: () => now,
@@ -55,7 +56,7 @@ function adapter(atStart: string[] | null) {
   return { events, message, tick: () => (now += 60_000) };
 }
 
-/** 折进 familiar，读那个群里在场的人。 */
+/** fold 进 familiar，读那个群里在场的人。 */
 function present(events: AliceEvent[]): string {
   const state = events.reduce(
     (s, e) => familiar.reduce?.(s, e) as FamiliarState,

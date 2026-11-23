@@ -14,7 +14,7 @@ export const patience: Mechanism = {
   patience: (chat, event) => (event.type === "message.received" ? WAIT_MS[chat.chatType] : 0),
 };
 
-export interface TypingPatienceState {
+interface TypingPatienceState {
   /** 每个会话里最后一次看到别人正在输入并有效到什么时候。 */
   typing: Readonly<Record<string, { senderId: string; until: number }>>;
   /** 每个会话对方已读到她消息的水位与时刻（P06）。 */

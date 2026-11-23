@@ -108,12 +108,62 @@ describe("loadRuntimeConfig (what --check validates before she goes live)", () =
     ...extra,
   });
 
+  it("is on Telegram by default, with the same Telegram settings as login", () => {
+    expect(loadRuntimeConfig(env({})).platform).toEqual({
+      name: "telegram",
+      telegramApiId: 123,
+      telegramApiHash: "hash",
+      telegramPhone: "+10000000000",
+    });
+    expect(() => loadRuntimeConfig(env({ ALICE_PLATFORM: "irc" }))).toThrow("ALICE_PLATFORM");
+  });
+
+  it("on QQ reads the OneBot connection and does not need the Telegram secrets", () => {
+    const qq: NodeJS.ProcessEnv = {
+      ...env({ ALICE_PLATFORM: "qq", QQ_ONEBOT_WS_URL: "ws://127.0.0.1:3001" }),
+      TEST_TELEGRAM_API_ID: undefined,
+      TEST_TELEGRAM_HASH: undefined,
+      TEST_TELEGRAM_PHONE: undefined,
+    };
+    expect(loadRuntimeConfig(qq).platform).toEqual({
+      name: "qq",
+      wsUrl: "ws://127.0.0.1:3001",
+      token: null,
+      selfId: null,
+    });
+    expect(
+      loadRuntimeConfig({ ...qq, QQ_ONEBOT_TOKEN: "t", QQ_SELF_ID: "10001" }).platform,
+    ).toMatchObject({ token: "t", selfId: "10001" });
+    expect(() => loadRuntimeConfig({ ...qq, QQ_ONEBOT_WS_URL: "" })).toThrow("QQ_ONEBOT_WS_URL");
+    expect(() => loadRuntimeConfig({ ...qq, QQ_ONEBOT_WS_URL: "http://x" })).toThrow("ws://");
+    expect(() => loadRuntimeConfig({ ...qq, QQ_SELF_ID: "alice" })).toThrow("QQ_SELF_ID");
+  });
+
+  it("an OneBot connection off this machine must be wss:// with a token; on this machine ws:// is fine", () => {
+    const qq = (url: string, token?: string): NodeJS.ProcessEnv => ({
+      ...env({ ALICE_PLATFORM: "qq", QQ_ONEBOT_WS_URL: url }),
+      ...(token ? { QQ_ONEBOT_TOKEN: token } : {}),
+    });
+    for (const local of ["ws://127.0.0.1:3001", "ws://localhost:3001", "ws://[::1]:3001"]) {
+      expect(loadRuntimeConfig(qq(local)).platform).toMatchObject({ wsUrl: local, token: null });
+    }
+    expect(() => loadRuntimeConfig(qq("ws://10.0.0.5:3001", "t"))).toThrow("wss://");
+    expect(() => loadRuntimeConfig(qq("ws://0.0.0.0:3001", "t"))).toThrow("wss://");
+    expect(() => loadRuntimeConfig(qq("wss://qq.example.com/onebot"))).toThrow("QQ_ONEBOT_TOKEN");
+    expect(loadRuntimeConfig(qq("wss://qq.example.com/onebot", "t")).platform).toMatchObject({
+      token: "t",
+    });
+  });
+
   it("requires ALICE_TTS to be on or off when specified", () => {
     expect(() => loadRuntimeConfig(env({ ALICE_TTS: "bad" }))).toThrow("ALICE_TTS");
   });
 
   it("decides the lookup switch once: on with an exa key, off without one or when switched off", () => {
-    expect(loadRuntimeConfig(env({ EXA_API_KEY: "k" })).errands).toEqual({ exaKey: "k" });
+    expect(loadRuntimeConfig(env({ EXA_API_KEY: "k" })).errands).toEqual({
+      exaKey: "k",
+      domains: null,
+    });
     expect(loadRuntimeConfig(env({ EXA_API_KEY: "" })).errands).toBeNull();
     expect(loadRuntimeConfig(env({ EXA_API_KEY: "k", ALICE_ERRANDS: "off" })).errands).toBeNull();
     expect(() => loadRuntimeConfig(env({ ALICE_ERRANDS: "no" }))).toThrow("ALICE_ERRANDS");
@@ -265,6 +315,69 @@ describe("loadRuntimeConfig (what --check validates before she goes live)", () =
     );
     expect(() => loadRuntimeConfig(env({ ...noTts, ALICE_VOICE_CALLS: "maybe" }))).toThrow(
       "ALICE_VOICE_CALLS",
+    );
+  });
+
+  it("says ALICE_TTS=off is the reason when voice calls are on and keys are present", () => {
+    expect(() =>
+      loadRuntimeConfig(
+        env({ ...noTts, TTS_API_KEY: "k", ALICE_TTS: "off", ALICE_VOICE_CALLS: "on" }),
+      ),
+    ).toThrow("ALICE_TTS=off");
+  });
+
+  it("rejects a speech model name that only exists on every object", () => {
+    expect(() => loadRuntimeConfig(env({ ALICE_SPEECH_MODEL: "toString" }))).toThrow(
+      "ALICE_SPEECH_MODEL",
+    );
+  });
+
+  it("parses comma-separated ALICE_SPEECH_MODEL pools, deduplicates, and rejects unknown entries", () => {
+    const cfg = loadRuntimeConfig(
+      env({
+        ALICE_SPEECH_MODEL:
+          " google/gemini-4-neon , bytedance/doubao-seed-2.1-pro-260915, google/gemini-4-neon ",
+      }),
+    );
+    expect(cfg.speechModel).toBe("google/gemini-4-neon");
+    expect(cfg.speechModels).toEqual([
+      "google/gemini-4-neon",
+      "bytedance/doubao-seed-2.1-pro-260915",
+    ]);
+    expect(cfg.ponderModel).toBe("google/gemini-3.8-flash");
+    expect(
+      loadRuntimeConfig(env({ ALICE_PONDER_MODEL: "google/gemini-4-hydrogen" })).ponderModel,
+    ).toBe("google/gemini-4-hydrogen");
+    expect(() => loadRuntimeConfig(env({ ALICE_PONDER_MODEL: "bad-model" }))).toThrow(
+      "ALICE_PONDER_MODEL",
+    );
+    expect(() =>
+      loadRuntimeConfig(env({ ALICE_SPEECH_MODEL: "google/gemini-4-neon,unknown-model" })),
+    ).toThrow("ALICE_SPEECH_MODEL");
+  });
+
+  it("defaults platformAttention by platform count and validates ALICE_PLATFORM_ATTENTION / ALICE_PLATFORM_LAMBDA", () => {
+    expect(loadRuntimeConfig(env({})).platformAttention).toEqual({ mode: "shared" });
+    expect(
+      loadRuntimeConfig(
+        env({ ALICE_PLATFORM: "telegram,qq", QQ_ONEBOT_WS_URL: "ws://127.0.0.1:3001" }),
+      ).platformAttention,
+    ).toEqual({ mode: "per-platform" });
+    expect(
+      loadRuntimeConfig(
+        env({
+          ALICE_PLATFORM: "telegram,qq",
+          QQ_ONEBOT_WS_URL: "ws://127.0.0.1:3001",
+          ALICE_PLATFORM_ATTENTION: "shared",
+          ALICE_PLATFORM_LAMBDA: "qq=0.85, telegram=1.1",
+        }),
+      ).platformAttention,
+    ).toEqual({ mode: "shared", lambda: { qq: 0.85, telegram: 1.1 } });
+    expect(() => loadRuntimeConfig(env({ ALICE_PLATFORM_ATTENTION: "invalid" }))).toThrow(
+      "ALICE_PLATFORM_ATTENTION",
+    );
+    expect(() => loadRuntimeConfig(env({ ALICE_PLATFORM_LAMBDA: "qq=-1" }))).toThrow(
+      "ALICE_PLATFORM_LAMBDA",
     );
   });
 });

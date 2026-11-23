@@ -178,7 +178,7 @@ describe("what she missed", () => {
       createPressure(affordances, {
         ...PRODUCTION,
         sleep: withMissed(bedtime),
-        life: life({ occupies: true, warm: true }),
+        life: life({ warm: true }),
       }),
     ];
     const withBed = user(withBedtime);

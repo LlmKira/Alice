@@ -1,11 +1,14 @@
 /**
- * 候选 groupturn（mechanisms/pressure/turn.ts）坏掉了会很糟的几条：
- * - 在场不会变成叫醒风暴：她在场时看过、决定不说，这段对话就放下，热闹的群不会每条都叫醒她；
+ * 生产的群里拉力（mechanisms/pressure/group-pull.ts）坏掉了会很糟的几条：
  * - 话题有关只进意愿：她在私聊里说过的话让群里的话"对上了"，但这些话不会出现在群的提示词里；
- * - 选项都关着时，世界和生产一样（没有 turn 字段）。
+ * - 拿掉它时，压力场不写 turn 的话题和交情。
  */
 import { describe, expect, it } from "vitest";
-import { createPressure, GROUP_TURN, PRODUCTION } from "../src/mechanisms/pressure/index.js";
+import {
+  createPressure,
+  PRODUCTION,
+  pressureProduction,
+} from "../src/mechanisms/pressure/index.js";
 import { readChat } from "../src/mechanisms/pressure/will.js";
 import { NO_TURN, type World } from "../src/mechanisms/pressure/world.js";
 import { affordances } from "../src/mind/affordances.js";
@@ -40,34 +43,8 @@ function msg(at: number, o: Partial<MessageReceived> = {}): MessageReceived {
 
 const say = (text: string): SpeechDecision => ({ acts: [{ kind: "send", text, replyTo: null }] });
 const quiet: SpeechDecision = { acts: [] };
-const groupTurn = createPressure(affordances, { ...PRODUCTION, ...GROUP_TURN });
 
-describe("groupturn: the floor does not become a wake storm", () => {
-  it("after she declines once while in the floor, the busy group stops waking her until she speaks", async () => {
-    // 她被点名、回了一句；之后 5 分钟里群里每 10 秒一条与她无关的话。
-    const events: AliceEvent[] = [msg(T0, { directed: true, senderId: "contact:2" })];
-    for (let i = 1; i <= 30; i++)
-      events.push(msg(T0 + 20 * S + i * 10 * S, { senderId: `contact:${i % 5}` }));
-    let calls = 0;
-    const result = await replay(events, {
-      mechanisms: [groupTurn],
-      speech: (request) => {
-        if (request.scope !== G) return quiet;
-        calls++;
-        return calls === 1 ? say("在呢") : quiet;
-      },
-      tickMs: 10 * S,
-    });
-    const groupCalls = result.effects.filter(
-      (r) => r.effect.type === "call-speech" && r.effect.scope === G,
-    );
-    // 被点名的那次、在场时看了一眼决定不说的那次；之后不再因为在场被叫醒（节律仍可能另起，但 5 分钟内不会每条都醒）。
-    expect(groupCalls.length).toBeGreaterThanOrEqual(2);
-    expect(groupCalls.length).toBeLessThanOrEqual(4);
-  });
-});
-
-describe("groupturn: topic relevance stays out of the prompt", () => {
+describe("group-pull: topic relevance stays out of the prompt", () => {
   it("what she said in a private chat raises the pull in a group but never appears in the group's prompt", async () => {
     const secret = "我最近在学吉他的和弦转换";
     const chatter = ["有没有人一起吃饭", "今天好热啊", "有人在吗", "下班了没有", "这个游戏好难"];
@@ -79,7 +56,7 @@ describe("groupturn: topic relevance stays out of the prompt", () => {
     const prompts: string[] = [];
     let world: World | undefined;
     await replay(events, {
-      mechanisms: [groupTurn],
+      mechanisms: [pressureProduction],
       speech: (request) => {
         if (request.scope === P) return say(secret);
         prompts.push(JSON.stringify(request.contributions));
@@ -88,7 +65,7 @@ describe("groupturn: topic relevance stays out of the prompt", () => {
       tickMs: 10 * S,
       observe: (event, state) => {
         if (event.type === "message.received" && event.scope === G) {
-          world = state.mechanisms[groupTurn.name] as World;
+          world = state.mechanisms[pressureProduction.name] as World;
         }
       },
     });
@@ -98,7 +75,7 @@ describe("groupturn: topic relevance stays out of the prompt", () => {
   });
 });
 
-describe("groupturn: off means no topic/bond pull", () => {
+describe("group-pull: off means no topic/bond pull", () => {
   it("without topic/bond pull, the pressure field never writes turn.topic or turn.bond", async () => {
     const noPull = createPressure(affordances, { ...PRODUCTION, topic: undefined });
     let world: World | undefined;

@@ -87,7 +87,7 @@ describe("failures: what she tried to do outwardly and did not get done", () => 
 
   it("says the messages the burst limit dropped, for the same window and chat", () => {
     const shown = (c: ChatState, now: number) =>
-      failures.contribute?.(c, now, failures.initial as FailuresState, []).map((x) => x.text) ?? [];
+      failures.contribute?.(c, now, failures.initial, []).map((x) => x.text) ?? [];
     const dropped = (at: number, scope = A): ChatState => ({
       ...chat(scope),
       droppedSends: [{ at, act: send }],

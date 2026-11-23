@@ -1,5 +1,5 @@
 /**
- * 一个人的一条记录（docs/research/relationship.md 第 1、3 片）：`relations` 这一块只有一个写入者 `relation`。
+ * 一个人的一条记录（docs/research/relationship.md 第 1、3 片）：`relations` 这一块只有一个 writer `relation`。
  *
  * 第 1 片（生产，2026-11-13；eval-artifacts/relationship/prereg-1.md）：会话上的回避（world.ts aversion）混着两件事：
  * 群里她主动说的话被晾着（群对她开口的反应，不是哪个人的），和某个人伤了她（私聊里拉黑她）。线上 12:17 一次：
@@ -17,9 +17,9 @@
  *
  * 第 3 片（逐字节不变）：关于一个人的事实并成一条 `Relation`——world.contacts 的名字/最近说话/最近回应/条数、
  * world.closeness 的亲近分数与互惠、people.seen 的群里的说话日子、familiar 的看见的事实（第一次看见、有往来的日子、
- * 进群提示、机器人标记）、affect 的"上次来找我"与"有过来往"，都在这里折叠。读者拿 `RelationView`
+ * 进群提示、机器人标记）、affect 的"上次来找我"与"有过来往"，都在这里 fold。读者拿 `RelationView`
  * （familiarity、lastToHerAt、lastAnswerAt、aversion…），不碰字段。
- * 意愿层自己的结局（"想过、决定先不找他"的 consideredAt、declines）不是关系，留在世界底座的 `willingness`。
+ * 意愿层自己的结局（"想过、决定先不找他"的 consideredAt、declines）不是关系，留在世界 base 的 `willingness`。
  * 第 4 片（候选）：`tierFromFamiliarity` 让层级从校准过的联系频率来，而不是不稳定的排名；生产保持排名，等量过再换。
  * 只写自己这一块（relations），读会话的对方和类型。纯函数，时间只来自事件。
  */
@@ -27,17 +27,16 @@ import { memberAfter } from "../../mind/affordances.js";
 import { type AliceEvent, type ChatType, NEGATIVE_REACTIONS } from "../../mind/events.js";
 import type { Contribution, PersonNote } from "../../mind/mechanism.js";
 import { elapsed, localDay } from "../../mind/when.js";
-import { CLOSENESS_HALF_LIFE } from "../closeness.js";
 import type { WillAffordance } from "./affordances.js";
-import { feature, type PressureFeature, type View } from "./feature.js";
-import { AVERSION_GAIN, AVERSION_TAU, type Tier } from "./params.js";
+import { type FeatureContext, feature, type PressureFeature, type View } from "./feature.js";
+import { AVERSION_GAIN, AVERSION_TAU, CLOSENESS_HALF_LIFE, type Tier } from "./params.js";
 
 const DAY_MS = 24 * 60 * 60_000;
 
-// ── 看见的事实（familiar 的折叠搬进来）──────────────────────────────
+// ── 看见的事实（familiar 的 fold 搬进来）──────────────────────────────
 
 /** 他在这一个群里每天说几条：[东八区日历日, 条数]，从旧到新，只留最近 SEEN_DAYS 天。 */
-export interface RoomSeen {
+interface RoomSeen {
   days: ReadonlyArray<readonly [day: number, lines: number]>;
   lastAt: number;
   /** 第一次在这个群里说话时，他的入群提示在不在（早于入群提示说过话的，是老面孔）。 */
@@ -45,7 +44,7 @@ export interface RoomSeen {
 }
 
 /** 群里关于成员的两件事：她在记录开始之前就在（先验），看到过谁的入群提示。 */
-export interface GroupNode {
+interface GroupNode {
   prior: boolean;
   joined: Readonly<Record<string, number>>;
 }
@@ -74,7 +73,7 @@ export interface Seen {
 }
 
 /** 算进最近这一次往来的那条消息，和它之前的分数（null：之前没有这个人）。外壳判出敌意时按这个退回去。 */
-export interface Opened {
+interface Opened {
   scope: string;
   messageId: string;
   prior: { score: number; scoreAt: number; theirs: number } | null;
@@ -84,7 +83,7 @@ export interface Opened {
  * 有来有回、口气不坏的往来：他冲着她说话、她回了，算一段。第 3 片照搬 closeness 的分数给层级排名用，第 4 片由
  * 熟悉度取代排名（分数仍留着：`knownFor`/`whoSeeks` 读的是有过来往的事实，不是排名）。
  */
-export interface Warmth {
+interface Warmth {
   /** 亲近分数（他开的往来，14 天半衰期）和它的时刻。 */
   score: number;
   scoreAt: number;
@@ -98,7 +97,7 @@ export interface Warmth {
 }
 
 /** 回避的一笔：在哪、什么会话、为什么、多少。读的时候按它的时间常数淡掉再相加。 */
-export interface Hurt {
+interface Hurt {
   at: number;
   scope: string;
   chatType: ChatType;
@@ -113,7 +112,7 @@ export interface Hurt {
 /** 一个人。只有 relation 写；读者只拿 RelationView。 */
 export interface Relation {
   name: string;
-  /** Telegram 的机器人标记：有一条消息带着就是。 */
+  /** 平台的机器人标记：有一条消息带着就是。 */
   bot: boolean;
   seen: Seen;
   /** 亲近的往来（分数、退回游标、互惠）。 */
@@ -147,7 +146,7 @@ const HURTS_KEPT = 10;
 /** 每个会话记几条找她的消息（口气在一次叫醒里判完，几十条足够）。手设。 */
 const ADDRESSED_KEPT = 20;
 /** 10 分钟内的连续往来算一次互动，避免一段连发把分数刷高（closeness）。 */
-export const EPISODE_GAP_MS = 10 * 60_000;
+const EPISODE_GAP_MS = 10 * 60_000;
 /** 有往来的日子留多少天：四个半衰期（closeness），再早的权重不到 1/16。 */
 const DAYS_KEPT = Math.round((4 * CLOSENESS_HALF_LIFE) / DAY_MS);
 /** 在一个群里每天说几条留多少天（people 的 S07）。 */
@@ -193,7 +192,7 @@ export function stopToward(state: Pick<RelationsState, "people">, id: string, no
     .reduce((sum, h) => sum + fade(h, now, STOP.tau), 0);
 }
 
-// ── 折叠 ─────────────────────────────────────────────────────────────
+// ── fold ─────────────────────────────────────────────────────────────
 
 const blankSeen = (at: number): Seen => ({
   firstAt: at,
@@ -254,6 +253,8 @@ function withWaiting(state: RelationsState, scope: string, who: readonly string[
   return { ...state, waiting: { ...state.waiting, [scope]: who } };
 }
 
+type EventOf<T extends AliceEvent["type"]> = Extract<AliceEvent, { type: T }>;
+
 /**
  * 一个人的事实怎么折（relation 与 familiar 共用这一份）：名字、看见的事实、群里的日子、有往来、亲近分数。
  * partnerOf 是私聊会话的对方（relation 读会话，familiar 读自己记的）。
@@ -263,144 +264,173 @@ export function reduceStore(
   event: AliceEvent,
   partnerOf: (scope: string) => string | null,
 ): RelationStore {
-  if (event.type === "membership.changed") {
-    // 这个群的第一个事件是她进群：她是在记录里才来的，这里的人没有先验。
-    return store.groups[event.scope]
-      ? store
-      : {
-          ...store,
-          groups: {
-            ...store.groups,
-            [event.scope]: { prior: !event.member, joined: {} },
-          },
-        };
-  }
-  if (event.type === "member.joined") {
-    const g = store.groups[event.scope] ?? { prior: true, joined: {} };
-    return {
-      ...store,
-      groups: {
-        ...store.groups,
-        [event.scope]: { ...g, joined: { ...g.joined, [event.userId]: event.at } },
-      },
-    };
-  }
-  if (event.type === "message.received") {
-    const at = event.at;
-    const day = localDay(at);
-    const prev = store.people[event.senderId];
-    const isGroup = event.chatType === "group";
-    // 这个群的第一个事件是别人的话：她在记录之前就在，这里的人是朋友（先验）。
-    const groups =
-      isGroup && !store.groups[event.scope]
-        ? { ...store.groups, [event.scope]: { prior: true, joined: {} } }
-        : store.groups;
-    const prevRooms = prev?.seen.rooms ?? {};
-    const rooms = isGroup
-      ? {
-          ...prevRooms,
-          [event.scope]: noteDay(
-            prevRooms[event.scope],
-            at,
-            groups[event.scope]?.joined[event.senderId],
-          ),
-        }
-      : prevRooms;
-    // 有往来的日子：冲着她说话的那一天（familiar 的频率词按它）。
-    const talked = event.directed && prev?.seen.toHerDays.at(-1) !== day;
-    const base = prev?.seen ?? blankSeen(at);
-    const seen: Seen = {
-      ...base,
-      firstAt: base.firstAt,
-      lastAt: at,
-      count: base.count + 1,
-      toHerDays: talked
-        ? [...base.toHerDays.filter((d) => day - d < DAYS_KEPT), day]
-        : base.toHerDays,
-      lastToHerAt: event.directed || event.chatType === "private" ? at : base.lastToHerAt,
-      lastAnswerAt: event.directed || event.chatType === "private" ? at : base.lastAnswerAt,
-      rooms,
-    };
-    let warmth = prev?.warmth ?? blankWarmth();
-    // 亲近：他冲着她说话算一段往来；10 分钟内的连发算同一段。
-    if (event.directed) {
-      if (warmth.lastExchangeAt > 0 && at - warmth.lastExchangeAt < EPISODE_GAP_MS) {
-        warmth = { ...warmth, lastExchangeAt: at };
-      } else {
-        const had = warmth.lastExchangeAt > 0;
-        const opened: Opened = {
-          scope: event.scope,
-          messageId: event.messageId,
-          prior: had ? { score: warmth.score, scoreAt: warmth.scoreAt, theirs: seen.theirs } : null,
-        };
-        warmth = {
-          ...warmth,
-          score: (had ? decayed(warmth, at) : 0) + 1,
-          scoreAt: at,
-          lastExchangeAt: at,
-          firstAt: had ? warmth.firstAt : at,
-          opened,
-        };
-        seen.theirs = base.theirs + 1;
-      }
-    }
-    const relation: Relation = {
-      name: event.senderName,
-      bot: prev?.bot === true || event.isBot === true,
-      seen,
-      warmth,
-      hurts: prev?.hurts ?? [],
-    };
-    return { ...store, groups, people: { ...store.people, [event.senderId]: relation } };
-  }
-  if (event.type === "message.sent") {
-    const partner = partnerOf(event.scope);
-    const prev = partner ? store.people[partner] : undefined;
-    if (!partner || !prev) return store;
-    const w = prev.warmth;
-    // 关系靠互惠维持：她的话只延续对方开启的这段往来，不单独算一次互动。
-    const sameEpisode = w.lastExchangeAt > 0 && event.at - w.lastExchangeAt < EPISODE_GAP_MS;
-    const warmth = sameEpisode ? { ...w, lastExchangeAt: event.at } : w;
-    const seen = sameEpisode
-      ? prev.seen
-      : {
-          ...prev.seen,
-          herAt: event.at,
-          hers: prev.seen.hers + (event.at - prev.seen.herAt >= EPISODE_GAP_MS ? 1 : 0),
-        };
-    return {
-      ...store,
-      people: { ...store.people, [partner]: { ...prev, seen, warmth } },
-    };
-  }
-  if (event.type === "message.perceived" && event.tone === "hostile") {
-    // 敌意的那条不算一次往来：只退它开启的那一次，之后有了新的往来就不动。
-    const hit = Object.entries(store.people).find(
-      ([, r]) =>
-        r.warmth.opened?.scope === event.scope && r.warmth.opened.messageId === event.messageId,
-    );
-    if (!hit) return store;
-    const [id, r] = hit;
-    const prior = r.warmth.opened?.prior;
-    const warmth: Warmth = prior
-      ? { ...r.warmth, ...prior, opened: null }
-      : { ...blankWarmth(), exchanges: r.warmth.exchanges };
-    return {
-      ...store,
-      people: {
-        ...store.people,
-        [id]: {
-          ...r,
-          seen: { ...r.seen, theirs: prior ? prior.theirs : 0 },
-          warmth,
+  switch (event.type) {
+    case "membership.changed":
+      // 这个群的第一个事件是她进群：她是在记录里才来的，这里的人没有先验。
+      return store.groups[event.scope]
+        ? store
+        : {
+            ...store,
+            groups: {
+              ...store.groups,
+              [event.scope]: { prior: !event.member, joined: {} },
+            },
+          };
+    case "member.joined": {
+      const g = store.groups[event.scope] ?? { prior: true, joined: {} };
+      return {
+        ...store,
+        groups: {
+          ...store.groups,
+          [event.scope]: { ...g, joined: { ...g.joined, [event.userId]: event.at } },
         },
-      },
-    };
+      };
+    }
+    case "message.received":
+      return storeReceived(store, event);
+    case "message.sent":
+      return storeSent(store, event, partnerOf);
+    case "message.perceived":
+      return event.tone === "hostile" ? withdrawHostile(store, event) : store;
+    default:
+      return store;
   }
-  return store;
 }
 
-export function reduceRelations(
+/** 他说了一条：名字、机器人标记、看见的事实；冲着她说的还算进亲近的往来。 */
+function storeReceived(store: RelationStore, event: EventOf<"message.received">): RelationStore {
+  const prev = store.people[event.senderId];
+  // 这个群的第一个事件是别人的话：她在记录之前就在，这里的人是朋友（先验）。
+  const groups =
+    event.chatType === "group" && !store.groups[event.scope]
+      ? { ...store.groups, [event.scope]: { prior: true, joined: {} } }
+      : store.groups;
+  const base = prev?.seen ?? blankSeen(event.at);
+  const before = prev?.warmth ?? blankWarmth();
+  const { warmth, theirs } = event.directed
+    ? exchanged(before, base.theirs, event)
+    : { warmth: before, theirs: base.theirs };
+  const relation: Relation = {
+    name: event.senderName,
+    bot: prev?.bot === true || event.isBot === true,
+    seen: { ...seenAfter(prev, base, groups[event.scope]?.joined[event.senderId], event), theirs },
+    warmth,
+    hurts: prev?.hurts ?? [],
+  };
+  return { ...store, groups, people: { ...store.people, [event.senderId]: relation } };
+}
+
+/** 看见他说了一条之后的事实（他开的往来数另算，见 exchanged）。joinedAt 是这个群里他的入群提示。 */
+function seenAfter(
+  prev: Relation | undefined,
+  base: Seen,
+  joinedAt: number | undefined,
+  event: EventOf<"message.received">,
+): Seen {
+  const at = event.at;
+  const day = localDay(at);
+  const prevRooms = prev?.seen.rooms ?? {};
+  const rooms =
+    event.chatType === "group"
+      ? { ...prevRooms, [event.scope]: noteDay(prevRooms[event.scope], at, joinedAt) }
+      : prevRooms;
+  // 有往来的日子：冲着她说话的那一天（familiar 的频率词按它）。
+  const talked = event.directed && prev?.seen.toHerDays.at(-1) !== day;
+  const toHer = event.directed || event.chatType === "private";
+  return {
+    ...base,
+    firstAt: base.firstAt,
+    lastAt: at,
+    count: base.count + 1,
+    toHerDays: talked
+      ? [...base.toHerDays.filter((d) => day - d < DAYS_KEPT), day]
+      : base.toHerDays,
+    lastToHerAt: toHer ? at : base.lastToHerAt,
+    lastAnswerAt: toHer ? at : base.lastAnswerAt,
+    rooms,
+  };
+}
+
+/** 亲近：他冲着她说话算一段往来；10 分钟内的连发算同一段。theirs 是他之前开过几段。 */
+function exchanged(
+  warmth: Warmth,
+  theirs: number,
+  event: EventOf<"message.received">,
+): { warmth: Warmth; theirs: number } {
+  const at = event.at;
+  if (warmth.lastExchangeAt > 0 && at - warmth.lastExchangeAt < EPISODE_GAP_MS) {
+    return { warmth: { ...warmth, lastExchangeAt: at }, theirs };
+  }
+  const had = warmth.lastExchangeAt > 0;
+  const opened: Opened = {
+    scope: event.scope,
+    messageId: event.messageId,
+    prior: had ? { score: warmth.score, scoreAt: warmth.scoreAt, theirs } : null,
+  };
+  return {
+    warmth: {
+      ...warmth,
+      score: (had ? decayed(warmth, at) : 0) + 1,
+      scoreAt: at,
+      lastExchangeAt: at,
+      firstAt: had ? warmth.firstAt : at,
+      opened,
+    },
+    theirs: theirs + 1,
+  };
+}
+
+/** 关系靠互惠维持：她的话只延续对方开启的这段往来，不单独算一次互动。 */
+function storeSent(
+  store: RelationStore,
+  event: EventOf<"message.sent">,
+  partnerOf: (scope: string) => string | null,
+): RelationStore {
+  const partner = partnerOf(event.scope);
+  const prev = partner ? store.people[partner] : undefined;
+  if (!partner || !prev) return store;
+  const w = prev.warmth;
+  const sameEpisode = w.lastExchangeAt > 0 && event.at - w.lastExchangeAt < EPISODE_GAP_MS;
+  const warmth = sameEpisode ? { ...w, lastExchangeAt: event.at } : w;
+  const seen = sameEpisode
+    ? prev.seen
+    : {
+        ...prev.seen,
+        herAt: event.at,
+        hers: prev.seen.hers + (event.at - prev.seen.herAt >= EPISODE_GAP_MS ? 1 : 0),
+      };
+  return {
+    ...store,
+    people: { ...store.people, [partner]: { ...prev, seen, warmth } },
+  };
+}
+
+/** 敌意的那条不算一次往来：只退它开启的那一次，之后有了新的往来就不动。 */
+function withdrawHostile(store: RelationStore, event: EventOf<"message.perceived">): RelationStore {
+  const hit = Object.entries(store.people).find(
+    ([, r]) =>
+      r.warmth.opened?.scope === event.scope && r.warmth.opened.messageId === event.messageId,
+  );
+  if (!hit) return store;
+  const [id, r] = hit;
+  const prior = r.warmth.opened?.prior;
+  const warmth: Warmth = prior
+    ? { ...r.warmth, ...prior, opened: null }
+    : { ...blankWarmth(), exchanges: r.warmth.exchanges };
+  return {
+    ...store,
+    people: {
+      ...store.people,
+      [id]: {
+        ...r,
+        seen: { ...r.seen, theirs: prior ? prior.theirs : 0 },
+        warmth,
+      },
+    },
+  };
+}
+
+function reduceRelations(
   state: RelationsState,
   world: View<"chats">,
   event: AliceEvent,
@@ -410,105 +440,16 @@ export function reduceRelations(
   // reduceStore 只换 people/groups，其余字段（waiting、addressed、sought、候选开关）原样带过来。
   const store = reduceStore(state, event, partnerOf) as RelationsState;
   switch (event.type) {
-    case "reaction.received": {
-      // 和世界折叠同一个条件：点在她这一轮还在等反应的话上（世界折叠之前的样子）。
-      const chat = before.chats[event.scope];
-      if (!event.senderId || !chat?.awaiting?.ids.includes(event.messageId))
-        return store === state ? state : store;
-      if (NEGATIVE_REACTIONS.has(event.emoji)) {
-        return withHurt(store, event.senderId, {
-          at: event.at,
-          scope: event.scope,
-          chatType: chat.chatType,
-          why: "cold",
-          gain: AVERSION_GAIN.cold,
-        });
-      }
-      // 正面、中性的表情是一次回应（轻，但有人看见了她、给了反应）。
-      return answer(store, event.senderId, event.at);
-    }
-    case "message.received": {
-      if (!event.directed) return store;
-      const here = state.waiting[event.scope] ?? [];
-      const sought = state.sought?.[event.scope] ?? [];
-      const seen = state.addressed?.[event.scope] ?? [];
-      const next: RelationsState = {
-        ...store,
-        addressed: {
-          ...state.addressed,
-          [event.scope]: [...seen, [event.messageId, event.senderId] as const].slice(
-            -ADDRESSED_KEPT,
-          ),
-        },
-        ...(sought.includes(event.senderId)
-          ? {}
-          : { sought: { ...state.sought, [event.scope]: [...sought, event.senderId] } }),
-      };
-      // 回复了她的话（不只是"冲着她"）也是一次回应。
-      const chat = world.chats[event.scope];
-      const last = chat?.receptions.at(-1);
-      const replied = last && last.at === event.at && last.kind === "replied";
-      return here.includes(event.senderId)
-        ? replied
-          ? answer(next, event.senderId, event.at)
-          : next
-        : withWaiting(replied ? answer(next, event.senderId, event.at) : next, event.scope, [
-            ...here,
-            event.senderId,
-          ]);
-    }
-    case "message.perceived": {
-      const who = state.addressed?.[event.scope]?.find(([id]) => id === event.messageId)?.[1];
-      // 口气冷淡、敌意的那条不算"有过来往"：她回了它也不算（从她上次开口以后找过她的人里拿掉）。
-      const cold = event.tone === "cold" || event.tone === "hostile";
-      const next =
-        cold && who
-          ? {
-              ...store,
-              sought: {
-                ...state.sought,
-                [event.scope]: (state.sought?.[event.scope] ?? []).filter((id) => id !== who),
-              },
-            }
-          : store;
-      if (!event.stop) return next;
-      const chatType = world.chats[event.scope]?.chatType;
-      if (!who || !chatType) return next;
-      return withHurt(next, who, {
-        at: event.at,
-        scope: event.scope,
-        chatType,
-        why: "stop",
-        gain: STOP.gain,
-      });
-    }
-    case "message.sent": {
-      // 她开口：在这里等她的人都算她回应过了（有过来往，affect 的 met）。
-      const sought = state.sought?.[event.scope] ?? [];
-      const after =
-        sought.length === 0
-          ? store
-          : {
-              ...store,
-              people: Object.fromEntries(
-                Object.entries(store.people).map(([id, r]) => [
-                  id,
-                  sought.includes(id)
-                    ? { ...r, warmth: { ...r.warmth, exchanges: r.warmth.exchanges + 1 } }
-                    : r,
-                ]),
-              ),
-            };
-      const next: RelationsState =
-        (state.waiting[event.scope]?.length ?? 0) > 0 ? withWaiting(after, event.scope, []) : after;
-      return sought.length === 0
-        ? next
-        : { ...next, sought: { ...state.sought, [event.scope]: [] } };
-    }
+    case "reaction.received":
+      return reacted(store, before, event);
+    case "message.received":
+      return event.directed ? addressed(state, store, world, event) : store;
+    case "message.perceived":
+      return perceived(state, store, world, event);
+    case "message.sent":
+      return spoke(state, store, event.scope);
     case "speech.decided":
-      return (state.waiting[event.scope]?.length ?? 0) > 0
-        ? withWaiting(store, event.scope, [])
-        : store;
+      return clearWaiting(state, store, event.scope);
     case "act.failed": {
       const chat = world.chats[event.scope];
       if (event.reason !== "refused" || chat?.chatType !== "private" || !chat.partner) return store;
@@ -523,6 +464,109 @@ export function reduceRelations(
     default:
       return store;
   }
+}
+
+/** 和世界 fold 同一个条件：点在她这一轮还在等反应的话上（before 是世界 fold 之前的样子）。 */
+function reacted(
+  store: RelationsState,
+  before: View<"chats">,
+  event: EventOf<"reaction.received">,
+): RelationsState {
+  const chat = before.chats[event.scope];
+  if (!event.senderId || !chat?.awaiting?.ids.includes(event.messageId)) return store;
+  if (NEGATIVE_REACTIONS.has(event.emoji)) {
+    return withHurt(store, event.senderId, {
+      at: event.at,
+      scope: event.scope,
+      chatType: chat.chatType,
+      why: "cold",
+      gain: AVERSION_GAIN.cold,
+    });
+  }
+  // 正面、中性的表情是一次回应（轻，但有人看见了她、给了反应）。
+  return answer(store, event.senderId, event.at);
+}
+
+/** 有人冲着她说话：记下是谁发的、他找过她、他在等她；回复了她的话（不只是"冲着她"）也是一次回应。 */
+function addressed(
+  state: RelationsState,
+  store: RelationsState,
+  world: View<"chats">,
+  event: EventOf<"message.received">,
+): RelationsState {
+  const here = state.waiting[event.scope] ?? [];
+  const sought = state.sought?.[event.scope] ?? [];
+  const seen = state.addressed?.[event.scope] ?? [];
+  const next: RelationsState = {
+    ...store,
+    addressed: {
+      ...state.addressed,
+      [event.scope]: [...seen, [event.messageId, event.senderId] as const].slice(-ADDRESSED_KEPT),
+    },
+    ...(sought.includes(event.senderId)
+      ? {}
+      : { sought: { ...state.sought, [event.scope]: [...sought, event.senderId] } }),
+  };
+  const last = world.chats[event.scope]?.receptions.at(-1);
+  const replied = last && last.at === event.at && last.kind === "replied";
+  const answered = replied ? answer(next, event.senderId, event.at) : next;
+  return here.includes(event.senderId)
+    ? answered
+    : withWaiting(answered, event.scope, [...here, event.senderId]);
+}
+
+function perceived(
+  state: RelationsState,
+  store: RelationsState,
+  world: View<"chats">,
+  event: EventOf<"message.perceived">,
+): RelationsState {
+  const who = state.addressed?.[event.scope]?.find(([id]) => id === event.messageId)?.[1];
+  // 口气冷淡、敌意的那条不算"有过来往"：她回了它也不算（从她上次开口以后找过她的人里去掉）。
+  const cold = event.tone === "cold" || event.tone === "hostile";
+  const next =
+    cold && who
+      ? {
+          ...store,
+          sought: {
+            ...state.sought,
+            [event.scope]: (state.sought?.[event.scope] ?? []).filter((id) => id !== who),
+          },
+        }
+      : store;
+  if (!event.stop) return next;
+  const chatType = world.chats[event.scope]?.chatType;
+  if (!who || !chatType) return next;
+  return withHurt(next, who, {
+    at: event.at,
+    scope: event.scope,
+    chatType,
+    why: "stop",
+    gain: STOP.gain,
+  });
+}
+
+/** 她开口：在这里等她的人都算她回应过了（有过来往，affect 的 met）。 */
+function spoke(state: RelationsState, store: RelationsState, scope: string): RelationsState {
+  const sought = state.sought?.[scope] ?? [];
+  if (sought.length === 0) return clearWaiting(state, store, scope);
+  const after = {
+    ...store,
+    people: Object.fromEntries(
+      Object.entries(store.people).map(([id, r]) => [
+        id,
+        sought.includes(id)
+          ? { ...r, warmth: { ...r.warmth, exchanges: r.warmth.exchanges + 1 } }
+          : r,
+      ]),
+    ),
+  };
+  return { ...clearWaiting(state, after, scope), sought: { ...state.sought, [scope]: [] } };
+}
+
+/** 她开口或做了决定：这个会话里不再有人在等她（state 是这次 fold 之前的）。 */
+function clearWaiting(state: RelationsState, next: RelationsState, scope: string): RelationsState {
+  return (state.waiting[scope]?.length ?? 0) > 0 ? withWaiting(next, scope, []) : next;
 }
 
 /** 记一次回应：他最近一次回应她的时刻。 */
@@ -540,7 +584,7 @@ function answer(state: RelationsState, id: string, at: number): RelationsState {
 
 // ── 视图 ─────────────────────────────────────────────────────────────
 
-/** 意愿层自己的结局（想过、决定先不）：不是关系，留在世界底座的 willingness 上。 */
+/** 意愿层自己的结局（想过、决定先不）：不是关系，留在世界 base 的 willingness 上。 */
 export interface Willingness {
   consideredAt: number;
   declines: number;
@@ -833,7 +877,7 @@ const relationContribute = ({
   world,
   chat,
   now,
-}: Parameters<NonNullable<PressureFeature["contribute"]>>[0]): Contribution[] => {
+}: FeatureContext<View<"relations" | "chats">>): Contribution[] => {
   const people = stopNotes(world, chat.scope, now);
   return people.length === 0
     ? []
@@ -854,7 +898,7 @@ const relationBase = {
   contribute: relationContribute,
 };
 
-/** 候选（第 4 片）：层级从熟悉度分档。只改读法（tierOf 读 relations.tierFromFamiliarity），不改折叠。 */
+/** 候选（第 4 片）：层级从熟悉度分档。只改读法（tierOf 读 relations.tierFromFamiliarity），不改 fold。 */
 function relationOf(options: RelationOptions): PressureFeature {
   const open = (world: View<"relations" | "chats">, _event: AliceEvent) =>
     world.relations.tierFromFamiliarity
@@ -871,7 +915,7 @@ function relationOf(options: RelationOptions): PressureFeature {
   });
 }
 
-export interface RelationOptions {
+interface RelationOptions {
   /**
    * 候选（docs/research/relationship.md 第 4 片）：层级从校准过的联系频率分档，而不是排名。
    * 生产是 false（排名），等量过再换。
@@ -884,8 +928,3 @@ export const relation: PressureFeature = relationOf({});
 
 /** 候选第 4 片：层级从熟悉度来（world.ts tierOf 读 relations.tierFromFamiliarity）。 */
 export const relationTier: PressureFeature = relationOf({ tierFromFamiliarity: true });
-
-/** 造一个候选：relation({ tierFromFamiliarity: true }) 与 relationTier 同义。 */
-export function createRelation(options: RelationOptions = {}): PressureFeature {
-  return options.tierFromFamiliarity ? relationOf({ tierFromFamiliarity: true }) : relation;
-}

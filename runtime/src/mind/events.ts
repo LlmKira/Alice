@@ -27,28 +27,33 @@ export interface MessageReceived {
   replyToMessageId: string | null;
   /** 私聊、回复了 Alice、或点名了 Alice。 */
   directed: boolean;
+  /**
+   * 平台给了结构化的 @，@ 的是别人、不是她（QQ 的 at 段）。没有结构化 @ 的平台不写，
+   * 由文字里的 @用户名 判断（pressure/group-filter.ts）。旧数据没有。
+   */
+  mentionsOther?: true;
   /** 群名（群里的消息才有；旧数据没有）。 */
   chatTitle?: string;
-  /** 发消息的是 Telegram 标着的机器人账号（只在是的时候写；旧数据没有）。 */
+  /** 发消息的是平台标着的机器人账号（只在是的时候写；旧数据没有）。 */
   isBot?: true;
-  /** 转发来的：原来是谁发的（Telegram 在消息上显示的名字）。旧数据没有。 */
+  /** 转发来的：原来是谁发的（平台在消息上显示的名字）。旧数据没有。 */
   forwardedFrom?: string;
   /** 贴纸所在的那套贴纸的标题（外壳查过、记着的；没查到时晚一点由 message.updated 补）。 */
   stickerSet?: string;
-  /** 收到时已经被改过（补拉来的消息；Telegram 标了不显示"已编辑"的不算）。 */
+  /** 收到时已经被改过（补拉来的消息；平台标了不显示"已编辑"的不算）。 */
   edited?: true;
   /** 收到时消息上已有的表情反应（补拉来的消息）。 */
   reactions?: readonly Reacted[];
 }
 
-/** 一条消息上的一种表情反应和点它的人数（Telegram 给的合计）。 */
+/** 一条消息上的一种表情反应和点它的人数（平台给的合计）。 */
 export interface Reacted {
   emoji: string;
   count: number;
 }
 
 /**
- * 她已经收到的一条消息后来在 Telegram 上的样子变了：被改了（text 是改后的话）、表情反应的合计变了（reactions
+ * 她已经收到的一条消息后来在平台上的样子变了：被改了（text 是改后的话）、表情反应的合计变了（reactions
  * 是现在的全部，空表示都撤了）、贴纸那套的标题查到了。只写变了的那几样。不叫醒她。
  */
 export interface MessageUpdated {
@@ -63,7 +68,7 @@ export interface MessageUpdated {
 }
 
 /**
- * 她在的一个群在 Telegram 上公开的样子（群里每个人都看得到的）：多少人、谁是群主和管理员（头衔）、
+ * 她在的一个群在平台上公开的样子（群里每个人都看得到的）：多少人、谁是群主和管理员（头衔）、
  * 她在这里发不了哪几种消息（群的禁发设置，或单独对她的限制）。外壳查到、和上次不同时写一条。不叫醒她。
  */
 export interface ChatDescribed {
@@ -76,7 +81,7 @@ export interface ChatDescribed {
   banned: readonly PostKind[];
 }
 
-/** Alice 自己的一条消息已经送达。 */
+/** Alice 自己的一条消息已经发出去了。 */
 export interface MessageSent {
   type: "message.sent";
   at: number;
@@ -117,7 +122,7 @@ export interface SpeechFailed {
 }
 
 /** 交出去办的事（登记表 via: "errand"）开始办了；办完是 act.done（带 result）或 act.failed。 */
-export interface ActStarted {
+interface ActStarted {
   type: "act.started";
   at: number;
   scope: string;
@@ -188,13 +193,13 @@ export interface ReactionReceived {
   at: number;
   scope: string;
   messageId: string;
-  /** 点表情的人；Telegram 没给出时为 null。 */
+  /** 点表情的人；平台没给出时为 null。 */
   senderId: string | null;
   emoji: string;
 }
 
 /**
- * 负面的表情（Telegram 给的有限集合里看得出是嫌弃、生气、嘲笑的那几个）。世界折叠把它记成一次轻的拒绝，
+ * 负面的表情（平台给的有限集合里看得出是嫌弃、生气、嘲笑的那几个）。世界 fold 把它记成一次轻的拒绝，
  * 北极星读数把点它的人记成嫌弃的信号：两处读同一张表。
  */
 export const NEGATIVE_REACTIONS: ReadonlySet<string> = new Set([
@@ -223,7 +228,7 @@ export interface MembershipChanged {
  * - reflect：写进日记的 0–2 条，about 是联系人 id（null 是不针对谁），importance 是她自己打的 1–10 分。
  * - life：每天醒来写的今天具体活动、0–2 件小事与跨天在做的事（只读她的生活，读不到任何聊天）。
  */
-export interface ReflectPonder {
+interface ReflectPonder {
   kind: "reflect";
   scope: string;
   /**
@@ -237,8 +242,8 @@ export interface ReflectPonder {
     private?: true;
   }>;
   /**
-   * 写完日记时她的心情（她自己的词）和原因；和她自己记下心情（tools.feel）一样折进心情。valence 是外壳问判口气的
-   * 模型得到的效价（llm/tone.ts perceiveMood）；判不出时没有，这份心情就不折进去。private 同 entries。
+   * 写完日记时她的心情（她自己的词）和原因；和她自己记下心情（tools.feel）一样 fold 进心情。valence 是外壳问判口气的
+   * 模型得到的效价（llm/tone.ts perceiveMood）；判不出时没有，这份心情就不 fold 进去。private 同 entries。
    */
   mood?: { word: string; why: string | null; valence?: number; private?: true };
   /** 请求里问了 learn（people）时，顺手记下的关于人的事。 */
@@ -283,7 +288,7 @@ export interface ClockTick {
 }
 
 /** step() 之前要求的计时到点了。过期的计时（id 对不上）会被忽略。 */
-export interface TimerFired {
+interface TimerFired {
   type: "timer.fired";
   at: number;
   scope: string;
@@ -343,7 +348,7 @@ export interface NoiseDrawn {
 }
 
 /**
- * 别人进了这个群（Telegram 的入群提示：被拉进来、点邀请链接进来）。不叫醒她、不进时间线；
+ * 别人进了这个群（平台的入群提示：被拉进来、点邀请链接进来）。不叫醒她、不进时间线；
  * 机制靠它分清"刚进群的人"和"在她的记录之前就在群里的人"（候选 familiar 读它）。
  */
 export interface MemberJoined {
@@ -354,20 +359,9 @@ export interface MemberJoined {
 }
 
 /**
- * 她看了这个会话一眼（System 1，没有调用模型）：节律到点时，意愿层在这里排第一的只是看一眼就能缓解的拉力
- * （未读，Mechanism.glance）。外壳收到 step() 的 glance 副作用就写这一条；之后的消耗（未读清零、习惯化）
- * 和 Telegram 那边的标已读都从它来，所以回放读得回她看过哪里。
- */
-export interface ChatGlanced {
-  type: "chat.glanced";
-  at: number;
-  scope: string;
-}
-
-/**
  * 线上轮换（mind/rotation.ts）：这个分组单位（一个会话，或 "self"：她这个人）从此刻起用哪一套。外壳在时钟格之前
  * 算出该换的（她在那里不在对话里、这个时间段排的组和现在的不同），先写这一条再走时钟；step 只照它换，
- * 所以折叠、回放和北极星读的是同一份分组。arm 为 null：轮换关了，这个单位回到只有生产。
+ * 所以 fold、回放和北极星读的是同一份分组。arm 为 null：轮换关了，这个单位回到只有生产。
  */
 export interface ArmSwitched {
   type: "arm.switched";
@@ -422,6 +416,5 @@ export type AliceEvent =
   | TimerFired
   | NoiseDrawn
   | MemberJoined
-  | ChatGlanced
   | TypingReceived
   | HistoryRead;

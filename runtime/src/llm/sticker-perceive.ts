@@ -3,7 +3,7 @@
  *
  * 每张贴纸只花一次看图模型的钱：一条很短的中文 JSON 说清楚画的是什么、图上的字或梗、什么情绪，
  * 之后写进时间线的那一行（"贴纸 😂（柴郡猫日常）：猫猫捂嘴偷笑「笑死」"）。缓存先看这张贴纸的
- * file_unique_id（Telegram 上同一张贴纸共用它），有 SQLite 时同时落盘，测试里给 :memory: 就走同一个表。
+ * 平台加 file_unique_id 的键（同一平台上同一张贴纸共用它），有 SQLite 时同时落盘，测试里给 :memory: 就走同一个表。
  *
  * 这里在 llm/ 下：可以调网关、可以用 better-sqlite3；时间只为缓存行（created_at）读一次时钟。
  */
@@ -22,7 +22,7 @@ export interface StickerPerception {
   emotion: string;
 }
 
-/** Telegram 随消息给的、能帮着看懂的两样。 */
+/** 平台随消息给的、能帮着看懂的两样（QQ 表情包的说明文字也放在 emoji 里）。 */
 export interface StickerMeta {
   /** 贴纸自带的表情（"😂"）。 */
   emoji?: string;
@@ -58,7 +58,7 @@ const clip = (s: string, n: number): string => {
 /** 看图模型收到的提示：只回 JSON，三样都短。 */
 function askFor(meta: StickerMeta): string {
   const hints = [
-    meta.emoji ? `Telegram 上这张贴纸标的表情是 ${meta.emoji}` : "",
+    meta.emoji ? `这张贴纸标的表情是 ${meta.emoji}` : "",
     meta.setTitle ? `它属于《${meta.setTitle}》这套贴纸` : "",
   ].filter(Boolean);
   return [
@@ -81,7 +81,7 @@ function mimeOf(bytes: Uint8Array): string {
 /** 模型可能包一层 ```json 围栏，或先写半句再给 JSON。 */
 function unfence(raw: string): string {
   const trimmed = raw.trim();
-  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed);
+  const fenced = /^```(?:json)?([\s\S]*?)```$/i.exec(trimmed);
   return (fenced?.[1] ?? trimmed).trim();
 }
 
@@ -102,21 +102,25 @@ function parseSticker(raw: string): StickerPerception {
     } catch {
       continue; // 不是 JSON：试下一个候选，都不行就用整段话。
     }
-    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-    const o = value as Record<string, unknown>;
-    const summary = typeof o.summary === "string" ? plain(o.summary) : "";
-    const caption = typeof o.text === "string" ? plain(o.text) : "";
-    const emotion = typeof o.emotion === "string" ? plain(o.emotion) : "";
-    const line = summary || caption || emotion;
-    // JSON 读得懂但没有一句能用的：和空回复一样算没看到，不把原始 JSON 写进时间线。
-    if (!line) throw new Error("sticker-perceive: empty");
-    return {
-      summary: clip(line, SUMMARY_CHARS),
-      text: caption || null,
-      emotion,
-    };
+    if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
+    return perceptionOf(value as Record<string, unknown>);
   }
   return { summary: clip(text, SUMMARY_CHARS), text: null, emotion: "" };
+}
+
+/** 读得懂的 JSON 对象：描述缺了就拿贴纸上的字或情绪顶上。 */
+function perceptionOf(o: Record<string, unknown>): StickerPerception {
+  const summary = typeof o.summary === "string" ? plain(o.summary) : "";
+  const caption = typeof o.text === "string" ? plain(o.text) : "";
+  const emotion = typeof o.emotion === "string" ? plain(o.emotion) : "";
+  const line = summary || caption || emotion;
+  // JSON 读得懂但没有一句能用的：和空回复一样算没看到，不把原始 JSON 写进时间线。
+  if (!line) throw new Error("sticker-perceive: empty");
+  return {
+    summary: clip(line, SUMMARY_CHARS),
+    text: caption || null,
+    emotion,
+  };
 }
 
 /** 看一张贴纸：一次很短的多模态调用，回复按 parseSticker 解析。 */
@@ -147,7 +151,7 @@ export async function describeSticker(
     },
   });
   const content = body.choices?.[0]?.message?.content;
-  if (typeof content !== "string") throw new Error("sticker-perceive: empty");
+  if (typeof content !== "string") throw new TypeError("sticker-perceive: empty");
   return parseSticker(content);
 }
 
@@ -193,8 +197,8 @@ type DatabaseHandle = InstanceType<typeof Database>;
 
 /** 缓存表的两个动作：查询和覆盖写入。没有数据库时整条缓存只走内存里的 Map。 */
 interface StickerQueries {
-  read(fileUniqueId: string): StickerRow | undefined;
-  write(fileUniqueId: string, p: StickerPerception, at: number): void;
+  read: (fileUniqueId: string) => StickerRow | undefined;
+  write: (fileUniqueId: string, p: StickerPerception, at: number) => void;
 }
 
 /**
@@ -270,7 +274,7 @@ export class StickerCache {
         emotion: r.emotion,
       }));
     }
-    return [...this.mem.entries()].map(([fileUniqueId, p]) => ({ fileUniqueId, ...p }));
+    return Array.from(this.mem.entries(), ([fileUniqueId, p]) => ({ fileUniqueId, ...p }));
   }
 
   /** 只关掉这里自己打开的数据库（外面传进来的实例由外面关）。 */

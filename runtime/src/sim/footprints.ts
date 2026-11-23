@@ -1,16 +1,17 @@
 /**
- * 每个生产机制应该留下的足迹（普查 census.ts 读这张表）。一项一个足迹：在哪里看、怎么数、期望多少。
- * 新机制加进注册表之前先在这里写下自己的足迹（candidate-process.md 的仿真关）；test/census.test.ts 查每个生产机制
+ * 每个生产机制应该留下的 footprint（普查 census.ts 读这张表）。一项一个 footprint：在哪里看、怎么数、期望多少。
+ * 新机制加进注册表之前先在这里写下自己的 footprint（candidate-process.md 的仿真关）；test/census.test.ts 查每个生产机制
  * 至少有一项。
  *
  * 量法（measure）：
  * - prompt：发言调用的提示词里有这段（正则），数占比（chat 限定群或私聊）；
  * - act：她做这个动作，数每天几次；
  * - wake：这一类叫醒（calls.jsonl 的 kind），数每天几次；
- * - dwell：对话里的足迹（dwell.jsonl）：floor-wakes 是在对话里被没点名的消息叫醒的次数每天几次，passed-by 是
+ * - dwell：对话里的 footprint（dwell.jsonl）：floor-wakes 是在对话里被没点名的消息叫醒的次数每天几次，passed-by 是
  *   对话走过她才结束的段占几成；
  * - in-bed：她选去睡（go_to_bed）之后、到作息的下一次醒来之前（bedtime.ts nextWake）的叫醒。unsought-group 是被群里
- *   没找她的话叫醒（kind 为 group-floor、group-follow）的次数；not-woken 是提示词里没写"被消息吵醒了"的次数。
+ *   没找她的话叫醒（kind 为 group-floor、group-follow）的次数；not-woken 是提示词里没写"被消息吵醒了"的次数：调用记着 asleep
+ *   的运行只数被消息叫醒的；旧的运行分不清她当时睡没睡着，时段里按时钟格醒来的那次也算。
  *   睡着时只有找她的话能把她叫起来（睡眠代价按深度），叫起来时她知道自己是被吵醒的；
  * - waited：被一条消息叫醒的调用里，调用晚于记录里最后一条的占比（等对方说完才想）。
  * - readback：她在一个会话里写过想法（<inner>）、那段对话还在时，之后这个会话里的调用把它读回的占比
@@ -23,11 +24,11 @@
  *   每个会话只留这么多），每次调用最多这么多条。
  * - audience：卡片上每一行"想过："按来源重算受众规则，违反的行数。不带"在群里"的，要有这个会话里更早的一条
  *   想法字面对得上；带"在群里"的，要在私聊里，有一条群里的想法字面对得上、离现在不到 CARRY_FOR，私聊的对方
- *   写下时在那个群里。替身想的都是"……"，普查里只查得出标签和规则；线上折叠的想法是真的，逐字查。
+ *   写下时在那个群里。替身想的都是"……"，普查里只查得出标签和规则；线上 fold 的想法是真的，逐字查。
  *   想法写下的那一刻比调用晚（回放里同时，线上晚几秒到一分钟），那一刻谁在场拿不准：carried 只算调用时和
  *   WRITE_SLACK 之后都在的人（保守），audience 算两头任一时在的人（宽）。
  * - repeat-carried：卡片上带着"在群里想过："的调用里，她这一轮的话（说的、想的）和带来的某一行有 chars 字以上
- *   连着一样的占比（复读；2 月第 3 代把独白带到所有会话时逐字重复 23%，emotion/prereg-diary.md）。桩说的是占位
+ *   连着一样的占比（复读；2 月第 3 代把独白带到所有会话时逐字重复 23%，emotion/prereg-diary.md）。stub 说的是占位
  *   文字，只有真模型的读数有意义。
  * - latency、coverage、away、group-turns：时机，口径同 eval-artifacts/life/readout.py 与 lambda0-scan 的 scan_lib，
  *   读普查从数据集里给的"找她的消息"（directed，按回放的样子：她的旧话删掉后，回她的话除非点名不再算找她；窗口最后
@@ -218,7 +219,7 @@ export const FOOTPRINTS: readonly Footprint[] = [
     source: "设计",
   },
   {
-    // 只报：桩说的是占位文字，只有真模型的读数有意义（第 3 片 1/27，预注册上限 10%）。
+    // 只报：stub 说的是占位文字，只有真模型的读数有意义（第 3 片 1/27，预注册上限 10%）。
     mechanism: "pressure.thought",
     footprint: "复读：私聊里她的话和带来的想法连着 8 字以上一样",
     measure: { type: "repeat-carried", chars: 8 },
@@ -341,6 +342,22 @@ export const FOOTPRINTS: readonly Footprint[] = [
     expect: { min: 0.95 },
     source: "设计",
   },
+  {
+    mechanism: "sticker-bag",
+    footprint: "手头可用的贴纸视觉清单",
+    measure: { type: "prompt", where: "system", pattern: "手头贴纸有：" },
+    expect: { min: 0 },
+    source: "设计",
+    reportOnly: true,
+  },
+  {
+    mechanism: "pressure.attachment",
+    footprint: "长期牵挂与深疤只调意愿强度，不另写提示词行",
+    measure: { type: "prompt", where: "user", pattern: ".*" },
+    expect: { min: 0 },
+    source: "设计",
+    reportOnly: true,
+  },
   // PLAN 第 44 件（docs/research/desire-2026-11-13.md）：第六遍普查里每天摆出约 10 件、说出约 3 次。
   {
     mechanism: "pressure.desire",
@@ -423,7 +440,11 @@ export const FOOTPRINTS: readonly Footprint[] = [
   {
     mechanism: "room-voice",
     footprint: "这个群的人平时怎么打字（群聊够了冷启动门槛才有）",
-    measure: { type: "prompt", where: "system", pattern: "这个群的人平时怎么打字" },
+    measure: {
+      type: "prompt",
+      where: "system",
+      pattern: "这个群的人平时怎么打字|群友之间的几段接话",
+    },
     // real-v1 开发集的群聊时刻 81/94 有（docs/adr/282-speech-style-and-room-voice.md）；私聊和小群没有。
     expect: present,
     source: "设计",
@@ -488,7 +509,7 @@ export const FOOTPRINTS: readonly Footprint[] = [
   },
   {
     // 只报：长短不是标准，不真实的长篇大论才是（北极星）。参照是 2 月 B 各群发言量前 25% 的人，每人每条字数的
-    // 中位取 p25–p75（6–14，p90 31，eval-artifacts/exec-mode/prereg-loop.md）。桩发的是占位文字，只有线上读数有意义。
+    // 中位取 p25–p75（6–14，p90 31，eval-artifacts/exec-mode/prereg-loop.md）。stub 发的是占位文字，只有线上读数有意义。
     mechanism: "speech",
     footprint: "群里每条字数（中位），对活跃档",
     measure: { type: "line-chars", chat: "group" },
@@ -516,7 +537,19 @@ export interface RunFiles {
       thought?: unknown;
     }>;
   }>;
-  prompts: ReadonlyArray<{ scope: string; at: number; system: string; user: string }>;
+  prompts: ReadonlyArray<{
+    scope: string;
+    at: number;
+    system: string;
+    user: string;
+    tools?: ReadonlyArray<{
+      function?: {
+        name?: string;
+        description?: string;
+        parameters?: { properties?: { action?: { enum?: readonly string[] } } };
+      };
+    }>;
+  }>;
   dwell: ReadonlyArray<{
     t: "inside" | "end";
     scope: string;
@@ -540,21 +573,13 @@ export interface RunFiles {
 
 const UNSOUGHT_GROUP = new Set(["group-floor", "group-follow"]);
 
-/** 一项足迹在一次运行里的读数（占比或每天次数）；分母为 0 时是 null。 */
+type MeasureOf<T extends Measure["type"]> = Extract<Measure, { type: T }>;
+
+/** 一项 footprint 在一次运行里的读数（占比或每天次数）；分母为 0 时是 null。 */
 export function measure(m: Measure, run: RunFiles): number | null {
-  const inChat = (chat: string | undefined, c: { chatType?: string; user?: string }) =>
-    !chat ||
-    (c.chatType
-      ? c.chatType === chat
-      : /^[─ ]*Telegram 群/.test(c.user ?? "") === (chat === "group"));
   switch (m.type) {
-    case "prompt": {
-      const re = new RegExp(m.pattern, "m");
-      const rows = run.prompts.filter((p) => inChat(m.chat, p));
-      return rows.length === 0
-        ? null
-        : rows.filter((p) => re.test(p[m.where])).length / rows.length;
-    }
+    case "prompt":
+      return promptShare(m, run);
     case "act":
       return (
         run.calls
@@ -563,18 +588,8 @@ export function measure(m: Measure, run: RunFiles): number | null {
       );
     case "wake":
       return run.calls.filter((c) => c.kind === m.kind).length / run.days;
-    case "dwell": {
-      if (m.what === "passed-by") {
-        const ends = run.dwell.filter((d) => d.t === "end");
-        return ends.length === 0
-          ? null
-          : ends.filter((d) => d.why === "passed-by").length / ends.length;
-      }
-      const inside = new Set(
-        run.dwell.filter((d) => d.t === "inside").map((d) => `${d.scope}/${d.id}`),
-      );
-      return run.calls.filter((c) => inside.has(`${c.scope}/${c.trigger}`)).length / run.days;
-    }
+    case "dwell":
+      return dwellMeasure(m, run);
     case "waited": {
       const woken = run.calls.filter((c) => c.trigger !== null && c.lastMessageAt != null);
       return woken.length === 0
@@ -589,57 +604,18 @@ export function measure(m: Measure, run: RunFiles): number | null {
       return audience(run);
     case "repeat-carried":
       return repeatCarried(run, m.chars);
-    case "line-chars": {
-      const lengths = run.calls
-        .filter((c) => inChat(m.chat, c))
-        .flatMap((c) => c.acts)
-        .flatMap((a) =>
-          (a.kind === "send" || a.kind === "voice") && typeof a.text === "string"
-            ? [[...a.text].length]
-            : [],
-        )
-        .sort((x, y) => x - y);
-      if (lengths.length === 0) return null;
-      const mid = lengths.length >> 1;
-      return lengths.length % 2
-        ? (lengths[mid] as number)
-        : ((lengths[mid - 1] as number) + (lengths[mid] as number)) / 2;
-    }
-    case "quoted": {
-      const known = new Set((run.messages ?? []).map((x) => `${x.scope}|${x.id}`));
-      let asked = 0;
-      let seen = 0;
-      for (const p of run.prompts) {
-        if (!inChat("group", p)) continue;
-        const trigger = /\[([^\]\n]+)\] 之后，轮到你了/.exec(p.user)?.[1];
-        const line = trigger && p.user.split("\n").find((l) => l.includes(`[${trigger}] <`));
-        const quoted = line && /（回复 \[([^\]\n]+)\]）/.exec(line)?.[1];
-        if (!quoted || !known.has(`${p.scope}|${quoted}`)) continue;
-        asked++;
-        if (p.user.includes(`[${quoted}] <`)) seen++;
-      }
-      return asked === 0 ? null : seen / asked;
-    }
+    case "line-chars":
+      return lineChars(m, run);
+    case "quoted":
+      return quotedShare(run);
     case "latency": {
       const awake = (run.directed ?? []).filter((e) => !isAsleep(e.at));
       if (awake.length === 0) return null;
       const lat = latencies(run, awake);
       return lat.filter((x) => x >= MIN && x <= 15 * MIN).length / lat.length;
     }
-    case "reply-latency": {
-      const sentAt = new Map((run.messages ?? []).map((x) => [`${x.scope}/${x.id}`, x.at]));
-      const delays = run.calls
-        .filter((c) => c.chatType === "group")
-        .flatMap((c) =>
-          c.acts.flatMap((a) => {
-            const t = a.replyTo ? sentAt.get(`${c.scope}/${a.replyTo}`) : undefined;
-            return t !== undefined && c.at > t && c.at - t < DAY ? [c.at - t] : [];
-          }),
-        )
-        .sort((a, b) => a - b);
-      if (delays.length === 0) return null;
-      return (delays[Math.floor(m.quantile * (delays.length - 1))] as number) / MIN;
-    }
+    case "reply-latency":
+      return replyLatency(m, run);
     case "coverage": {
       const all = (run.directed ?? []).filter(
         (e) => !m.chat || e.scope.startsWith("telegram:-") === (m.chat === "group"),
@@ -647,94 +623,204 @@ export function measure(m: Measure, run: RunFiles): number | null {
       if (all.length === 0) return null;
       return latencies(run, all).filter((x) => x <= (m.minutes ?? 10) * MIN).length / all.length;
     }
-    case "away": {
-      if (run.calls.length === 0) return null;
-      const times = run.calls
-        .filter((c) => c.acts.some((a) => VISIBLE.has(a.kind)) && !isAsleep(c.at))
-        .map((c) => c.at)
-        .sort((a, b) => a - b);
-      let n = 0;
-      for (let i = 1; i < times.length; i++) {
-        const [a, b] = [times[i - 1] as number, times[i] as number];
-        if (b - a < m.minutes * MIN || b - a <= BOUT_GAP || localDay(a) !== localDay(b)) continue;
-        let slept = false;
-        for (let t = a; t < b && !slept; t += 5 * MIN) slept = isAsleep(t);
-        if (!slept) n++;
-      }
-      return n / run.days;
-    }
+    case "away":
+      return awayPerDay(m, run);
     case "group-turns": {
       const groups = run.groups ?? [];
       if (groups.length === 0) return null;
-      const perGroup = groups.map((g) => {
-        const ts = run.calls
-          .filter(
-            (c) => c.scope === g && c.acts.some((a) => a.kind === "send" || a.kind === "sticker"),
-          )
-          .map((c) => c.at)
-          .sort((a, b) => a - b);
-        return (
-          ts.filter((t, i) => i === 0 || t - (ts[i - 1] as number) > TURN_GAP).length / run.days
-        );
-      });
+      const perGroup = groups.map(
+        (g) => turnCount(run.calls.filter((c) => c.scope === g)) / run.days,
+      );
       return perGroup.reduce((s, x) => s + x, 0) / groups.length;
     }
-    case "group-band": {
-      const groups = run.groups ?? [];
-      const msgs = run.messages ?? [];
-      if (groups.length === 0 || msgs.length === 0) return null;
-      const until = Math.max(...msgs.map((x) => x.at));
-      const from = until - run.days * DAY;
-      const inBand = groups.flatMap((g) => {
-        const counts = new Map<string, number>();
-        let last: { from: string; at: number } | null = null;
-        for (const x of msgs
-          .filter((x) => x.scope === g && x.at >= from)
-          .sort((a, b) => a.at - b.at)) {
-          if (!last || last.from !== x.from || x.at - last.at > TURN_GAP)
-            counts.set(x.from, (counts.get(x.from) ?? 0) + 1);
-          last = x;
-        }
-        const top = [...counts.values()].sort((a, b) => b - a);
-        if (top.length < 4) return [];
-        const quarter = top.slice(0, Math.ceil(top.length / 4)).sort((a, b) => a - b);
-        const p90 =
-          quarter[Math.min(quarter.length - 1, Math.floor(0.9 * (quarter.length - 1) + 0.5))] ?? 0;
-        const ts = run.calls
-          .filter(
-            (c) =>
-              c.scope === g &&
-              c.at >= from &&
-              c.at <= until &&
-              c.acts.some((a) => a.kind === "send" || a.kind === "sticker"),
-          )
-          .map((c) => c.at)
-          .sort((a, b) => a - b);
-        const hers = ts.filter((t, i) => i === 0 || t - (ts[i - 1] as number) > TURN_GAP).length;
-        return [hers <= p90 ? 1 : 0];
-      });
-      return inBand.length === 0 ? null : inBand.reduce((s, x) => s + x, 0) / inBand.length;
-    }
-    case "in-bed": {
-      const hasAsleep = run.calls.some((c) => c.asleep !== undefined);
-      if (hasAsleep) {
-        const asleep = run.calls.filter((c) => c.asleep === true);
-        if (m.what === "unsought-group")
-          return asleep.filter((c) => UNSOUGHT_GROUP.has(c.kind)).length;
-        const prompt = new Map(run.prompts.map((p) => [`${p.scope}@${p.at}`, p.user]));
-        return asleep.filter(
-          (c) => c.trigger !== null && !prompt.get(`${c.scope}@${c.at}`)?.includes("被消息吵醒了"),
-        ).length;
-      }
-      const beds = run.calls.filter((c) => c.acts.some((a) => a.kind === "bed")).map((c) => c.at);
-      const inBed = run.calls.filter((c) => beds.some((b) => c.at > b && c.at < nextWake(b)));
-      if (m.what === "unsought-group")
-        return inBed.filter((c) => UNSOUGHT_GROUP.has(c.kind)).length;
-      const prompt = new Map(run.prompts.map((p) => [`${p.scope}@${p.at}`, p.user]));
-      return inBed.filter((c) => !prompt.get(`${c.scope}@${c.at}`)?.includes("被消息吵醒了"))
-        .length;
-    }
+    case "group-band":
+      return groupBand(run);
+    case "in-bed":
+      return inBed(m, run);
   }
+}
+
+/** 调用或提示词在不在这一类会话里：有 chatType 看它，没有就看提示词开头是不是群。 */
+function inChat(chat: string | undefined, c: { chatType?: string; user?: string }): boolean {
+  if (!chat) return true;
+  if (c.chatType) return c.chatType === chat;
+  return /^[─ ]*Telegram 群/.test(c.user ?? "") === (chat === "group");
+}
+
+function systemWithTools(p: RunFiles["prompts"][number]): string {
+  if (!p.tools || p.tools.length === 0) return p.system;
+  const lines = p.tools.flatMap((t) => {
+    const fn = t.function;
+    if (!fn?.name) return [];
+    const desc = fn.description ?? "";
+    const actions = fn.parameters?.properties?.action?.enum ?? [];
+    return [`  ${fn.name}: ${desc}`, ...actions.map((a) => `  ${a}: `)];
+  });
+  return `${p.system}\n${lines.join("\n")}`;
+}
+
+function promptShare(m: MeasureOf<"prompt">, run: RunFiles): number | null {
+  const re = new RegExp(m.pattern, "m");
+  const rows = run.prompts.filter((p) => inChat(m.chat, p));
+  return rows.length === 0
+    ? null
+    : rows.filter((p) => re.test(m.where === "system" ? systemWithTools(p) : p.user)).length /
+        rows.length;
+}
+
+function dwellMeasure(m: MeasureOf<"dwell">, run: RunFiles): number | null {
+  if (m.what === "passed-by") {
+    const ends = run.dwell.filter((d) => d.t === "end");
+    return ends.length === 0
+      ? null
+      : ends.filter((d) => d.why === "passed-by").length / ends.length;
+  }
+  const inside = new Set(
+    run.dwell.filter((d) => d.t === "inside").map((d) => `${d.scope}/${d.id}`),
+  );
+  return run.calls.filter((c) => inside.has(`${c.scope}/${c.trigger}`)).length / run.days;
+}
+
+/** 她发出去的每条文字（说的话、语音）的字数的中位。 */
+function lineChars(m: MeasureOf<"line-chars">, run: RunFiles): number | null {
+  const lengths = run.calls
+    .filter((c) => inChat(m.chat, c))
+    .flatMap((c) => c.acts)
+    .flatMap((a) =>
+      (a.kind === "send" || a.kind === "voice") && typeof a.text === "string"
+        ? [[...a.text].length]
+        : [],
+    )
+    .sort((x, y) => x - y);
+  if (lengths.length === 0) return null;
+  const mid = lengths.length >> 1;
+  return lengths.length % 2
+    ? (lengths[mid] as number)
+    : ((lengths[mid - 1] as number) + (lengths[mid] as number)) / 2;
+}
+
+/** 群里叫醒她的那条引用回复的那一句，有没有作为带编号的一行出现在提示词里。 */
+function quotedShare(run: RunFiles): number | null {
+  const known = new Set((run.messages ?? []).map((x) => `${x.scope}|${x.id}`));
+  let asked = 0;
+  let seen = 0;
+  for (const p of run.prompts) {
+    if (!inChat("group", p)) continue;
+    const quoted = quotedByTrigger(p.user);
+    if (!quoted || !known.has(`${p.scope}|${quoted}`)) continue;
+    asked++;
+    if (p.user.includes(`[${quoted}] <`)) seen++;
+  }
+  return asked === 0 ? null : seen / asked;
+}
+
+/** 提示词里叫醒她的那一行引用回复的编号。 */
+function quotedByTrigger(user: string): string | undefined {
+  const trigger = /\[([^\]\n]+)\] 之后，轮到你了/.exec(user)?.[1];
+  if (!trigger) return undefined;
+  const line = user.split("\n").find((l) => l.includes(`[${trigger}] <`));
+  return line ? /（回复 \[([^\]\n]+)\]）/.exec(line)?.[1] : undefined;
+}
+
+/** 群里她引用回话时，离那一句过了多久（分钟），取 quantile 分位。 */
+function replyLatency(m: MeasureOf<"reply-latency">, run: RunFiles): number | null {
+  const sentAt = new Map((run.messages ?? []).map((x) => [`${x.scope}/${x.id}`, x.at]));
+  const delays = run.calls
+    .filter((c) => c.chatType === "group")
+    .flatMap((c) =>
+      c.acts.flatMap((a) => {
+        const t = a.replyTo ? sentAt.get(`${c.scope}/${a.replyTo}`) : undefined;
+        return t !== undefined && c.at > t && c.at - t < DAY ? [c.at - t] : [];
+      }),
+    )
+    .sort((a, b) => a - b);
+  if (delays.length === 0) return null;
+  return (delays[Math.floor(m.quantile * (delays.length - 1))] as number) / MIN;
+}
+
+/** 醒着、同一天里，两个可见动作之间隔了 minutes 以上、中间没睡的次数，每天。 */
+function awayPerDay(m: MeasureOf<"away">, run: RunFiles): number | null {
+  if (run.calls.length === 0) return null;
+  const times = run.calls
+    .filter((c) => c.acts.some((a) => VISIBLE.has(a.kind)) && !isAsleep(c.at))
+    .map((c) => c.at)
+    .sort((a, b) => a - b);
+  let n = 0;
+  for (let i = 1; i < times.length; i++) {
+    const [a, b] = [times[i - 1] as number, times[i] as number];
+    if (b - a < m.minutes * MIN || b - a <= BOUT_GAP || localDay(a) !== localDay(b)) continue;
+    if (!sleptBetween(a, b)) n++;
+  }
+  return n / run.days;
+}
+
+/** 两个时刻之间（每 5 分钟看一次）有没有睡着过。 */
+function sleptBetween(a: number, b: number): boolean {
+  for (let t = a; t < b; t += 5 * MIN) if (isAsleep(t)) return true;
+  return false;
+}
+
+/** 她的轮数：开口（发话或贴纸）的调用按时间排，隔 TURN_GAP 以上算新的一轮。 */
+function turnCount(calls: readonly Call[]): number {
+  const ts = calls
+    .filter((c) => c.acts.some((a) => a.kind === "send" || a.kind === "sticker"))
+    .map((c) => c.at)
+    .sort((a, b) => a - b);
+  return ts.filter((t, i) => i === 0 || t - (ts[i - 1] as number) > TURN_GAP).length;
+}
+
+/** 她在群里的轮数没超过这个群活跃前四分之一的人的 p90 的群的占比（人少于 4 个的群不算）。 */
+function groupBand(run: RunFiles): number | null {
+  const groups = run.groups ?? [];
+  const msgs = run.messages ?? [];
+  if (groups.length === 0 || msgs.length === 0) return null;
+  const until = msgs.reduce((latest, x) => Math.max(latest, x.at), -Infinity);
+  const from = until - run.days * DAY;
+  const inBand = groups.flatMap((g) => {
+    const p90 = activeP90(msgs.filter((x) => x.scope === g && x.at >= from));
+    if (p90 === null) return [];
+    const hers = turnCount(run.calls.filter((c) => c.scope === g && c.at >= from && c.at <= until));
+    return [hers <= p90 ? 1 : 0];
+  });
+  return inBand.length === 0 ? null : inBand.reduce((s, x) => s + x, 0) / inBand.length;
+}
+
+/** 一个群里每人的轮数，发言前四分之一的人的 p90；少于 4 个人时是 null。 */
+function activeP90(msgs: NonNullable<RunFiles["messages"]>): number | null {
+  const counts = new Map<string, number>();
+  let last: { from: string; at: number } | null = null;
+  for (const x of [...msgs].sort((a, b) => a.at - b.at)) {
+    if (!last || last.from !== x.from || x.at - last.at > TURN_GAP)
+      counts.set(x.from, (counts.get(x.from) ?? 0) + 1);
+    last = x;
+  }
+  const top = [...counts.values()].sort((a, b) => b - a);
+  if (top.length < 4) return null;
+  const quarter = top.slice(0, Math.ceil(top.length / 4)).sort((a, b) => a - b);
+  return quarter[Math.min(quarter.length - 1, Math.floor(0.9 * (quarter.length - 1) + 0.5))] ?? 0;
+}
+
+/**
+ * 她睡着时的调用：群里没人找她叫醒的次数，或不是被消息吵醒的次数。调用记着 asleep 时读它，
+ * 旧的运行没有就按她说去睡到下次醒之间算。
+ */
+function inBed(m: MeasureOf<"in-bed">, run: RunFiles): number {
+  const hasAsleep = run.calls.some((c) => c.asleep !== undefined);
+  let asleep: Call[];
+  if (hasAsleep) {
+    asleep = run.calls.filter((c) => c.asleep === true);
+  } else {
+    const beds = run.calls.filter((c) => c.acts.some((a) => a.kind === "bed")).map((c) => c.at);
+    asleep = run.calls.filter((c) => beds.some((b) => c.at > b && c.at < nextWake(b)));
+  }
+  if (m.what === "unsought-group") return asleep.filter((c) => UNSOUGHT_GROUP.has(c.kind)).length;
+  const prompt = new Map(run.prompts.map((p) => [`${p.scope}@${p.at}`, p.user]));
+  // 记着 asleep 的运行只数有消息叫醒的调用；旧的运行连时钟格叫醒的也数。
+  return asleep.filter(
+    (c) =>
+      (!hasAsleep || c.trigger !== null) &&
+      !prompt.get(`${c.scope}@${c.at}`)?.includes("被消息吵醒了"),
+  ).length;
 }
 
 const MIN = 60_000;
@@ -822,12 +908,14 @@ const WRITE_SLACK = 2 * MIN;
 
 /** 卡片上的"想过："行：带来的（"在群里想过："）和这个会话里的；截断的去掉结尾的"..."。 */
 function linesOf(user: string): Array<{ carried: boolean; text: string }> {
-  return [
-    ...user.matchAll(/^\s*- .*?(在群里|在「[^」]+」群里|在一个群里|和.+?私聊时)?想过：(.*)$/gm),
-  ].map((m) => ({
-    carried: m[1] !== undefined,
-    text: (m[2] ?? "").replace(/\.\.\.$/, ""),
-  }));
+  return Array.from(
+    // eslint-disable-next-line regexp/no-super-linear-backtracking -- 只读仿真自己渲染的提示词，每行很短
+    user.matchAll(/^\s*- .*?(在群里|在「[^」]+」群里|在一个群里|和.+?私聊时)?想过：(.*)$/gm),
+    (m) => ({
+      carried: m[1] !== undefined,
+      text: (m[2] ?? "").replace(/\.\.\.$/, ""),
+    }),
+  );
 }
 
 interface Thought {

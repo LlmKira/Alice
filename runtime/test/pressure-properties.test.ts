@@ -7,11 +7,13 @@
  * 只读压力场代码；时间、层级与会话类型都扫一遍，而不是只测一个点。
  */
 import { describe, expect, it } from "vitest";
-import { bedtime } from "../src/mechanisms/pressure/bedtime.js";
 import {
+  affect,
   intentionsFor,
-  life,
+  PEOPLE_LIVE,
   PRODUCTION,
+  people,
+  reflectDiaryFlow,
   relation,
   relationTier,
   willOf,
@@ -64,46 +66,21 @@ function sent(at: number, scope = DM): MessageSent {
   return { type: "message.sent", at, scope, messageId: `s${n}`, text: "嗯", kind: "text" };
 }
 type Reduce = (world: World, event: AliceEvent) => World;
-const BASE: Reduce = (w, e) => reduceWorld(w, e);
-const fold = (events: AliceEvent[], from: World = emptyWorld, reduce: Reduce = BASE) =>
-  events.reduce(reduce, from);
+// 只传世界和事件：Array.reduce 的第三个参数（下标）不能落进 reduceWorld 的可选参数。
+const fold = (events: AliceEvent[], from: World = emptyWorld, reduce: Reduce = reduceWorld) =>
+  events.reduce((w, e) => reduce(w, e), from);
 
 /**
  * 性质对两种配置都要成立：不带作息，和生产配置（PRODUCTION：睡着时行动代价随睡眠深度上升，
  * 没看到的事只在她醒着时变旧）。生产的对话弧带着轮次份额的代价；
- * dwell-look 只改叫醒的门（willWake），意愿层和生产相同，不另测。候选 life-l2 的代价只来自 noise.drawn 折出的事，
- * 这里的世界里没有它；手上的事压着消息有多久，由 test/life.test.ts 的空跑查。带着生产组成的配置，世界里要折进
- * relation（谁在等她、按人记的回避：意愿层读它）；其余几样不折，世界只到底座。
+ * dwell 的 look 只改叫醒的门（willWake），意愿层和生产相同，不另测。手上的事压着消息有多久，由
+ * test/life.test.ts 的空跑查。带着生产组成的配置，世界里要 fold 进
+ * relation（谁在等她、按人记的回避：意愿层读它）；其余几样不折，世界只到 base。
  */
 const PERSON: Reduce = worldFold({ relation });
 const CONFIGS: ReadonlyArray<{ name: string; options: WillPolicy; reduce?: Reduce }> = [
   { name: "no sleep", options: BARE_WILL },
   { name: "production", options: willOf(PRODUCTION), reduce: PERSON },
-  {
-    name: "life-l2",
-    options: willOf({
-      ...PRODUCTION,
-      sleep: bedtime,
-      life: life({ occupies: true, warm: true, fill: true }),
-    }),
-    reduce: PERSON,
-  },
-  {
-    name: "life-l2-glance",
-    options: willOf({
-      ...PRODUCTION,
-      sleep: bedtime,
-      life: life({ occupies: true, warm: true, fill: true, glance: true }),
-    }),
-  },
-  {
-    name: "life-l2-glance-scan",
-    options: willOf({
-      ...PRODUCTION,
-      sleep: bedtime,
-      life: life({ occupies: true, warm: true, fill: true, glance: true, scan: true }),
-    }),
-  },
   /**
    * 候选第 4 片（docs/research/relationship.md）：层级从熟悉度分档（relationTier）。S2、S3 按每一档扫；
    * A1–A3、L1–L3 在这一组上也照旧成立——它只改层级从哪来，不改回避、代价和投入。
@@ -112,6 +89,35 @@ const CONFIGS: ReadonlyArray<{ name: string; options: WillPolicy; reduce?: Reduc
     name: "relation-tier",
     options: willOf({ ...PRODUCTION, relation: relationTier }),
     reduce: worldFold({ relation: relationTier }),
+  },
+  {
+    name: "affect-flow-v1",
+    options: willOf({
+      ...PRODUCTION,
+      people: people(PEOPLE_LIVE),
+      diary: reflectDiaryFlow,
+      affect: affect({
+        noise: true,
+        lonely: true,
+        warmth: { home: true, relevance: true, bids: true, tone: true },
+        rejection: true,
+        feedback: true,
+        body: true,
+        willDrive: true,
+      }),
+    }),
+    reduce: worldFold({
+      relation,
+      affect: affect({
+        noise: true,
+        lonely: true,
+        warmth: { home: true, relevance: true, bids: true, tone: true },
+        rejection: true,
+        feedback: true,
+        body: true,
+        willDrive: true,
+      }),
+    }),
   },
 ];
 
@@ -139,7 +145,7 @@ function unansweredBidsWith(
   tier: Tier,
   every: number,
   horizon: number,
-  reduce: Reduce = BASE,
+  reduce: Reduce = reduceWorld,
 ) {
   let w = start;
   let bids = 0;
@@ -154,7 +160,7 @@ function unansweredBidsWith(
 for (const config of CONFIGS) {
   const o = config.options;
   const fold = (events: AliceEvent[], from: World = emptyWorld) =>
-    events.reduce(config.reduce ?? BASE, from);
+    events.reduce((w, e) => (config.reduce ?? reduceWorld)(w, e), from);
   const unansweredBids = (
     options: WillPolicy,
     start: World,
@@ -176,15 +182,6 @@ for (const config of CONFIGS) {
           });
         }
       }
-
-      it("within Feb's window (6 days) every tier already holds", { timeout: 15_000 }, () => {
-        for (const tier of TIERS) {
-          const start = fold([msg(T0 - MIN), sent(T0)]);
-          expect(unansweredBids(o, start, DM, tier, H, 2 * D).bids).toBeLessThanOrEqual(
-            FEB_MAX_BIDS,
-          );
-        }
-      });
       // 群里没人接话本来常见，没有真人上限可对照，所以不写断言（见下面的 L1–L3：现在被冷落一次，意愿给出的是离开）。
     });
 

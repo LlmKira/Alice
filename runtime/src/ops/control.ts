@@ -38,7 +38,7 @@ export function saveControl(path: string, state: ControlState): void {
 /**
  * 操作员命令的前缀。私聊里正常说话不会这样开头，所以和闲聊分得开；命令消息不进她的时间线。
  */
-export const COMMAND_PREFIX = "/ops";
+const COMMAND_PREFIX = "/ops";
 
 export type OperatorCommand =
   | { verb: "status" | "pause" | "resume" | "stop" | "help" | "selftest" }

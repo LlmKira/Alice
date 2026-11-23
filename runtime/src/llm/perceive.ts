@@ -75,11 +75,7 @@ async function ask(
 const base64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64");
 
 /** 一帧画面的描述：图片本身，或动图、视频的预览帧（JPEG）。 */
-export function describeFrame(
-  gateway: Gateway,
-  jpeg: Uint8Array,
-  kind: FrameKind,
-): Promise<string> {
+async function describeFrame(gateway: Gateway, jpeg: Uint8Array, kind: FrameKind): Promise<string> {
   const url = `data:image/jpeg;base64,${base64(jpeg)}`;
   const { text, maxTokens } = FRAME_ASKS[kind];
   const part = { type: "image_url", image_url: { url } };
@@ -87,7 +83,7 @@ export function describeFrame(
 }
 
 /** Telegram 语音是 OGG/Opus。 */
-export function transcribeVoice(gateway: Gateway, ogg: Uint8Array): Promise<string> {
+export async function transcribeVoice(gateway: Gateway, ogg: Uint8Array): Promise<string> {
   return ask(
     gateway,
     "voice",
@@ -99,8 +95,8 @@ export function transcribeVoice(gateway: Gateway, ogg: Uint8Array): Promise<stri
 }
 
 /** Danbooru 的四档尺度（标注器训练用的分级）。 */
-export const RATINGS = ["general", "sensitive", "questionable", "explicit"] as const;
-export type Rating = (typeof RATINGS)[number];
+const RATINGS = ["general", "sensitive", "questionable", "explicit"] as const;
+type Rating = (typeof RATINGS)[number];
 
 /**
  * 标注器读出的、要写给她的事实。一般标签不写：描述已经说了画面，标签只添错事实

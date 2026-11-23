@@ -154,7 +154,7 @@ describe("positive reception appraisals", () => {
 
   it("carries the word, the concrete reason, the scope and who was there", () => {
     const { boost, mine, reply } = uptake({ tone: "friendly", usualUptake: 0.5 });
-    expect(boost?.word).toBe("被接纳");
+    expect(boost?.word).toBe("开心");
     expect(boost?.why).toContain(CHAT);
     expect(boost?.why).toContain("接住");
     expect(boost?.scope).toBe(GROUP);
@@ -343,7 +343,7 @@ describe("production loop guardrails (PLAN item 56)", () => {
   it("stays bounded when someone replies warmly every single turn", async () => {
     const mechs = arms({}).production;
     if (!mechs) throw new Error("missing production arm");
-    // 连续 40 轮（80 分钟，每 2 分钟有人点名她并带正面口气），每次叫醒她都回复一句，查饱和代价仍封顶、不滚雪球
+    // 连续 40 轮（80 分钟，每 2 分钟有人点名她并带正面口气），每次叫醒她都回复一句，查 saturation cost 仍封顶、不滚雪球
     const events = Array.from({ length: 40 }, (_, i) => {
       const at = T0 + i * 2 * MIN;
       return [

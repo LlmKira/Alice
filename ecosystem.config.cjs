@@ -70,9 +70,23 @@ module.exports = {
       time: true,
       env: {
         NODE_ENV: "production",
+        ALICE_PLATFORM: "telegram,qq",
+        // 多平台注意力层级（ADR-300）：主体核心（记忆/心情/作息）跨平台共享，各平台各自独立节奏与 Top-1 竞争，避免单平台视角失真；可按需加 ALICE_PLATFORM_LAMBDA="qq=0.85" 微调单平台开口门槛
+        ALICE_PLATFORM_ATTENTION: "per-platform",
+        QQ_ONEBOT_WS_URL: "ws://127.0.0.1:3001",
         ALICE_STATE_DIR: liveDir,
         ALICE_DB_PATH: path.join(liveDir, "alice.db"),
         ALICE_TAGGER_URL: `http://127.0.0.1:${TAGGER_PORT}`,
+        // 原生多工具对话层（ADR-298，2026-11-23 synthetic-charm 6:7 胜出且省 18.5%，real-v1 留出集验收通过）
+        ALICE_SPEECH_FORMAT: "native",
+        // 发言模型（ADR-281，方案 C）：全量发言走 google/gemini-4-hydrogen（无缓存双平台估约 $5/天），反思走 google/gemini-3.8-flash
+        ALICE_SPEECH_MODEL: "google/gemini-4-hydrogen",
+        // 后台反思模型（不直接对人出口，与发言模型拆分，单次 $0.002 vs neon $0.023）
+        ALICE_PONDER_MODEL: "google/gemini-3.8-flash",
+        // 每日花费上限（美元）：Telegram + QQ 双平台 + neon 发言，留足缓冲防半途自动暂停
+        ALICE_DAILY_USD_CAP: "6",
+        // 执行层领域配置（个人桌面空间 desk 等）
+        ALICE_EXECUTOR_DOMAINS: path.join(liveDir, "domains.json"),
         // 线上语音：当前 ElevenLabs 为免费套餐（共享二次元音色 402 不可用），先用 MiniMax speech-2.8-hd + qiaopi_mengmei（俏皮萌妹）。
         TTS_PROVIDER: "minimax",
         // 线上轮换（PLAN 第 25 件）：2026-11-18 研究员定 loop-v2 整组进生产，关掉轮换，只跑生产。

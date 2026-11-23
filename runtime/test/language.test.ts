@@ -23,6 +23,28 @@ const chat = (timeline: TimelineEntry[]): ChatState => ({
 });
 const fact = (timeline: TimelineEntry[]) =>
   language.contribute?.(chat(timeline), 0, undefined, []).map((c) => c.text);
+/** 群里叫醒她的一次发言请求，带着语言事实；unsought：没人找她。 */
+const groupRequest = (
+  timeline: TimelineEntry[],
+  told: SpeechRequest["contributions"],
+  unsought: boolean,
+): SpeechRequest => ({
+  scope: "telegram:-1",
+  chatType: "group",
+  triggerMessageId: null,
+  at: 60_000,
+  affordances: ["send"],
+  timeline,
+  contributions: [
+    {
+      mechanism: "pressure-unsought",
+      kind: "turn",
+      text: "这会儿没人点你。",
+      ...(unsought ? { unsought: true as const } : {}),
+    },
+    ...told,
+  ],
+});
 
 describe("who speaks which language, stated as a fact", () => {
   it("names the language each recent speaker uses, judged from their last few lines together", () => {
@@ -49,16 +71,7 @@ describe("who speaks which language, stated as a fact", () => {
     expect(fact([line(null, "在吗")])).toEqual([]);
   });
 
-  it("never counts bots as people speaking to her (live: 'Rose 用俄语跟你说话', Rose is the group's bot)", () => {
-    const bot: TimelineEntry = {
-      ...line("Rose", "Прекрати флудить! Бобер был muted for 2 минут."),
-      sender: { id: "u-Rose", name: "Rose", isBot: true },
-    };
-    expect(fact([line("Миша", "я так устал сегодня, работа просто убивает"), bot])).toEqual([
-      "Миша 用俄语跟你说话。",
-    ]);
-  });
-  it("bot commands, hashtags and replies to a bot are not someone speaking a language (live: a '!' bot command read as Belarusian)", () => {
+  it("bots, bot commands, hashtags and replies to a bot are not someone speaking a language (live: a '!' bot command read as Belarusian)", () => {
     const rose: TimelineEntry = {
       ...line("Rose", "Добро пожаловать в чат, гость!"),
       sender: { id: "u-Rose", name: "Rose", isBot: true },
@@ -139,54 +152,22 @@ describe("who speaks which language, stated as a fact", () => {
       line("Tom", "anyone up for ranked tonight? I'm new here and looking for a team"),
     ];
     const told = language.contribute?.(chat(timeline), 0, undefined, []) ?? [];
-    const request = (unsought: boolean): SpeechRequest => ({
-      scope: "telegram:-1",
-      chatType: "group",
-      triggerMessageId: null,
-      at: 60_000,
-      affordances: ["send"],
-      timeline,
-      contributions: [
-        {
-          mechanism: "pressure-unsought",
-          kind: "turn",
-          text: "这会儿没人点你。",
-          ...(unsought ? { unsought: true as const } : {}),
-        },
-        ...told,
-      ],
-    });
     const anchor = (r: SpeechRequest) => renderSpeechPrompt("P", r).user.split("\n").at(-1) ?? "";
-    expect(anchor(request(true))).not.toContain("英语");
-    expect(anchor(request(false))).toContain("请用英语");
+    expect(anchor(groupRequest(timeline, told, true))).not.toContain("英语");
+    expect(anchor(groupRequest(timeline, told, false))).toContain("请用英语");
   });
 
   it("when nobody sought her in a group they are not speaking to her: the anchor says what they speak", () => {
     const timeline = [line("阿杰", "今晚谁打游戏"), line("小周", "我九点上线 yysy 这个确实")];
     const told = language.contribute?.(chat(timeline), 0, undefined, []) ?? [];
     expect(told[0]?.unsoughtText).toBe("小周、阿杰 在说中文。");
-    const request = (unsought: boolean): SpeechRequest => ({
-      scope: "telegram:-1",
-      chatType: "group",
-      triggerMessageId: null,
-      at: 60_000,
-      affordances: ["send"],
-      timeline,
-      contributions: [
-        {
-          mechanism: "pressure-unsought",
-          kind: "turn",
-          text: "这会儿没人点你。",
-          ...(unsought ? { unsought: true as const } : {}),
-        },
-        ...told,
-      ],
-    });
     const anchor = (r: SpeechRequest) => renderSpeechPrompt("P", r).user.split("\n").at(-2);
-    expect(anchor(request(true))).toContain("这会儿没人点你。小周、阿杰 在说中文。");
-    expect(anchor(request(true))).not.toContain("跟你说话");
+    expect(anchor(groupRequest(timeline, told, true))).toContain(
+      "这会儿没人点你。小周、阿杰 在说中文。",
+    );
+    expect(anchor(groupRequest(timeline, told, true))).not.toContain("跟你说话");
     // 有人找她时仍写"用……跟你说话"。
-    expect(anchor(request(false))).toContain("小周、阿杰 用中文跟你说话。");
+    expect(anchor(groupRequest(timeline, told, false))).toContain("小周、阿杰 用中文跟你说话。");
   });
 
   it("marks both group and private unsought wakes so quiet DMs do not falsely say speaking to you", () => {

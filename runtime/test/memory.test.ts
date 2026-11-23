@@ -46,7 +46,7 @@ const GROUP = "telegram:-5";
 
 /** 只有意愿层的压力场，和只多一样记忆的压力场（名字由组成拼出：pressure、pressure-memory）。 */
 const pressure = createPressure(affordances);
-/** 记忆加上按人记的关系：最近几次开口的结果要写是谁（relation 折出名字和有来往）。 */
+/** 记忆加上按人记的关系：最近几次开口的结果要写是谁（relation fold 出名字和有来往）。 */
 const pressureMemory = createPressure(affordances, { memory, relation });
 
 let n = 0;
@@ -82,7 +82,7 @@ const done = (at: number, act: Act, scope = DM): AliceEvent => ({
   scope,
   act,
 });
-/** 按记忆这一组的折叠（她心里记下的事由记忆折进世界）。 */
+/** 按记忆这一组的 fold（她心里记下的事由记忆 fold 进世界）。 */
 const fold = (events: AliceEvent[], from: World = emptyWorld) =>
   events.reduce((w, e) => pressureMemory.reduce?.(w, e) as World, from);
 
@@ -459,7 +459,7 @@ describe("commitments: P_prospect drives a follow-up near the due time, then sto
           .filter((e) => e.effect.type === "call-speech" && e.effect.scope === GROUP)
           .map((e) => e.at),
       );
-    const c = makeCommitment(promise as Extract<Act, { kind: "intend" }>, T);
+    const c = makeCommitment(promise, T);
 
     const control = await run("control");
     expect(control).toEqual([T]);

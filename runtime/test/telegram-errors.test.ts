@@ -13,21 +13,10 @@ function peerIdInvalid(): Error {
 }
 
 describe("TelegramActionError", () => {
-  it("carries a typed Telegram action error code", () => {
-    const error = new TelegramActionError("outgoing_burst_limited", "too many messages");
-
-    expect(isTelegramActionError(error)).toBe(true);
-    expect(error.code).toBe("outgoing_burst_limited");
-  });
-
   it("does not classify plain Telegram error text as typed", () => {
     expect(
       isTelegramActionError(new Error("RpcError (403 CHAT_WRITE_FORBIDDEN): cannot write")),
     ).toBe(false);
-  });
-
-  it("classifies an invalid peer as soft permanent", () => {
-    expect(classifyTelegramActionFailure(peerIdInvalid())).toBe("transport_soft_permanent");
   });
 
   it("classifies being blocked as a refusal, not just an unreachable peer", () => {

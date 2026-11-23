@@ -11,6 +11,7 @@ import { PRODUCTION, willAffordances, willOf } from "../src/mechanisms/pressure/
 import { intentionsFor, rankIntentions } from "../src/mechanisms/pressure/will.js";
 import { productionMechanisms } from "../src/mechanisms/registry.js";
 import { affordances } from "../src/mind/affordances.js";
+import type { Effect } from "../src/mind/effects.js";
 import type { AliceEvent, MessageReceived } from "../src/mind/events.js";
 import type { Mechanism } from "../src/mind/mechanism.js";
 import { NOISE_EVERY_MS } from "../src/mind/noise.js";
@@ -47,6 +48,58 @@ function message(at: number, scope: string, directed: boolean, n: number): Messa
  * （单数轮说一句，双数轮不说），计时器到点触发，随机数每 5 分钟一组。返回写进日志的事件。
  */
 function liveJournal(mechanisms: readonly Mechanism[]): JournaledEvent[] {
+  const queue = scriptedInputs();
+  const push = (e: AliceEvent) => {
+    const i = queue.findIndex((q) => q.at > e.at);
+    queue.splice(i < 0 ? queue.length : i, 0, e);
+  };
+  const journal: JournaledEvent[] = [];
+  let state: AliceState = emptyState;
+  let calls = 0;
+  let sent = 0;
+  /** 外壳对一个副作用的回音：发言调用 2 秒后按脚本回来，计时器到点触发，她说的话半秒后发出。 */
+  const echo = (effect: Effect, at: number): AliceEvent | null => {
+    if (effect.type === "call-speech") {
+      const speak = calls++ % 2 === 0;
+      return {
+        type: "speech.decided",
+        at: at + 2000,
+        scope: effect.scope,
+        callId: effect.callId,
+        decision: {
+          acts: speak ? [{ kind: "send", text: "嗯嗯", replyTo: null }] : [],
+        },
+      };
+    }
+    if (effect.type === "set-timer")
+      return { type: "timer.fired", at: effect.at, scope: effect.scope, timerId: effect.timerId };
+    if (effect.type === "act" && effect.act.kind === "send") {
+      return {
+        type: "message.sent",
+        at: at + 500,
+        scope: effect.scope,
+        messageId: `s${sent++}`,
+        text: effect.act.text,
+        kind: "text",
+      };
+    }
+    return null;
+  };
+  for (let e = queue.shift(); e; e = queue.shift()) {
+    const r = step(state, e, mechanisms);
+    state = r.state;
+    if (e.type !== "clock.tick") journal.push(e);
+    else if (r.effects[0]) journal.push({ ...e, scope: r.effects[0].scope });
+    for (const effect of r.effects) {
+      const next = echo(effect, e.at);
+      if (next) push(next);
+    }
+  }
+  return journal;
+}
+
+/** 脚本里的输入：群里的闲聊、三条找她的话、每 5 分钟一组随机数、每 10 秒一个时钟格，按时刻排好。 */
+function scriptedInputs(): AliceEvent[] {
   const inputs: AliceEvent[] = [];
   let n = 0;
   for (let t = T0; t < T0 + 150 * MIN; t += 7 * MIN) {
@@ -61,47 +114,7 @@ function liveJournal(mechanisms: readonly Mechanism[]): JournaledEvent[] {
     inputs.push({ type: "noise.drawn", at: t + 3, scope: "self", draws: draw() });
   }
   for (let t = T0; t < T0 + 3 * 60 * MIN; t += 10_000) inputs.push({ type: "clock.tick", at: t });
-  const queue = inputs.sort((a, b) => a.at - b.at);
-  const push = (e: AliceEvent) => {
-    const i = queue.findIndex((q) => q.at > e.at);
-    queue.splice(i < 0 ? queue.length : i, 0, e);
-  };
-  const journal: JournaledEvent[] = [];
-  let state: AliceState = emptyState;
-  let calls = 0;
-  let sent = 0;
-  for (let e = queue.shift(); e; e = queue.shift()) {
-    const r = step(state, e, mechanisms);
-    state = r.state;
-    if (e.type !== "clock.tick") journal.push(e);
-    else if (r.effects[0]) journal.push({ ...e, scope: r.effects[0].scope });
-    for (const effect of r.effects) {
-      if (effect.type === "call-speech") {
-        const speak = calls++ % 2 === 0;
-        push({
-          type: "speech.decided",
-          at: e.at + 2000,
-          scope: effect.scope,
-          callId: effect.callId,
-          decision: {
-            acts: speak ? [{ kind: "send", text: "嗯嗯", replyTo: null }] : [],
-          },
-        });
-      } else if (effect.type === "set-timer") {
-        push({ type: "timer.fired", at: effect.at, scope: effect.scope, timerId: effect.timerId });
-      } else if (effect.type === "act" && effect.act.kind === "send") {
-        push({
-          type: "message.sent",
-          at: e.at + 500,
-          scope: effect.scope,
-          messageId: `s${sent++}`,
-          text: effect.act.text,
-          kind: "text",
-        });
-      }
-    }
-  }
-  return journal;
+  return inputs.sort((a, b) => a.at - b.at);
 }
 
 const dir = mkdtempSync(join(tmpdir(), "alice-trace-"));
@@ -212,7 +225,7 @@ describe("live trace snapshot", () => {
 
 /** 冻住整份状态：快照里任何一处改写都会在严格模式下抛错。 */
 function deepFreeze<T>(value: T): T {
-  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
     Object.freeze(value);
     for (const v of Object.values(value)) deepFreeze(v);
   }

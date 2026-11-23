@@ -1,5 +1,5 @@
 /**
- * 注意力公平（ADR-218 的 U_fairness）和第一次私聊的节奏（PLAN 第 45 件）。两个反馈回路都只从事件折进状态、
+ * 注意力公平（ADR-218 的 U_fairness）和第一次私聊的节奏（PLAN 第 45 件）。两个反馈回路都只从事件 fold 进状态、
  * 从状态和世界读出，纯函数：时间只来自事件和参数，没有时钟、随机数和 I/O。
  *
  * - 注意力公平：安静的私聊（已有的私聊；群里认识、还没私聊过的人不算）在她把轮次花在别处时攒一笔有界的服务债。
@@ -57,7 +57,7 @@ export const FIRST_DM = {
 } as const;
 
 /** 她在一个会话里开口的一笔流水（算"别处有多热闹"用）。 */
-export interface ServedTurn {
+interface ServedTurn {
   at: number;
   scope: string;
 }
@@ -72,7 +72,7 @@ export interface FirstDmAttempt {
 }
 
 /** 她暂缓直接私聊、打算先回来源群里顺口问一句的记录。 */
-export interface PlannedGroupAsk {
+interface PlannedGroupAsk {
   partner: string;
   name: string;
   dmScope: string;
@@ -83,12 +83,12 @@ export interface PlannedGroupAsk {
 }
 
 /** 群里某人顺着接话表示欢迎/同意继续私聊的记录。 */
-export interface DmConsent {
+interface DmConsent {
   at: number;
   group: string;
 }
 
-/** 注意力公平和第一次私聊的全部状态（世界折叠的一小块）。 */
+/** 注意力公平和第一次私聊的全部状态（世界 fold 的一小块）。 */
 export interface FairnessState {
   /** 她上一次在这个会话里做了决定、或开口的时刻。 */
   readonly lastServedAt: Readonly<Record<string, number>>;
@@ -266,7 +266,7 @@ function advancePlannedGroup(state: FairnessState, event: AliceEvent): FairnessS
   if (!asks) return state;
   if (event.type === "message.sent") {
     const list = asks[event.scope];
-    if (!list?.length || list.every((p) => p.spokeInGroup)) return state;
+    if (list === undefined || list.length === 0 || list.every((p) => p.spokeInGroup)) return state;
     return {
       ...state,
       plannedGroupAsks: {
@@ -277,7 +277,7 @@ function advancePlannedGroup(state: FairnessState, event: AliceEvent): FairnessS
   }
   if (event.type === "message.received" && event.chatType === "group" && event.directed) {
     const list = asks[event.scope];
-    if (!list?.length) return state;
+    if (list === undefined || list.length === 0) return state;
     const hit = list.find((p) => p.partner === event.senderId && p.spokeInGroup);
     if (!hit) return state;
     const rest = list.filter((p) => p !== hit);
@@ -297,7 +297,7 @@ function advancePlannedGroup(state: FairnessState, event: AliceEvent): FairnessS
 }
 
 /**
- * 世界折叠：她做了决定、开了口、有人回了她的第一次私聊、被隐私挡住、Telegram 限流、暂缓留到群里问、时间过去。
+ * 世界 fold：她做了决定、开了口、有人回了她的第一次私聊、被隐私挡住、平台限流、暂缓留到群里问、时间过去。
  */
 export function reduceFairness(
   state: FairnessState,
@@ -480,7 +480,7 @@ function resolveGroupTarget(
 ): { partner: string | null; name: string | null } {
   if (!whoArg) return { partner: null, name: null };
   const needle = whoArg.trim().replace(/^\[|\]$/g, "");
-  const byMsg = timeline.find((t) => t.messageId === needle && t.sender);
+  const byMsg = timeline.find((t) => t.messageId === needle && t.sender !== null);
   if (byMsg?.sender) return { partner: byMsg.sender.id, name: byMsg.sender.name };
   const lower = needle.toLowerCase();
   for (let i = timeline.length - 1; i >= 0; i--) {
@@ -495,71 +495,48 @@ function resolveGroupTarget(
   return { partner: null, name: needle };
 }
 
-function dmCheckResult(
-  state: FairnessState,
-  world: FairnessWorld,
-  scope: string,
+/** 有过私聊往来：对方来过消息，或她在那里说过话。 */
+const hasDmHistory = (chat: ChatNode | undefined): boolean =>
+  Boolean(chat && (chat.lastIncomingAt > 0 || chat.lastAliceAt > 0));
+
+/** check_dm 最后那句怎么做；在私聊里问和在群里问，说法各一套。 */
+const DM_PROTOCOL = {
+  private: {
+    history: "You already have an active DM history with this person; message normally.",
+    consented: "They just welcomed continuing in DM from the group; safe to message directly.",
+    open: "This source group has normal DM receptivity; a brief direct greeting is fine.",
+    guarded:
+      "This group is guarded toward unsolicited DMs (recent blocks/no-replies or recent cold DM cooldown). Do not force a cold DM; call plan_group_dm to ask in the source group first.",
+  },
+  group: {
+    history: "You already have an active DM with this person and can message them directly.",
+    consented: "They just agreed to move to DM in the group; safe to continue in DM.",
+    open: "This group has normal DM receptivity; DM directly or mention it in group.",
+    guarded:
+      "This group is guarded toward unsolicited DMs (recent blocks/no-replies or recent cold DM cooldown). Ask in this group first before opening a DM.",
+  },
+} as const;
+
+function dmCheckReport(
   chatType: "private" | "group",
-  timeline: ReadonlyArray<{ messageId: string; sender: { id: string; name: string } | null }>,
-  whoArg: string | null,
+  person: string | null,
+  hasPrivateChat: boolean,
+  sourceGroup: string | null,
+  stats: GroupDmStats,
   now: number,
 ) {
-  if (chatType === "private") {
-    const partner = world.chats[scope]?.partner ?? unopenedPrivate(world).get(scope) ?? null;
-    const name = partner ? (nameOf(world, partner) ?? partner) : null;
-    const stats = groupDmStatsOf(state, world, partner, null, now);
-    const hasPrivateChat = Boolean(
-      world.chats[scope] &&
-        (world.chats[scope].lastIncomingAt > 0 || world.chats[scope].lastAliceAt > 0),
-    );
-    const protocol = hasPrivateChat
-      ? "你们已经有私聊来往了，正常聊天即可。"
-      : stats.consented
-        ? "对方刚才在群里接住并欢迎私聊，可以直接开口。"
-        : stats.canDmDirectly
-          ? "这个来源群对私聊接受度正常，可以直接轻声打个招呼。"
-          : "这个群对未经招呼的突然私聊较防备（或刚私聊过同群成员）。外部协议建议：先别贸然私敲，调用 tools.plan_group_dm 留到来源群里先顺嘴问一句。";
-    return {
-      person: name,
-      hasPrivateChat,
-      sourceGroup: stats.groupTitle ?? stats.sourceGroup,
-      agreedInGroup: stats.consented,
-      groupDmStats: {
-        attempts: stats.attempts,
-        replied: stats.replied,
-        blocked: stats.blocked,
-        silent: stats.silent,
-      },
-      groupRejectionActive: stats.groupRejection >= REJECTED_LIVE,
-      recentGroupColdDmAgo:
-        stats.recentColdAt !== null && now >= stats.recentColdAt
-          ? elapsed(now - stats.recentColdAt)
-          : null,
-      canDmDirectly: hasPrivateChat || stats.canDmDirectly,
-      protocol,
-    };
-  }
-  const { partner, name } = resolveGroupTarget(world, scope, timeline, whoArg);
-  const dmScope = partner
-    ? Object.entries(world.chats).find(([, c]) => c.partner === partner)?.[0]
-    : undefined;
-  const hasPrivateChat = Boolean(
-    dmScope &&
-      world.chats[dmScope] &&
-      (world.chats[dmScope].lastIncomingAt > 0 || world.chats[dmScope].lastAliceAt > 0),
-  );
-  const stats = groupDmStatsOf(state, world, partner, scope, now);
+  const lines = DM_PROTOCOL[chatType];
   const protocol = hasPrivateChat
-    ? "你们之前已经有过私聊往来，想单独聊时可以直接去私聊。"
+    ? lines.history
     : stats.consented
-      ? "对方刚才在群里顺着答应/欢迎私聊了，可以转到私聊接着说。"
+      ? lines.consented
       : stats.canDmDirectly
-        ? "这个群对私聊接受度正常，可以直接私聊，也可以顺手在群里提一句。"
-        : "这个群对突然私聊偏防备（近期有被隐私挡住/未回或刚私聊过同群成员）。若想单独聊，建议先在当前群聊里顺口问一句对方方不方便私聊。";
+        ? lines.open
+        : lines.guarded;
   return {
-    person: name,
+    person,
     hasPrivateChat,
-    sourceGroup: stats.groupTitle ?? scope,
+    sourceGroup,
     agreedInGroup: stats.consented,
     groupDmStats: {
       attempts: stats.attempts,
@@ -577,6 +554,104 @@ function dmCheckResult(
   };
 }
 
+function dmCheckResult(
+  state: FairnessState,
+  world: FairnessWorld,
+  scope: string,
+  chatType: "private" | "group",
+  timeline: ReadonlyArray<{ messageId: string; sender: { id: string; name: string } | null }>,
+  whoArg: string | null,
+  now: number,
+) {
+  if (chatType === "private") {
+    const partner = world.chats[scope]?.partner ?? unopenedPrivate(world).get(scope) ?? null;
+    const name = partner ? (nameOf(world, partner) ?? partner) : null;
+    const stats = groupDmStatsOf(state, world, partner, null, now);
+    const sourceGroup = stats.groupTitle ?? stats.sourceGroup;
+    return dmCheckReport(chatType, name, hasDmHistory(world.chats[scope]), sourceGroup, stats, now);
+  }
+  const { partner, name } = resolveGroupTarget(world, scope, timeline, whoArg);
+  const dmScope = partner
+    ? Object.entries(world.chats).find(([, c]) => c.partner === partner)?.[0]
+    : undefined;
+  const hasPrivateChat = dmScope ? hasDmHistory(world.chats[dmScope]) : false;
+  const stats = groupDmStatsOf(state, world, partner, scope, now);
+  return dmCheckReport(chatType, name, hasPrivateChat, stats.groupTitle ?? scope, stats, now);
+}
+
+/** 她在这个群里打算顺口问谁方不方便私聊（plan_group_dm，一天内的）。 */
+function plannedAsks(state: FairnessState, scope: string, now: number): Contribution | null {
+  const asks = (state.plannedGroupAsks?.[scope] ?? []).filter((p) => now - p.at < D);
+  if (asks.length === 0) return null;
+  return {
+    mechanism: "fairness",
+    kind: "doings",
+    text: asks.map((a) => `打算在这里顺口问问 ${a.name} 方不方便私聊（${a.reason}）`).join("\n"),
+  };
+}
+
+/** 从这个来源群开私聊的往事：私聊过几次、刚私聊过同群的人、群里近来冷不冷。 */
+function dmHistoryParts(stats: GroupDmStats, now: number): string[] {
+  const groupLabel = stats.groupTitle ? `「${stats.groupTitle}」群` : "这个群";
+  const parts: string[] = [];
+  if (stats.attempts > 0) {
+    parts.push(
+      `此前从${groupLabel}直接私聊过 ${stats.attempts} 次（${stats.replied} 次接着聊${stats.blocked > 0 ? `、${stats.blocked} 次被对方的隐私设置挡住` : ""}${stats.silent > 0 ? `、${stats.silent} 次没回` : ""}）`,
+    );
+  }
+  if (
+    stats.recentColdAt !== null &&
+    now >= stats.recentColdAt &&
+    now - stats.recentColdAt < FIRST_DM.groupCoolTau
+  ) {
+    parts.push(`${elapsed(now - stats.recentColdAt)}前刚私聊过同群的另一个人`);
+  }
+  if (stats.groupRejection >= REJECTED_LIVE) {
+    parts.push(`${groupLabel}近期对你的反应偏冷`);
+  }
+  return parts;
+}
+
+/**
+ * 还没开口的私聊：对方在群里接没接过、从那个群开私聊的往事，没接过时再提一句可以先 check_dm；cardFacts 时
+ * 核对的结果直接摆在眼前（原生工具格式），不用先调一次 check_dm 才知道。
+ */
+function firstDmFacts(
+  state: FairnessState,
+  world: FairnessWorld,
+  scope: string,
+  now: number,
+  cardFacts: boolean,
+): Contribution | null {
+  const partner = world.chats[scope]?.partner ?? unopenedPrivate(world).get(scope) ?? null;
+  if (!partner) return null;
+  const stats = groupDmStatsOf(state, world, partner, null, now);
+  const facts: string[] = [];
+  if (stats.consented) {
+    facts.push("对方刚才在群里答应了可以私聊接着聊，这不算陌生人突然找上门。");
+  } else if (
+    stats.attempts > 0 ||
+    stats.groupRejection >= REJECTED_LIVE ||
+    stats.recentColdAt !== null
+  ) {
+    const parts = dmHistoryParts(stats, now);
+    if (parts.length > 0) facts.push(`${parts.join("；")}。`);
+  }
+  if (!stats.consented && cardFacts) {
+    facts.push(
+      stats.canDmDirectly
+        ? "This source group has normal DM receptivity; a brief direct greeting is fine."
+        : "This group is guarded toward unsolicited DMs (recent blocks/no-replies or recent cold DM cooldown); to reach them, call plan_group_dm to ask in the source group first.",
+    );
+  } else if (!stats.consented) {
+    facts.push(
+      "First DM check: call tools.check_dm() if unsure how this group responds to cold DMs; if guarded, call tools.plan_group_dm({ reason }) and ask in the shared group first.",
+    );
+  }
+  if (facts.length === 0) return null;
+  return { mechanism: "fairness", kind: "scene", text: facts.join("\n") };
+}
+
 function dmFacts(
   state: FairnessState,
   world: FairnessWorld,
@@ -584,61 +659,16 @@ function dmFacts(
   chatType: "private" | "group",
   timelineLength: number,
   now: number,
+  cardFacts = false,
 ): Contribution[] {
   const out: Contribution[] = [];
-  if (chatType === "group") {
-    const asks = (state.plannedGroupAsks?.[scope] ?? []).filter((p) => now - p.at < D);
-    if (asks.length > 0) {
-      out.push({
-        mechanism: "fairness",
-        kind: "doings",
-        text: asks
-          .map((a) => `我打算找机会在这里顺口问问 ${a.name} 方不方便私聊（${a.reason}）`)
-          .join("\n"),
-      });
-    }
-  }
-  if (chatType === "private" && timelineLength === 0) {
-    const partner = world.chats[scope]?.partner ?? unopenedPrivate(world).get(scope) ?? null;
-    if (partner) {
-      const stats = groupDmStatsOf(state, world, partner, null, now);
-      const facts: string[] = [];
-      if (stats.consented) {
-        facts.push("对方刚才在群里接住并欢迎继续聊，这不是突兀的陌生私聊。");
-      } else if (
-        stats.attempts > 0 ||
-        stats.groupRejection >= REJECTED_LIVE ||
-        stats.recentColdAt !== null
-      ) {
-        const groupLabel = stats.groupTitle ? `「${stats.groupTitle}」群` : "这个群";
-        const parts: string[] = [];
-        if (stats.attempts > 0) {
-          parts.push(
-            `此前从${groupLabel}直接私聊过 ${stats.attempts} 次（${stats.replied} 次接着聊${stats.blocked > 0 ? `、${stats.blocked} 次被隐私挡住` : ""}${stats.silent > 0 ? `、${stats.silent} 次没回` : ""}）`,
-          );
-        }
-        if (
-          stats.recentColdAt !== null &&
-          now >= stats.recentColdAt &&
-          now - stats.recentColdAt < FIRST_DM.groupCoolTau
-        ) {
-          parts.push(`${elapsed(now - stats.recentColdAt)}前刚私聊过同群的另一个人`);
-        }
-        if (stats.groupRejection >= REJECTED_LIVE) {
-          parts.push(`${groupLabel}此刻对你的气氛偏防备`);
-        }
-        if (parts.length > 0) facts.push(`${parts.join("；")}。`);
-      }
-      if (!stats.consented) {
-        facts.push(
-          "情境规范（初次私聊）：可先调用 tools.check_dm() 看这个群对突然私聊的接受度；若返回偏防备，别在私聊里硬敲，调用 tools.plan_group_dm({ reason }) 留到来源群里先顺口问一句。",
-        );
-      }
-      if (facts.length > 0) {
-        out.push({ mechanism: "fairness", kind: "scene", text: facts.join("\n") });
-      }
-    }
-  }
+  const asks = chatType === "group" ? plannedAsks(state, scope, now) : null;
+  if (asks) out.push(asks);
+  const first =
+    chatType === "private" && timelineLength === 0
+      ? firstDmFacts(state, world, scope, now, cardFacts)
+      : null;
+  if (first) out.push(first);
   return out;
 }
 
@@ -646,56 +676,70 @@ function dmFacts(
  * 注意力公平与第一次私聊节奏（PLAN 第 45 件、ADR-218）：安静的私聊攒服务债、首次私聊按回复率自适应节奏、
  * 遇到 PEER_FLOOD 立即停开新私聊；按来源群自适应，第一次私聊前可以 check_dm / plan_group_dm。
  */
-export const delegatedFairness: PressureFeature = {
-  ...feature({
-    name: "fairness",
-    provides: ["fairness"],
-    requires: ["chats", "relations", "willingness", "reach"],
-    uses: ["chats.turn.rejection"],
-    offers: (kind, scope, world) =>
-      kind === "dm-defer" ? unopenedPrivate(world).has(scope) : true,
-    query: (kind, args, chat, now, world) => {
-      if (kind !== "dm-check") return undefined;
-      const state = world.fairness ?? initialFairness;
-      const who = typeof args.who === "string" && args.who.trim() ? args.who.trim() : null;
-      return dmCheckResult(state, world, chat.scope, chat.chatType, chat.timeline, who, now);
-    },
-    reduce: (before, after, event) => {
-      const prev = after.fairness ?? initialFairness;
-      const next = reduceFairness(prev, before, event);
-      return next === prev && after.fairness ? after : { ...after, fairness: next };
-    },
-    contribute: ({ world, chat, now }) =>
-      dmFacts(
-        world.fairness ?? initialFairness,
-        world,
-        chat.scope,
-        chat.chatType,
-        chat.timeline.length,
-        now,
-      ),
-    will: {
-      visible: (world, scope) => {
-        const f = world.fairness;
-        if (!f || !firstDmBlocked(f)) return true;
-        return !isUnopenedPrivate(world, scope);
+export const delegatedFairness: PressureFeature = createFairness();
+
+/**
+ * cardFacts（原生工具格式的组，speech/native.ts）：第一次私聊时，这个群对突然私聊的接受度直接写进卡片，
+ * 不再给 check_dm 这个只为查它而存在的工具（ADR-298 对话层"把机械的前置查询并进卡片事实"）。
+ */
+export function createFairness(o: { cardFacts?: boolean } = {}): PressureFeature {
+  const cardFacts = o.cardFacts === true;
+  return {
+    ...feature({
+      name: cardFacts ? "fairness-card" : "fairness",
+      provides: ["fairness"],
+      requires: ["chats", "relations", "willingness", "reach"],
+      uses: ["chats.turn.rejection"],
+      offers: (kind, scope, world) =>
+        kind === "dm-defer"
+          ? unopenedPrivate(world).has(scope)
+          : kind === "dm-check"
+            ? !cardFacts
+            : true,
+      query: (kind, args, chat, now, world) => {
+        if (kind !== "dm-check") return undefined;
+        const state = world.fairness ?? initialFairness;
+        const who = typeof args.who === "string" && args.who.trim() ? args.who.trim() : null;
+        return dmCheckResult(state, world, chat.scope, chat.chatType, chat.timeline, who, now);
       },
-      impositionScale: (world, chat, _affordance, now) => {
-        const f = world.fairness;
-        if (!f || chat.chatType !== "private" || !chat.partner) return 1;
-        const scope = chatScope(world.chats, chat);
-        return scope ? fairnessCostDiscount(f, world, scope, now) : 1;
+      reduce: (before, after, event) => {
+        const prev = after.fairness ?? initialFairness;
+        const next = reduceFairness(prev, before, event);
+        return next === prev && after.fairness ? after : { ...after, fairness: next };
       },
-      cost: (world, chat, _affordance, now) => {
-        const f = world.fairness;
-        if (!f || chat.chatType !== "private" || !chat.partner) return 0;
-        const scope = chatScope(world.chats, chat);
-        return scope ? firstDmCost(f, world, scope, now) : 0;
+      contribute: ({ world, chat, now }) =>
+        dmFacts(
+          world.fairness ?? initialFairness,
+          world,
+          chat.scope,
+          chat.chatType,
+          chat.timeline.length,
+          now,
+          cardFacts,
+        ),
+      will: {
+        visible: (world, scope) => {
+          const f = world.fairness;
+          if (!f || !firstDmBlocked(f)) return true;
+          return !isUnopenedPrivate(world, scope);
+        },
+        impositionScale: (world, chat, _affordance, now) => {
+          const f = world.fairness;
+          if (!f || chat.chatType !== "private" || !chat.partner) return 1;
+          const scope = chatScope(world.chats, chat);
+          return scope ? fairnessCostDiscount(f, world, scope, now) : 1;
+        },
+        cost: (world, chat, _affordance, now) => {
+          const f = world.fairness;
+          if (!f || chat.chatType !== "private" || !chat.partner) return 0;
+          const scope = chatScope(world.chats, chat);
+          return scope ? firstDmCost(f, world, scope, now) : 0;
+        },
       },
-    },
-  }),
-  affordances: ["dm-check", "dm-defer"],
-};
+    }),
+    affordances: ["dm-check", "dm-defer"],
+  };
+}
 
 const scopeCache = new WeakMap<FairnessWorld["chats"], WeakMap<ChatNode, string>>();
 function chatScope(chats: FairnessWorld["chats"], chat: ChatNode): string | undefined {

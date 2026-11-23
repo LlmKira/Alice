@@ -3,14 +3,12 @@ import {
   delegatedFairness,
   type FairnessState,
   type FairnessWorld,
-  FIRST_DM,
   firstDmCost,
   type groupDmStatsOf,
   initialFairness,
   reduceFairness,
   starvationBoost,
 } from "../src/mechanisms/pressure/fairness.js";
-import { PRODUCTION, reach } from "../src/mechanisms/pressure/index.js";
 import { privateScopeOf } from "../src/mechanisms/pressure/reach.js";
 import { feedback as rejectFeedback } from "../src/mechanisms/pressure/rejection.js";
 import type { Relation } from "../src/mechanisms/pressure/relation.js";
@@ -209,7 +207,7 @@ describe("cross-dialog first-DM adaptation & protocol delegation", () => {
       w1,
     ) as ReturnType<typeof groupDmStatsOf> & { canDmDirectly: boolean; protocol: string };
     expect(dmCheck.canDmDirectly).toBe(false);
-    expect(dmCheck.protocol).toContain("防备");
+    expect(dmCheck.protocol).toContain("guarded");
 
     // Defer via plan_group_dm inside cold DM -> projects into GRP_GUARDED doings.
     f = reduceFairness(f, w1, {
@@ -227,7 +225,7 @@ describe("cross-dialog first-DM adaptation & protocol delegation", () => {
         sought: true,
         outside: false,
         offered: [],
-      } as never) ?? [];
+      }) ?? [];
     expect(groupContribs.some((c) => c.kind === "doings" && c.text.includes("Userg2"))).toBe(true);
 
     // She asks in GRP_GUARDED, then g2 replies warmly -> consent granted, firstDmCost drops to 0.
@@ -244,12 +242,5 @@ describe("cross-dialog first-DM adaptation & protocol delegation", () => {
     ) as { agreedInGroup: boolean; canDmDirectly: boolean };
     expect(afterConsent.agreedInGroup).toBe(true);
     expect(afterConsent.canDmDirectly).toBe(true);
-  });
-
-  it("delegatedFairness composes cleanly with PRODUCTION + reach", () => {
-    expect(delegatedFairness.name).toBe("fairness");
-    expect(PRODUCTION).toBeDefined();
-    expect(reach).toBeDefined();
-    expect(FIRST_DM.groupCoolTau).toBe(2 * H);
   });
 });

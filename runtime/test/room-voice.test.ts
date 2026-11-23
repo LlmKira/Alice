@@ -1,6 +1,5 @@
 /**
- * 这个群的人平时怎么打字（room-voice.ts）和 2026-11-13 上线的说明文字（docs/adr/282-speech-style-and-room-voice.md）：
- * 每样内容不再出现在提示词里时这里会红；群友的原话只回到同一个群。
+ * 这个群的人平时怎么打字（room-voice.ts）：过了冷启动才写，群友的原话只回到同一个群。
  */
 import { describe, expect, it } from "vitest";
 import { GROUP_SILENT, palette } from "../src/mechanisms/palette.js";
@@ -13,46 +12,14 @@ import {
 } from "../src/mechanisms/room-voice.js";
 import type { ActKind } from "../src/mind/affordances.js";
 import type { AliceEvent } from "../src/mind/events.js";
-import { type ChatState, emptyChat, type TimelineEntry } from "../src/mind/state.js";
-import { renderSpeechPrompt } from "../src/speech/prompt.js";
+import { emptyChat, type TimelineEntry } from "../src/mind/state.js";
 
 const T0 = 1_771_000_000_000;
 const DAY = 24 * 60 * 60_000;
 const OFFERED: ActKind[] = ["send", "sticker", "react", "think", "voice"];
 
-describe("how she types: the rules, the SDK and the last line", () => {
-  const p = renderSpeechPrompt("人格", {
-    scope: "telegram:-1",
-    chatType: "group",
-    timeline: [] as TimelineEntry[],
-    contributions:
-      palette.contribute?.(emptyChat("telegram:-1", "group", true), T0, undefined, OFFERED) ?? [],
-    triggerMessageId: null,
-    at: T0,
-    affordances: OFFERED,
-  });
-  it.each([
-    "在 Telegram 上随手发消息，通常想起一句发一句",
-    "别人刚回复你而你顺着往下接、或自己另起话头时，直接发就行",
-    "感叹号和句尾表情只在真激动或故意耍赖时才用",
-    "外语保留它自己的口语习惯",
-    "一句一件事，可只发半句或短句，多几层意思就分几条调用 say",
-    "紧挨着上一条、或别人刚回复你而你顺着往下接时通常省略",
-    "适合接梗或轻声回应，单独一张就够",
-    "适合群友发图、玩梗但没必要接话时，点完就够",
-    "开口前心里闪过的真实念头，像自言自语",
-    "语言和口语习惯跟着聊天里的人走",
-  ])("the system prompt carries %s", (text) => {
-    expect(p.system).toContain(text);
-  });
-
-  it("the last line offers one or two lines or a reaction, and no 'default one message'", () => {
-    expect(p.user).toContain("随手接一两条，也可只点个表情，不想开口就不调用 run_code");
-    expect(`${p.system}\n${p.user}`).not.toContain("默认只说一条");
-    expect(`${p.system}\n${p.user}`).not.toContain("大多数时候直接说，不引用");
-  });
-
-  it("the group examples include a reaction only", () => {
+describe("group examples", () => {
+  it("include a reaction only", () => {
     expect(GROUP_SILENT.some((e) => e.acts.some((a) => a.kind === "react"))).toBe(true);
     const shown = (
       palette.contribute?.(emptyChat("telegram:-1", "group", true), T0, undefined, OFFERED) ?? []
@@ -78,7 +45,7 @@ function room(scope: string, n: number, text: (i: number) => string): AliceEvent
   }));
 }
 const fold = (events: AliceEvent[]) =>
-  events.reduce(reduceRoom, roomVoice.initial as RoomState) as RoomState;
+  events.reduce<RoomState>(reduceRoom, roomVoice.initial as RoomState);
 const shownIn = (
   scope: string,
   state: RoomState,
@@ -87,7 +54,7 @@ const shownIn = (
 ) =>
   (
     roomVoice.contribute?.(
-      { ...emptyChat(scope, chatType, true), timeline } as ChatState,
+      { ...emptyChat(scope, chatType, true), timeline },
       T0 + DAY,
       state,
       OFFERED,

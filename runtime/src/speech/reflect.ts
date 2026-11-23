@@ -16,7 +16,7 @@ const MAX_TOKENS = 400;
  * 其余的她在哪个聊天都想得起来，注明出处。标在同一次反思调用里，不另调模型。日记、心情、关于人的事、她自己的事
  * 都用这一句（reflect-people.ts 的字段也带 private）。
  */
-export const PRIVATE_RULE =
+const PRIVATE_RULE =
   "- private：这一条是别人托你保密的事，或明显私密的事（健康、感情、要给谁的惊喜），写 true；其余写 false。";
 
 const rules = (
@@ -58,7 +58,7 @@ export function renderReflectPrompt(persona: string, request: ReflectRequest): S
   };
 }
 
-export class ReflectParseError extends Error {}
+class ReflectParseError extends Error {}
 
 /** 读回 JSON。读不出对象就抛错（记为 ponder.failed）；单条不合格只丢那一条。 */
 export function parseReflect(

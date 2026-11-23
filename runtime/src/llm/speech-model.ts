@@ -28,25 +28,114 @@ export const SPEECH_MODELS = {
     extra: { reasoning_effort: "none" },
     thinking: 1024,
   },
+  "google/gemini-3.8-flash": {
+    id: "google/gemini-3.8-flash",
+    extra: { reasoning_effort: "none" },
+    thinking: 1024,
+  },
+  "google/gemini-4-hydrogen": {
+    id: "google/gemini-4-hydrogen",
+    extra: { reasoning_effort: "none" },
+    thinking: 1024,
+  },
+  "google/gemini-4-argon": {
+    id: "google/gemini-4-argon",
+    extra: { reasoning_effort: "none" },
+    thinking: 1024,
+  },
+  "google/gemini-4-neon": {
+    id: "google/gemini-4-neon",
+    extra: { reasoning_effort: "none" },
+    thinking: 1024,
+  },
+  "bytedance/doubao-seed-2.1-pro-260915": {
+    id: "bytedance/doubao-seed-2.1-pro-260915",
+    extra: { reasoning_effort: "none" },
+    thinking: 0,
+  },
 } as const;
 export type SpeechModelName = keyof typeof SPEECH_MODELS;
 
+/** 从 callId（如 "telegram:-123#42"）抽出轮次号，保证同一轮多步工具调用始终落到同一个模型。 */
+function callTurnIndex(callId: string): number {
+  const m = /#(\d+)$/.exec(callId);
+  if (m) return Number(m[1]);
+  let hash = 0;
+  for (const ch of callId) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  return hash;
+}
+
+const OWN_TIC_RE = /<你>[^\n]*(?:是吧|属于是)/;
+const DEEP_GROUP_OWN_TURNS = 2;
+
+/**
+ * 分级发言路由（ADR-281）：直接读 renderSpeechPrompt 附带的结构化 routing 事实，不依赖提示词文案格式。
+ * - 单模型、后台反思（ponder）或未附带 routing 事实时走主模型；
+ * - 外语回合与私聊固定走主模型（保住深度、情绪分寸与真我涌现）；
+ * - 群聊按对话分量分级：已有连续多轮互动（ownTurnsInLog >= 2）、带明显心情或人机观察的重回合走主模型，
+ *   普通轻群聊走池内次模型（如 google/gemini-4-hydrogen）；
+ * - 若池内配了非 Google 异构搭档且记录里她近期出现口癖（是吧/属于是），切到异构搭档打断自回归滚雪球。
+ */
+export function pickSpeechModel(
+  pool: readonly SpeechModelName[],
+  call: { kind: "speech" | "ponder"; callId: string },
+  prompt: Pick<SpeechPrompt, "user" | "routing">,
+): SpeechModelName {
+  const primary = pool[0] ?? "flash-3.8";
+  if (pool.length <= 1 || call.kind === "ponder") return primary;
+  const routing = prompt.routing;
+  if (!routing || routing.foreignLanguage) return primary;
+  const nonGoogle = pool.find((m) => !SPEECH_MODELS[m].id.startsWith("google/"));
+  if (nonGoogle && OWN_TIC_RE.test(prompt.user)) return nonGoogle;
+  if (routing.chatType === "private") return primary;
+  if (
+    routing.hasMood ||
+    routing.hasBotObservation ||
+    routing.ownTurnsInLog >= DEEP_GROUP_OWN_TURNS
+  ) {
+    return primary;
+  }
+  const secondary = pool[1] ?? primary;
+  if (pool.length === 2) return secondary;
+  const lightPool = pool.slice(1);
+  return lightPool[callTurnIndex(call.callId) % lightPool.length] ?? secondary;
+}
+
 const ATTEMPTS = 3;
 const TIMEOUT_MS = 60_000;
+
+interface ChatToolCall {
+  id?: string;
+  type?: "function";
+  function?: { name?: string; arguments?: string };
+  extra_content?: unknown;
+  [k: string]: unknown;
+}
+
+export interface ChatMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | null;
+  tool_calls?: ChatToolCall[];
+  tool_call_id?: string;
+  reasoning_content?: string;
+  [k: string]: unknown;
+}
 
 interface CompletionBody extends ChatUsage {
   choices?: Array<{
     message?: {
       content?: string | null;
-      tool_calls?: Array<{ function?: { name?: string; arguments?: string } }>;
+      reasoning_content?: string | null;
+      tool_calls?: ChatToolCall[];
     };
   }>;
 }
 
 /**
- * 一次非流式调用，返回模型原文（由动作格式解析）。发言带着 run_code（tool_choice auto），原文是
- * `{"content", "calls": [{name, arguments}]}` 的 JSON（speech/decision.ts ToolReply）。用非流式是因为网关上流式请求间歇性 502，
- * 非流式实测 24/24 成功（2026-11-10）。5xx、429 和网络错误按退避重试。kind 是记账的分类（发言或想一想）。
+ * 一次非流式调用，返回模型原文（由动作格式解析）。发言带着 tools（tool_choice auto），原文是
+ * `{"content", "calls": [{id?, name, arguments, extra_content?}]}` 的 JSON（speech/decision.ts ToolReply）。
+ * 用非流式是因为网关上流式请求间歇性 502，非流式实测 24/24 成功（2026-11-10）。5xx、429 和网络错误按退避重试。
+ * kind 是记账的分类（发言或想一想）。
  */
 export async function callSpeechModel(
   gateway: Gateway,
@@ -72,7 +161,7 @@ export async function callSpeechModel(
       model: model.id,
       ...model.extra,
       max_tokens: (prompt.maxTokens ?? 600) + model.thinking,
-      messages: [
+      messages: prompt.messages ?? [
         { role: "system", content: prompt.system },
         { role: "user", content: prompt.user },
       ],
@@ -89,9 +178,14 @@ export async function callSpeechModel(
     const reply: ToolReply = {
       content: message.content ?? "",
       calls: (message.tool_calls ?? []).map((c) => ({
+        ...(c.id ? { id: c.id } : {}),
         name: c.function?.name ?? "",
         arguments: c.function?.arguments ?? "",
+        ...(c.extra_content !== undefined ? { extra_content: c.extra_content } : {}),
       })),
+      ...(typeof message.reasoning_content === "string"
+        ? { reasoning_content: message.reasoning_content }
+        : {}),
     };
     return JSON.stringify(reply);
   }

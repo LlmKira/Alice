@@ -1,5 +1,6 @@
 /**
- * 操作员控制面（capabilities X03、X04）：操作员（环境变量 ALICE_OPERATOR_ID 给出的 Telegram 用户）私聊她时，
+ * 操作员控制面（capabilities X03、X04）：操作员（ALICE_OPERATOR_ID 给出的 Telegram 用户，或 QQ_OPERATOR_ID
+ * 给出的 QQ 号，见 ops/config.ts）私聊她时，
  * 以 `/ops` 开头的消息是命令，不进她的时间线：状态、暂停、继续、改今天的花费上限、停。
  * 这里也管按天的花费上限（到了自动暂停并告诉操作员）和自检告警（watch.ts）。
  *
@@ -36,20 +37,26 @@ const KIND_NAMES: Record<SpendKind, string> = {
 };
 
 export interface OperatorPorts {
-  now(): number;
+  now: () => number;
   /** 私聊操作员（不经她的发送链，不进 Journal）。 */
-  send(text: string): Promise<void>;
+  send: (text: string) => Promise<void>;
   /** 干净退出（退出码 0，pm2 的 stop_exit_codes 让它不再拉起）。 */
-  stop(): void;
+  stop: () => void;
   /** 她此刻的状态（只读，用来数会话）。 */
-  state(): AliceState;
+  state: () => AliceState;
   /** 走她自己的执行路径往操作员私聊发一张贴纸、一条语音，返回每样成没成（不进 Journal）。 */
-  selftest(): Promise<string>;
-  log(message: string, fields?: Record<string, unknown>): void;
+  selftest: () => Promise<string>;
+  log: (message: string, fields?: Record<string, unknown>) => void;
 }
 
 export interface OperatorOptions {
   operatorId: string;
+  /**
+   * 操作员的私聊会话（如 telegram:<id>、qq:private:<QQ 号>）：只认这些会话里的 /ops 命令。
+   * 各平台的数字 id 是不同的号码，只比 senderId 会让 QQ 上同号的陌生人当上操作员。
+   * 不给时退回只比 senderId（单平台的老调用方）。
+   */
+  operatorScopes?: ReadonlySet<string>;
   /** ops-control.json 的路径。 */
   controlPath: string;
   spend: SpendMeter;
@@ -78,7 +85,7 @@ export class Operator {
   ) {
     this.startedAt = ports.now();
     this.control = loadControl(options.controlPath);
-    this.watch = new Watch(ports.now, (text) => this.tell(text));
+    this.watch = new Watch(ports.now, (text) => void this.tell(text));
   }
 
   get paused(): boolean {
@@ -96,13 +103,12 @@ export class Operator {
    * 别人发的同样文字、操作员在群里发的，都是普通消息。
    */
   intercept(event: AliceEvent): boolean {
-    if (
-      event.type !== "message.received" ||
-      event.chatType !== "private" ||
-      event.senderId !== this.options.operatorId
-    ) {
-      return false;
-    }
+    if (event.type !== "message.received" || event.chatType !== "private") return false;
+    const { operatorScopes, operatorId } = this.options;
+    const fromOperator = operatorScopes
+      ? operatorScopes.has(event.scope)
+      : event.senderId === operatorId;
+    if (!fromOperator) return false;
     const command = parseOperatorCommand(event.text);
     if (!command) return false;
     void this.run(command);
@@ -149,7 +155,7 @@ export class Operator {
       .map((f) => `  ${clock(f.at)} ${f.scope} ${f.what}：${f.reason.slice(0, 80)}`);
     return [
       `${pause}，已运行 ${duration(now - this.startedAt)}`,
-      `Telegram：${this.watch.connected ? "已连接" : "断开"}`,
+      `聊天平台：${this.watch.connected ? "已连接" : "断开"}`,
       `会话：私聊 ${count("private", true)}，群 ${count("group", true)}${left > 0 ? `（已不在 ${left}）` : ""}`,
       `今天（${day.day}）：模型调用 ${calls} 次，${usd(day.total)} / 上限 ${usd(this.cap())}`,
       ...(byKind ? [`  ${byKind}`] : []),

@@ -2,7 +2,7 @@
  * 这一次是什么叫醒她（候选 desire，PLAN 第 44 件）：意愿层排第一的那个意愿里，哪几股劲让它过了代价，写成一份有类型的
  * 原因，交给提示词写成没有视角的事实（卡片的"我这边"那一行，cause-lines.ts）。
  *
- * 哪几股算"叫醒她的"：这个会话里最好的意愿，把各驱动的缓解从大到小加起来，加到超过代价（λ·(社交代价 + 饱和代价)
+ * 哪几股算"叫醒她的"：这个会话里最好的意愿，把各驱动的缓解从大到小加起来，加到超过代价（λ·(社交代价 + saturation cost)
  * 加手上的事）为止，前面这几股就是叫醒她的（缺了它们就醒不了）；都加上也不够时（等安静的那会儿劲头变了）只取最大的
  * 一股。没有手设的门槛：哪几股够格只看代价本身。
  * 另两样不是驱动：手里有想分享的东西（desire.ts 摆在她面前的那一件，这里没人在等她时才有）；刚闲下来（她做完一件事以后
@@ -19,7 +19,7 @@ import { placeOf } from "./place.js";
 import { knownAbout } from "./recall.js";
 import { nameOf, relationView } from "./relation.js";
 import { intentionsFor, readChat, reliefTerms, type WillPolicy } from "./will.js";
-import type { World } from "./world.js";
+import type { ChatNode, World } from "./world.js";
 
 export type { Cause } from "./cause-lines.js";
 
@@ -29,7 +29,7 @@ const JUST_FREE = 20 * 60_000;
 const ABOUT_CHARS = 40;
 
 /** 叫醒她的那几股劲（从大到小）。 */
-export function wakingDrives(
+function wakingDrives(
   world: World,
   affordances: readonly WillAffordance[],
   scope: string,
@@ -70,7 +70,6 @@ export function causesOf(
 ): Cause[] {
   const chat = world.chats[scope];
   if (!chat) return [];
-  const group = chat.chatType === "group";
   const item = shownShare(world, scope, now);
   const share: Cause[] = item
     ? [
@@ -79,48 +78,69 @@ export function causesOf(
           id: item.id,
           title: item.title,
           body: item.body,
-          group,
+          group: chat.chatType === "group",
           ...(item.scope === "self:dream" ? { self: true as const } : {}),
         },
       ]
     : [];
   if (sought) return share;
   const reading = readChat(world, scope, now, policy.tiers, policy.age, policy.drives);
-  const out: Cause[] = [];
-  for (const k of wakingDrives(world, affordances, scope, now, policy)) {
-    if (k === "attention" && group) {
-      out.push({ kind: "unread", heavy: (reading?.normalized.attention ?? 0) >= 0.5 });
-    } else if (k === "cooling" && group) {
-      const since = Math.max(chat.lastBondAt, chat.lastAliceAt, chat.consideredAt);
-      out.push({ kind: "absent", long: chat.lastIncomingAt - since > groupTheta(chat) });
-    } else if ((k === "cooling" || k === "curiosity") && chat.partner) {
-      out.push(person(world, scope, chat.chatType, chat.partner, false));
-    } else if (k === "bond" && group) {
-      const who = [...chat.recentFrom]
-        .reverse()
-        .find((id) => (relationView(world, id)?.lastBondAt ?? 0) > 0);
-      if (who) out.push(person(world, scope, chat.chatType, who, true));
-      out.push({ kind: "topic" });
-    } else if (k === "prospect") {
-      // 这股劲里最急的那一件（每件各自的 P_prospect）。
-      const c = chat.commitments.open
-        .map((x) => [x, prospectPressure([x], now)] as const)
-        .filter(([, p]) => p > 0)
-        .sort((a, b) => b[1] - a[1])[0]?.[0];
-      if (c) {
-        const origin = c.origin ? placeOf(world, c.origin.scope) : null;
-        out.push({ kind: "promise", what: clip(c.text, ABOUT_CHARS), origin });
-      }
-    }
+  const attention = reading?.normalized.attention ?? 0;
+  const out = wakingDrives(world, affordances, scope, now, policy).flatMap((k) =>
+    driveCauses(world, scope, chat, k, attention, now),
+  );
+  const unique = out.filter((c, i) => out.findIndex((d) => d.kind === c.kind) === i);
+  return [...share, ...unique, ...(justFree(world, now) ? [{ kind: "free" } as const] : [])];
+}
+
+/** 一股叫醒她的劲写成的原因；attention 是这个会话未读的拉力（归一化后）。 */
+function driveCauses(
+  world: World,
+  scope: string,
+  chat: ChatNode,
+  k: DriveKey,
+  attention: number,
+  now: number,
+): Cause[] {
+  const group = chat.chatType === "group";
+  if (k === "attention" && group) return [{ kind: "unread", heavy: attention >= 0.5 }];
+  if (k === "cooling" && group) {
+    const since = Math.max(chat.lastBondAt, chat.lastAliceAt, chat.consideredAt);
+    return [{ kind: "absent", long: chat.lastIncomingAt - since > groupTheta(chat) }];
   }
+  if ((k === "cooling" || k === "curiosity") && chat.partner) {
+    return [person(world, scope, chat.chatType, chat.partner, false)];
+  }
+  if (k === "bond" && group) {
+    const who = [...chat.recentFrom]
+      .reverse()
+      .find((id) => (relationView(world, id)?.lastBondAt ?? 0) > 0);
+    return [...(who ? [person(world, scope, chat.chatType, who, true)] : []), { kind: "topic" }];
+  }
+  if (k === "prospect") return promiseCauses(world, chat, now);
+  return [];
+}
+
+/** 这股劲里最急的那一件（每件各自的 P_prospect）。 */
+function promiseCauses(world: World, chat: ChatNode, now: number): Cause[] {
+  const c = chat.commitments.open
+    .map((x) => [x, prospectPressure([x], now)] as const)
+    .filter(([, p]) => p > 0)
+    .sort((a, b) => b[1] - a[1])[0]?.[0];
+  if (!c) return [];
+  const origin = c.origin ? placeOf(world, c.origin.scope) : null;
+  return [{ kind: "promise", what: clip(c.text, ABOUT_CHARS), origin }];
+}
+
+/** 她做完一件事以后还没看过手机，而且做完还不久。 */
+function justFree(world: World, now: number): boolean {
   const done = world.life.done;
-  const free =
+  return (
     done !== null &&
     done.until <= now &&
     now - done.until <= JUST_FREE &&
-    done.until > world.lastCallAt;
-  const unique = out.filter((c, i) => out.findIndex((d) => d.kind === c.kind) === i);
-  return [...share, ...unique, ...(free ? [{ kind: "free" } as const] : [])];
+    done.until > world.lastCallAt
+  );
 }
 
 function person(

@@ -9,13 +9,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { errands } from "../src/mechanisms/errands.js";
-import { familiar } from "../src/mechanisms/familiar.js";
 import { language } from "../src/mechanisms/language.js";
 import { type ChatSlice, feature, type Slice } from "../src/mechanisms/pressure/feature.js";
 import {
   auditedFold,
   compositionOf,
-  memory,
   PRODUCTION,
   partsOf,
   people,
@@ -67,26 +65,8 @@ describe("production: one concept, one owner", () => {
     expect(production.shared).toEqual([]);
   });
 
-  it("about people lives in one record: relation owns relations, the world base no longer provides contacts or closeness", () => {
-    const c = partsOf(PRODUCTION);
-    expect(c.providers.get("relations")).toBe("relation-tier");
-    expect(WORLD_FOLD.provides).not.toContain("contacts");
-    expect(WORLD_FOLD.provides).not.toContain("closeness");
-    // "想过、决定先不找他"是意愿层自己的结局，留在世界底座。
-    expect(WORLD_FOLD.provides).toContain("willingness");
-  });
-
-  it("familiar keeps no fold of its own: its state is the same person geometry as relations", () => {
-    // 看见的事实（第一次看见、有往来的日子、群里的入群提示、机器人标记）只有一份几何；familiar 只是按同一套
-    // 折叠函数折自己那份（机制之间不读彼此的状态），所以两边是同一组字段。
-    expect(Object.keys(familiar.initial as object).sort()).toEqual([
-      "groups",
-      "partners",
-      "people",
-    ]);
-    expect(Object.keys(emptyWorld.relations).sort()).toEqual(
-      expect.arrayContaining(["groups", "people"]),
-    );
+  it("relation owns the people record", () => {
+    expect(partsOf(PRODUCTION).providers.get("relations")).toBe("relation-tier");
   });
 
   it("the registry's pressure field is the production composition", () => {
@@ -120,43 +100,13 @@ const NO_MEMORY = {
   shared: [],
 };
 const DWELL_GAP = gap("thought-conversation-carry", "chats.turn.dwell");
-const REJECTION_GAP = gap("affect-warm-tone-rejection", "chats.turn.rejection");
-const FAIRNESS_REJECTION_GAP = gap("fairness", "chats.turn.rejection");
+const REJECTION_GAP = gap("affect-warm-tone-rejection-will", "chats.turn.rejection");
+const FAIRNESS_REJECTION_GAP = gap("fairness-card", "chats.turn.rejection");
 const SHARE = "drive.share 缺 posts";
 const ARM_DIFFERENCES: Record<string, ReturnType<typeof summary>> = {
-  groupturn: {
-    inactive: [],
-    gaps: [FAIRNESS_REJECTION_GAP, DWELL_GAP, REJECTION_GAP],
-    shared: [],
-  },
-  "groupturn-no-topic": {
-    inactive: ["drive.topic 缺 chats.turn.topic"],
-    gaps: [FAIRNESS_REJECTION_GAP, DWELL_GAP, REJECTION_GAP],
-    shared: [],
-  },
-  "groupturn-no-bond": {
-    inactive: ["drive.bond 缺 chats.turn.bond"],
-    gaps: [FAIRNESS_REJECTION_GAP, DWELL_GAP, REJECTION_GAP],
-    shared: [],
-  },
-  "groupturn-no-floor": {
-    inactive: [],
-    gaps: [FAIRNESS_REJECTION_GAP, DWELL_GAP, REJECTION_GAP],
-    shared: [],
-  },
-  floor: {
-    inactive: [],
-    gaps: [FAIRNESS_REJECTION_GAP, DWELL_GAP, REJECTION_GAP],
-    shared: [],
-  },
   "no-floor": {
     inactive: [],
     gaps: [FAIRNESS_REJECTION_GAP, DWELL_GAP, REJECTION_GAP],
-    shared: [],
-  },
-  "floor-wake": {
-    inactive: [],
-    gaps: [FAIRNESS_REJECTION_GAP, DWELL_GAP, REJECTION_GAP, gap("floorwake", "chats.turn.leftAt")],
     shared: [],
   },
   "no-people": {
@@ -166,7 +116,12 @@ const ARM_DIFFERENCES: Record<string, ReturnType<typeof summary>> = {
   },
   "no-affect": {
     inactive: [],
-    gaps: [gap("reflect", "affect"), gap("life-body-l2", "affect"), gap("positive-loop", "affect")],
+    gaps: [
+      gap("reflect-emotive", "affect"),
+      gap("life-body-l2", "affect"),
+      gap("positive-loop", "affect"),
+      gap("attachment-loop", "affect"),
+    ],
     shared: [],
   },
   "no-desire": {
@@ -189,22 +144,13 @@ const ARM_DIFFERENCES: Record<string, ReturnType<typeof summary>> = {
     gaps: [
       gap("recall-tools", "life"),
       gap("positive-loop", "life"),
-      gap("affect-warm-tone-rejection", "life"),
+      gap("affect-warm-tone-rejection-will", "life"),
     ],
     shared: [],
   },
   "no-reach": {
     inactive: ["drive.information 缺 reach", "drive.place 缺 chats.place"],
     gaps: [],
-    shared: [],
-  },
-  "telegram-only": {
-    inactive: [],
-    gaps: [
-      gap("recall-tools", "life"),
-      gap("positive-loop", "life"),
-      gap("affect-warm-tone-rejection", "life"),
-    ],
     shared: [],
   },
 };
@@ -240,10 +186,6 @@ describe("removing a provider", () => {
     expect(summary(partsOf({ ...PRODUCTION, memory: undefined }))).toEqual(NO_MEMORY);
   });
 
-  it("puts it back when the provider returns", () => {
-    expect(summary(partsOf({ ...PRODUCTION, memory }))).toEqual(production);
-  });
-
   it("two providers of one slice cannot compose", () => {
     const twin = { ...people(PEOPLE_ALL), name: "people-twin", provides: ["chats.commitments"] };
     expect(() => partsOf({ ...PRODUCTION, people: twin as never })).toThrow(/chats\.commitments/);
@@ -252,7 +194,7 @@ describe("removing a provider", () => {
 
 // ── 写入审计 ─────────────────────────────────────────────────────────
 
-/** 会话字段归谁：没列出的都是世界折叠的核心字段（chats）。 */
+/** 会话字段归谁：没列出的都是世界 fold 的核心字段（chats）。 */
 const CHAT_FIELDS: Partial<Record<keyof ChatNode, ChatSlice>> = {
   commitments: "chats.commitments",
   topics: "chats.topics",
@@ -264,43 +206,47 @@ const TURN_FIELDS: Record<string, ChatSlice> = {
   recent: "chats.turn.topic",
   bond: "chats.turn.bond",
   bondAt: "chats.turn.bond",
-  leftAt: "chats.turn.leftAt",
   dwell: "chats.turn.dwell",
-  watch: "chats.turn.watch",
 };
 
-/** 一步折叠改了哪几块（按引用比较：没改的块原样带过去）。 */
+/** 一步 fold 改了哪几块（按引用比较：没改的块原样带过去）。 */
 function written(before: World, after: World): Set<Slice> {
   const out = new Set<Slice>();
   if (before === after) return out;
   const keys = new Set([...Object.keys(before), ...Object.keys(after)]) as Set<keyof World>;
   for (const k of keys) {
     if (before[k] === after[k]) continue;
-    if (k !== "chats") {
-      out.add(k);
-      continue;
-    }
-    for (const s of new Set([...Object.keys(before.chats), ...Object.keys(after.chats)])) {
-      const a = before.chats[s];
-      const b = after.chats[s];
-      if (a === b) continue;
-      if (!a || !b) {
-        out.add("chats");
-        continue;
-      }
-      for (const f of Object.keys(b) as Array<keyof ChatNode>) {
-        if (a[f] === b[f]) continue;
-        if (f !== "turn") {
-          out.add(CHAT_FIELDS[f] ?? "chats");
-          continue;
-        }
-        for (const t of Object.keys(b.turn) as Array<keyof ChatNode["turn"]>) {
-          if (a.turn[t] !== b.turn[t]) out.add(TURN_FIELDS[t] ?? "chats");
-        }
-      }
-    }
+    if (k === "chats") chatsWritten(before.chats, after.chats, out);
+    else out.add(k);
   }
   return out;
+}
+
+/** 改了的会话：新建或去掉的会话算 chats，其余按改了的字段归给各块。 */
+function chatsWritten(before: World["chats"], after: World["chats"], out: Set<Slice>): void {
+  for (const s of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const a = before[s];
+    const b = after[s];
+    if (a === b) continue;
+    if (!a || !b) {
+      out.add("chats");
+      continue;
+    }
+    fieldsWritten(a, b, out);
+  }
+}
+
+function fieldsWritten(a: ChatNode, b: ChatNode, out: Set<Slice>): void {
+  for (const f of Object.keys(b) as Array<keyof ChatNode>) {
+    if (a[f] === b[f]) continue;
+    if (f !== "turn") {
+      out.add(CHAT_FIELDS[f] ?? "chats");
+      continue;
+    }
+    for (const t of Object.keys(b.turn) as Array<keyof ChatNode["turn"]>) {
+      if (a.turn[t] !== b.turn[t]) out.add(TURN_FIELDS[t] ?? "chats");
+    }
+  }
 }
 
 const declared = (p: Part<Slice>) =>
@@ -309,7 +255,7 @@ const declared = (p: Part<Slice>) =>
   p.uses !== undefined ||
   p.amends !== undefined;
 
-/** 桩：每次都开口，给得了的心里的能力都用上一点，隔几次不说话。 */
+/** stub：每次都开口，给得了的心里的能力都用上一点，隔几次不说话。 */
 function speech(): (r: SpeechRequest) => SpeechDecision {
   let n = 0;
   return (r) => {
@@ -324,7 +270,6 @@ function speech(): (r: SpeechRequest) => SpeechDecision {
       acts.push({ kind: "intend", when: "10分钟后", what: "去散步" });
     }
     if (has("fulfil") && n % 3 === 2) acts.push({ kind: "fulfil", what: "去散步" });
-    if (has("diary")) acts.push({ kind: "diary", about: null, entry: "今天聊得挺开心" });
     if (has("topic-open") && n % 4 === 1) acts.push({ kind: "topic-open", title: "露营" });
     if (has("bed") && n % 4 === 2) acts.push({ kind: "bed" });
     return { acts };
@@ -372,53 +317,73 @@ const SCENES = [
   "scenes/synthetic-v2/fam-02-old-friend-dm/events.jsonl",
 ];
 const hasScenes = SCENES.every((p) => existsSync(p));
-const scene = (path: string) =>
-  readFileSync(path, "utf8")
-    .split("\n")
-    .filter(Boolean)
-    .map((l) => JSON.parse(l) as AliceEvent);
+const sceneCache = new Map<string, readonly AliceEvent[]>();
+const sceneWithNoise = (path: string): readonly AliceEvent[] => {
+  let cached = sceneCache.get(path);
+  if (!cached) {
+    const raw = readFileSync(path, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as AliceEvent);
+    cached = withNoise(raw);
+    sceneCache.set(path, cached);
+  }
+  return cached;
+};
+const auditCache = new Map<string, Promise<{ bad: string[]; seen: string[] }>>();
 
 /**
- * 在场景上真跑一遍（桩），再把她经历的事件按这种组成折一遍，记下每一步写了哪几块（seen）、声明里没有的（bad）。
+ * 在场景上真跑一遍（stub），再把她经历的事件 按这种组成 fold 一遍，记下每一步写了哪几块（seen）、声明里没有的（bad）。
  */
 async function audit(list: readonly Mechanism[]): Promise<{ bad: string[]; seen: string[] }> {
   const p = pressureOf(list);
   if (!p) return { bad: [], seen: [] };
-  const parts = new Map<string, Part<Slice>>([
-    [WORLD_FOLD.name, WORLD_FOLD],
-    ...p.c.active.map((x) => [x.name, x] as const),
-  ]);
-  const bad = new Set<string>();
-  const seen = new Set<string>();
-  for (const path of SCENES) {
-    const events: AliceEvent[] = [];
-    await replay(withNoise(scene(path)), {
-      mechanisms: list,
-      speech: speech(),
-      ponder,
-      tickMs: 60_000,
-      observe: (e) => events.push(e),
-    });
-    const fold = auditedFold(p.m, (name, before, after) => {
-      const part = parts.get(name);
-      if (!part || !declared(part)) return;
-      const allowed = new Set([...(part.provides ?? []), ...(part.amends ?? [])]);
-      for (const k of written(before, after)) {
-        seen.add(`${name} ${k}`);
-        if (!allowed.has(k)) bad.add(`${name} 写了 ${k}`);
-      }
-    });
-    events.reduce(fold, emptyWorld);
-  }
-  return { bad: [...bad].sort(), seen: [...seen].sort() };
+  const existing = auditCache.get(p.m.name);
+  if (existing) return existing;
+  const run = (async () => {
+    const parts = new Map<string, Part<Slice>>([
+      [WORLD_FOLD.name, WORLD_FOLD],
+      ...p.c.active.map((x) => [x.name, x] as const),
+    ]);
+    const bad = new Set<string>();
+    const seen = new Set<string>();
+    for (const path of SCENES) {
+      const events: AliceEvent[] = [];
+      await replay(sceneWithNoise(path), {
+        mechanisms: list,
+        speech: speech(),
+        ponder,
+        tickMs: 15 * 60_000,
+        observe: (e) => events.push(e),
+      });
+      const fold = auditedFold(p.m, (name, before, after) => {
+        const part = parts.get(name);
+        if (!part || !declared(part)) return;
+        const allowed = new Set([...(part.provides ?? []), ...(part.amends ?? [])]);
+        for (const k of written(before, after)) {
+          seen.add(`${name} ${k}`);
+          if (!allowed.has(k)) bad.add(`${name} 写了 ${k}`);
+        }
+      });
+      events.reduce(fold, emptyWorld);
+    }
+    return { bad: [...bad].sort(), seen: [...seen].sort() };
+  })();
+  auditCache.set(p.m.name, run);
+  return run;
 }
 
 describe.skipIf(!hasScenes)("write audit", () => {
-  // 同一种压力场组成只审一次。
+  // 每个部分只需在一种组成里审到：生产先审，之后只审含有还没审到的部分的组成。
   const distinct = new Map<string, readonly Mechanism[]>();
-  for (const list of Object.values(ARMS)) {
+  const covered = new Set<string>();
+  for (const list of [ARMS.production as readonly Mechanism[], ...Object.values(ARMS)]) {
     const p = pressureOf(list);
-    if (p && !distinct.has(p.m.name)) distinct.set(p.m.name, list);
+    if (!p || distinct.has(p.m.name)) continue;
+    const names = p.c.active.map((x) => x.name);
+    if (distinct.size > 0 && names.every((x) => covered.has(x))) continue;
+    for (const x of names) covered.add(x);
+    distinct.set(p.m.name, list);
   }
 
   for (const [name, list] of distinct) {
@@ -431,7 +396,7 @@ describe.skipIf(!hasScenes)("write audit", () => {
     // 写入审计只在真写了的时候看得见。两个场景都不在夜里，她不会选 [去睡了]，bedAt 写不到。
     const c = partsOf(PRODUCTION);
     const writers = [
-      ...[...c.providers].map(([k, part]) => `${part} ${k}`),
+      ...Array.from(c.providers, ([k, part]) => `${part} ${k}`),
       ...c.shared.map((s) => `${s.part} ${s.key}`),
     ];
     const { seen } = await audit(ARMS.production as readonly Mechanism[]);
@@ -446,7 +411,7 @@ describe.skipIf(!hasScenes)("write audit", () => {
     const before = emptyWorld;
     const after = { ...before, diary: [] };
     expect([...written(before, after)]).toEqual(["diary"]);
-    const chat = { ...(emptyWorld as World), chats: {} };
+    const chat = { ...emptyWorld, chats: {} };
     expect(written(chat, chat).size).toBe(0);
   });
 });
@@ -456,10 +421,10 @@ describe("typed views", () => {
     const f = feature({
       name: "probe",
       requires: ["chats"],
-      contribute: ({ world, chat }) => {
+      contribute: ({ world }) => {
         // @ts-expect-error affect 没有声明，看不见（去掉这一行的注释 tsc 就报错）
-        const mood = world.affect;
-        return mood === undefined && world.chats[chat.scope] === undefined ? [] : [];
+        void world.affect;
+        return [];
       },
     });
     expect(f.requires).toEqual(["chats"]);

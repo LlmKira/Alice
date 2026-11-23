@@ -13,7 +13,7 @@ export interface SpeechRequest {
   triggerMessageId: string | null;
   /** 她此刻在想（决定的时刻）。时钟触发的主动开口离最后一条消息可能已经很久。 */
   at: number;
-  /** 此刻在这个会话里能做的事（按可供性登记表算出）。 */
+  /** 此刻在这个会话里能做的事（按 affordance 登记表算出）。 */
   affordances: ActKind[];
   /** 她刚在这个会话里看过的东西（LOOKED_MS 之内），按时间先后。 */
   looked?: readonly Looked[];
@@ -79,7 +79,7 @@ export interface PeopleAsk {
 export interface PeopleLearned {
   /**
    * 关于人的具体的事，replaces 是被它改掉的旧内容原文。said 是出处（他原话里的几个字，已经校验过）；
-   * Journal 里旧的没有出处，折叠时不记（reflect-people.ts quoted）。
+   * Journal 里旧的没有出处，fold 时不记（reflect-people.ts quoted）。
    */
   facts?: Array<{
     about: string;
@@ -127,6 +127,4 @@ export type Effect =
   | { type: "call-ponder"; scope: typeof SELF_SCOPE; callId: string; request: PonderRequest }
   | { type: "set-timer"; scope: string; timerId: string; at: number }
   /** scope 总是做出这个决定的会话。 */
-  | { type: "act"; scope: string; act: Act }
-  /** 看这个会话一眼，不调模型：外壳当场写 chat.glanced（mind/events.ts）。 */
-  | { type: "glance"; scope: string };
+  | { type: "act"; scope: string; act: Act };

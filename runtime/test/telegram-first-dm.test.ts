@@ -5,6 +5,7 @@
  */
 import { Long, MtPeerNotFoundError, type TelegramClient, tl } from "@mtcute/node";
 import { describe, expect, it } from "vitest";
+import { Album } from "../src/album.js";
 import { deliver, ponderOutcome } from "../src/interpret.js";
 import { decodeEvent } from "../src/journal.js";
 import {
@@ -21,11 +22,11 @@ import type { ActFailed, AliceEvent, MessageReceived } from "../src/mind/events.
 import { type AliceState, emptyState } from "../src/mind/state.js";
 import { step } from "../src/mind/step.js";
 import { type ActContext, executeAct } from "../src/telegram/acts.js";
-import { Album } from "../src/telegram/album.js";
 import { rethrowTelegramActionFailure } from "../src/telegram/errors.js";
 import { Acquaintances } from "../src/telegram/first-dm.js";
 import { Gates, Telegram } from "../src/telegram/gates.js";
 import { Shelf } from "../src/telegram/shelf.js";
+import { mtcuteFake } from "./mtcute-fake.js";
 
 const USER = 200;
 const GROUP_ID = -100500;
@@ -43,10 +44,10 @@ const groupPeer = (id: number) => ({
  * 假 Telegram 客户端：记下每次调用；fail 里的方法抛错（给一串时按调用次序，用完就不再抛）。
  * known：mtcute 自己存没存着这个人（没有时解析抛 MtPeerNotFoundError）。
  */
-function fakeClient(fail: Record<string, unknown> = {}, known = true) {
+function fakeClient(fail: Record<string, Error | Error[]> = {}, known = true) {
   const calls: Array<[string, unknown[]]> = [];
   const counts = new Map<string, number>();
-  const failure = (name: string): unknown => {
+  const failure = (name: string): Error | undefined => {
     const f = fail[name];
     const i = counts.get(name) ?? 0;
     counts.set(name, i + 1);
@@ -60,10 +61,10 @@ function fakeClient(fail: Record<string, unknown> = {}, known = true) {
       if (f) throw f;
       return result(...args);
     };
-  const client = {
+  const client = mtcuteFake<TelegramClient>({
     resolvePeer: method("resolvePeer", (id) => {
       if ((id as number) < 0) return groupPeer(id as number);
-      if (!known) throw new MtPeerNotFoundError(`Peer ${id} is not found in local cache`);
+      if (!known) throw new MtPeerNotFoundError(`Peer ${String(id)} is not found in local cache`);
       return { _: "inputPeerUser", userId: id, accessHash: Long.fromNumber(1) };
     }),
     call: method("call", (request) => {
@@ -75,7 +76,7 @@ function fakeClient(fail: Record<string, unknown> = {}, known = true) {
     readHistory: method("readHistory", () => undefined),
     readReactions: method("readReactions", () => undefined),
     setTyping: method("setTyping", () => undefined),
-  } as unknown as TelegramClient;
+  });
   return { client, calls, names: () => calls.map(([n]) => n) };
 }
 
@@ -339,8 +340,6 @@ async function live(events: readonly AliceEvent[], client: TelegramClient, end: 
         await feed({ type: "speech.decided", at: event.at, scope, callId, decision: { acts } });
       } else if (effect.type === "call-ponder") {
         await feed(await ponderOutcome(effect, () => Promise.reject(new Error("no ponder")), now));
-      } else if (effect.type === "glance") {
-        await feed({ type: "chat.glanced", at: event.at, scope: effect.scope });
       } else if (effect.type === "act") {
         await deliver([effect], {
           now,

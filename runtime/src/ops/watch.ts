@@ -1,13 +1,14 @@
 /**
- * 自检（capabilities X04）：从外壳写进 Journal 的事件、Telegram 连接状态和错误日志里认出异常，
+ * 自检（capabilities X04）：从外壳写进 Journal 的事件、聊天平台的连接状态和错误日志里认出异常，
  * 私聊告诉操作员。只看 typed 信号（事件类型、错误码、连接状态），不读文字。告警有限频：
  * 同一类 30 分钟最多一条，所有类加起来一小时最多 6 条，被压下的次数并进下一条同类告警。
  */
 import { affordanceOf } from "../mind/affordances.js";
 import type { AliceEvent } from "../mind/events.js";
 import { FAILURES, failureText } from "../mind/failure.js";
+import { platformLabel } from "../mind/platform.js";
 
-export type AlertKind = "speech-failing" | "send-failed" | "telegram-offline" | "error-burst";
+export type AlertKind = "speech-failing" | "send-failed" | "platform-offline" | "error-burst";
 
 export const WATCH = {
   /** 发言（含想一想）连续失败几次算异常。 */
@@ -36,6 +37,7 @@ export class Watch {
   private inARow = 0;
   private lastReason = "";
   private offlineSince: number | null = null;
+  private offlinePlatform: string | null = null;
   private errors: number[] = [];
   private readonly lastSent = new Map<AlertKind, number>();
   private readonly suppressed = new Map<AlertKind, number>();
@@ -90,7 +92,7 @@ export class Watch {
           this.remember(event.at, event.scope, event.act.kind, failureText(event));
           return;
         }
-        // 她自己选错了、要等审批、额度、受众规则、暂停：不是送达出了问题（mind/failure.ts）。
+        // 她自己选错了、要等审批、额度、受众规则、暂停：不是消息发送出了问题（mind/failure.ts）。
         if (FAILURES[event.reason].delivery === null) return;
         this.remember(event.at, event.scope, event.act.kind, event.reason);
         this.alert("send-failed", `${event.scope} 的 ${event.act.kind} 没做成：${event.reason}`);
@@ -101,17 +103,25 @@ export class Watch {
     }
   }
 
-  /** mtcute 的连接状态（offline / connecting / updating / connected）。 */
+  /**
+   * 平台的连接状态（offline / connecting / updating / connected）。挂多个平台时 PlatformHub 报
+   * `<平台>:<状态>`，告警里就写出是哪个平台断的。
+   */
   connection(state: string): void {
     const at = this.now();
     if (state !== "connected") {
       this.offlineSince ??= at;
+      const platform = state.includes(":") ? state.slice(0, state.indexOf(":")) : null;
+      if (platform) this.offlinePlatform = platform;
       return;
     }
     const since = this.offlineSince;
+    const platformName = this.offlinePlatform ? platformLabel(this.offlinePlatform) : undefined;
+    const label = platformName ? `${platformName} ` : "聊天";
     this.offlineSince = null;
+    this.offlinePlatform = null;
     if (since !== null && at - since >= WATCH.offlineMs) {
-      this.alert("telegram-offline", `Telegram 断了约 ${minutes(at - since)} 分钟，已经连上`);
+      this.alert("platform-offline", `${label}连接断了约 ${minutes(at - since)} 分钟，已经连上`);
     }
   }
 

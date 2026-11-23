@@ -2,14 +2,14 @@
  * 她对每个人、每个群知道的具体的事（people；capabilities R05、R08、S07）。
  *
  * PLAN"连续性"：往提示里多放这个人的旧东西（巩固、原文、重逢时放原文）三轮都没带来连续性，画像总结还会加重谄媚
- * （OP-Bench 转述）。所以这里只记具体而稳定的事，不写性格画像、不打信任分，按"送达且无害"判：
+ * （OP-Bench 转述）。所以这里只记具体而稳定的事，不写性格画像、不打信任分，按"真能用上、又不伤人"判：
  * - R05 印象：他是做什么的、养了什么、上次说要考试。来源是反思时顺手记下的（同一次反思调用，
  *   speech/reflect-people.ts，不加调用次数；2026-11-12 起没有 [记住]，eval-artifacts/memory-b/）。每条带出处（会话、当时在场的人）和时间；
  *   有时间的事过了就写"已经过了"；对不上了的由反思写出旧的原文、换成新的（Mem0 的 UPDATE，2 月 update_fact）。
  *   放进提示词的仍是 recall.ts 的"你记得关于…的事"，受众规则在那里（knownAbout）。
  * - R07 兴趣（谁喜欢、在玩什么）2026-11-12 删了：它不进发言提示词（"他喜欢 X"是讨好的抓手），只给话题打分用，
  *   而话题打分（groupturn 的 topic）判过不上生产（对上的多是虚词），生产里没有读者，反思却每次多花 token 写它。
- * - R08 群画像 2026-11-13 拿掉了：逐个拿掉时效应在噪声里，它的"话题"又带着房间的口气，她跟着骂起来
+ * - R08 群画像 2026-11-13 删了：逐项消融时效应在噪声里，它的"话题"又带着房间的口气，她跟着骂起来
  *   （eval-artifacts/ablation-live/results.md、live-review/2026-11-13.md）。
  * - S07 社交周边视觉：私聊里，对方在你们都在的群里最近怎么样——只用他本人在那个群里公开说话的次数和日子
  *   （很久没说话了、刚回来），不用任何私聊里的东西。
@@ -29,7 +29,7 @@ import { type Fact, keyOf, rememberFact, salient } from "./memory.js";
 import { FACT_REINFORCE } from "./params.js";
 import { placeOf } from "./place.js";
 import { knownAbout } from "./recall.js";
-import { nameOf } from "./relation.js";
+import { nameOf, type Relation } from "./relation.js";
 import { presentIn } from "./world.js";
 
 export interface PeopleOptions {
@@ -37,6 +37,8 @@ export interface PeopleOptions {
   facts?: boolean;
   /** S07：私聊里，对方在你们都在的群里最近怎么样。 */
   peripheral?: boolean;
+  /** 候选（ADR-297）：私聊实时跨群余光（近几分钟到 2 小时内在共同公开群刚发过言的客观事实）。 */
+  livePeripheral?: boolean;
   /** R06：反思时另记她自己说出口的关于她自己的事（同一次调用），放进卡片。 */
   self?: boolean;
 }
@@ -50,8 +52,14 @@ export const PEOPLE_ALL: PeopleOptions = {
   self: true,
 };
 
+/** 候选配置：开启私聊实时跨群余光（生产 PEOPLE_ALL 保持不变）。 */
+export const PEOPLE_LIVE: PeopleOptions = {
+  ...PEOPLE_ALL,
+  livePeripheral: true,
+};
+
 /** 参数（手设，写明理由）。 */
-export const PEOPLE = {
+const PEOPLE = {
   /** 换个说法的同一件事（两字片段 Jaccard）：超过就当作同一件、换成新的写法。与日记去重同一个量（diary.ts）。 */
   duplicate: 0.5,
   /** 反思时给她看每人已经记得的几件。 */
@@ -66,14 +74,18 @@ export const PEOPLE = {
   awayDays: 7,
   /** 卡片里放她自己说过的几件。 */
   selfShown: 4,
+  /** 实时跨群余光的回看窗口（2 小时内在该共同群发过言）。 */
+  livePeripheralWindowMs: 2 * 3_600_000,
+  /** 刚刚在共同群冒泡的即时窗口（15 分钟内）。 */
+  livePeripheralRecentMs: 15 * 60_000,
 } as const;
 
 // ── 字词（换说法的去重）──────────────────────────────────────────────
 
 /** 中文按两字片段（一个字的就是这个字），拉丁字母和数字按词（小写）。 */
-export function terms(text: string): Set<string> {
+function terms(text: string): Set<string> {
   const out = new Set<string>();
-  for (const run of text.toLowerCase().match(/[\p{Script=Han}]+|[\p{L}\p{N}]+/gu) ?? []) {
+  for (const run of text.toLowerCase().match(/\p{Script=Han}+|[\p{L}\p{N}]+/gu) ?? []) {
     if (/^\p{Script=Han}/u.test(run)) {
       const chars = [...run];
       if (chars.length === 1) out.add(run);
@@ -92,7 +104,7 @@ function jaccard(a: string, b: string): number {
   return both / Math.max(1, x.size + y.size - both);
 }
 
-// ── 折叠 ─────────────────────────────────────────────────────────────
+// ── fold ─────────────────────────────────────────────────────────────
 
 /** 按内容认一件已经记得的事：键相同、一方包含另一方，或换了个说法（两字片段 Jaccard 超过 duplicate）。 */
 function find(facts: readonly Fact[], text: string): Fact | undefined {
@@ -157,8 +169,8 @@ export function learnFact(
   return rememberFact(list, learned.text, scope, at, origin);
 }
 
-/** 在压力场的世界折叠之后再折叠：反思顺手记下的事、她自己说过的。群里谁在说话由 relation 折进 relations。 */
-export function reducePeople<W extends View<"facts" | "chats">>(
+/** 在压力场的世界 fold 之后再 fold：反思顺手记下的事、她自己说过的。群里谁在说话由 relation fold 进 relations。 */
+function reducePeople<W extends View<"facts" | "chats">>(
   world: W,
   event: AliceEvent,
   o: PeopleOptions,
@@ -191,7 +203,7 @@ export function reducePeople<W extends View<"facts" | "chats">>(
   const present = presentIn(node);
   let facts = world.facts;
   // 只记有出处的（reflect-people.ts quoted）：Journal 里 2026-11-13 之前记下的没有出处，里面混着画像和"该怎么对他"，
-  // 不再折叠进来，下次反思重新记。
+  // 不再 fold 进来，下次反思重新记。
   for (const f of o.facts ? (learned.facts ?? []).filter((x) => x.said) : []) {
     facts = { ...facts, [f.about]: learnFact(facts[f.about], f, p.scope, present, event.at) };
   }
@@ -213,7 +225,7 @@ export function reducePeople<W extends View<"facts" | "chats">>(
 // ── 反思时多要的 ─────────────────────────────────────────────────────
 
 /** 在反思请求上加上"顺手记下关于人的事"：她已经记得的（只给那个会话里看得见的）。 */
-export function withPeople(
+function withPeople(
   ask: PonderAsk,
   world: View<"facts" | "chats">,
   now: number,
@@ -250,7 +262,7 @@ export function withPeople(
  * 她自己说过的关于自己的事，在这个会话里看得见哪些。和日记是同一条（diary.ts reaches，北极星不变量 1）：
  * 标了私密的只在说的那个会话、和与当时在场的人的私聊里；其余的哪里都看得见，注明在哪说的。
  */
-export function selfKnown(world: View<"facts" | "chats">, here: Audience): Fact[] {
+function selfKnown(world: View<"facts" | "chats">, here: Audience): Fact[] {
   return (world.facts[SELF_SUBJECT] ?? []).filter((f) =>
     reaches(
       {
@@ -275,8 +287,8 @@ type Script = "cjk" | "cyrillic" | "latin";
 
 function scriptOf(text: string): Script | null {
   if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(text)) return "cjk";
-  if (/[\p{Script=Cyrillic}]/u.test(text)) return "cyrillic";
-  if (/[a-zA-Z]/.test(text)) return "latin";
+  if (/\p{Script=Cyrillic}/u.test(text)) return "cyrillic";
+  if (/[a-z]/i.test(text)) return "latin";
   return null;
 }
 
@@ -331,6 +343,9 @@ function countSince(
   return { messages: inRange.reduce((s, [, n]) => s + n, 0), days: inRange.length };
 }
 
+/** 他在一个群里说话的日子（relation.ts 的 rooms 里的一项）。 */
+type RoomDays = Relation["seen"]["rooms"][string];
+
 /**
  * S07：私聊的对方在你们都在的群里最近怎么样：很久没在那里说话了（之前常说），或刚回来说话（之前很久没出现）。
  * 只用他本人在群里公开说话的日子；她不在那个群里了就不写。
@@ -338,42 +353,80 @@ function countSince(
 function peripheralText(
   world: View<"chats" | "relations">,
   partner: string,
+  dmScope: string,
   now: number,
+  livePeripheral = false,
 ): string | null {
   const today = localDay(now);
+  const name = personName(world, partner);
+  const dmLastIncoming = world.chats[dmScope]?.lastIncomingAt ?? 0;
   const lines: string[] = [];
+  const liveLines: string[] = [];
   for (const [scope, seen] of Object.entries(world.relations.people[partner]?.seen.rooms ?? {})) {
     if (!world.chats[scope]?.member || seen.lastAt > now) continue;
-    const lastDay = localDay(seen.lastAt);
-    const quiet = today - lastDay;
-    if (quiet >= PEOPLE.quietDays) {
-      const before = countSince(seen, lastDay - PEOPLE.regularDays + 1, lastDay);
-      if (before.messages >= PEOPLE.regularMin && before.days >= 2) {
-        lines.push(`已经 ${quiet} 天没说话了（之前常说）`);
-      }
-      continue;
-    }
-    const previous = seen.days.filter(([d]) => d < lastDay).at(-1);
-    if (quiet < PEOPLE.backDays && previous && lastDay - previous[0] >= PEOPLE.awayDays) {
-      const when = quiet === 0 ? "今天" : quiet === 1 ? "昨天" : `${quiet} 天前`;
-      lines.push(`${when}刚回来说话（之前 ${lastDay - previous[0]} 天没出现）`);
-    }
+    const live = livePeripheral ? liveLine(world, name, scope, seen, dmLastIncoming, now) : null;
+    if (live) liveLines.push(live);
+    const day = dayLine(seen, today);
+    if (day) lines.push(day);
   }
+  const dayText = roomsText(name, lines);
+  const combined = [...liveLines.map((l) => `${l}。`), ...(dayText ? [dayText] : [])];
+  return combined.length > 0 ? combined.join("\n") : null;
+}
+
+/** 他刚在一个群里说过话（比私聊里最近一条还新，或就在刚才）；不够近返回 null。 */
+function liveLine(
+  world: View<"chats" | "relations">,
+  name: string,
+  scope: string,
+  seen: RoomDays,
+  dmLastIncoming: number,
+  now: number,
+): string | null {
+  const since = now - seen.lastAt;
+  if (
+    since > PEOPLE.livePeripheralWindowMs ||
+    (seen.lastAt <= dmLastIncoming && since > PEOPLE.livePeripheralRecentMs)
+  ) {
+    return null;
+  }
+  const ago = since < 60_000 ? "刚才" : `${elapsed(since)}前`;
+  const where = placeOf(world, scope);
+  const unans = dmLastIncoming > 0 && seen.lastAt > dmLastIncoming ? "，还没回这里" : "";
+  return `${name} ${ago}${where}发过消息${unans}`;
+}
+
+/** 他在一个群里很久没说话了（之前常说），或刚回来说话；都不是返回 null。 */
+function dayLine(seen: RoomDays, today: number): string | null {
+  const lastDay = localDay(seen.lastAt);
+  const quiet = today - lastDay;
+  if (quiet >= PEOPLE.quietDays) {
+    const before = countSince(seen, lastDay - PEOPLE.regularDays + 1, lastDay);
+    return before.messages >= PEOPLE.regularMin && before.days >= 2
+      ? `已经 ${quiet} 天没说话了（之前常说）`
+      : null;
+  }
+  const previous = seen.days.filter(([d]) => d < lastDay).at(-1);
+  if (!previous || quiet >= PEOPLE.backDays || lastDay - previous[0] < PEOPLE.awayDays) return null;
+  const when = quiet === 0 ? "今天" : quiet === 1 ? "昨天" : `${quiet} 天前`;
+  return `${when}刚回来说话（之前 ${lastDay - previous[0]} 天没出现）`;
+}
+
+function roomsText(name: string, lines: readonly string[]): string | null {
   if (lines.length === 0) return null;
-  const name = personName(world, partner);
-  return lines.length === 1
-    ? `${name}在我们都在的群里${lines[0]}。`
-    : `${name}在我们都在的几个群里：\n${lines.map((l) => `- 一个群里${l}`).join("\n")}`;
+  if (lines.length === 1) return `${name}在我们都在的群里${lines[0]}。`;
+  return `${name}在我们都在的几个群里：\n${lines.map((l) => `- 一个群里${l}`).join("\n")}`;
 }
 
 /**
- * 她对每个人、每个群知道的具体的事：在压力场的世界折叠之后再折叠，反思时顺手多问，往提示词里放群画像和
+ * 她对每个人、每个群知道的具体的事：在压力场的世界 fold 之后再 fold，反思时顺手多问，往提示词里放群画像和
  * 社交周边视觉（关于人的事实由记忆的"你记得关于…的事"放，受众规则在 recall.ts knownAbout）。
  */
 export function people(o: PeopleOptions): PressureFeature {
   const off = (Object.keys(PEOPLE_ALL) as Array<keyof PeopleOptions>).filter((k) => !o[k]);
+  const liveTag = o.livePeripheral ? "-live" : "";
   return feature({
-    name: ["people", ...off.map((k) => `no${k}`)].join("-"),
+    name: ["people", ...off.map((k) => `no${k}`)].join("-") + liveTag,
     provides: ["facts"],
     requires: ["chats", "relations"],
     reduce: (_before, after, event) => reducePeople(after, event, o),
@@ -391,7 +444,7 @@ function peopleFacts(
   const node = world.chats[chat.scope];
   const text =
     chat.chatType === "private" && o.peripheral && node?.partner
-      ? peripheralText(world, node.partner, now)
+      ? peripheralText(world, node.partner, chat.scope, now, o.livePeripheral === true)
       : null;
   const self = o.self ? selfText(world, chat, now) : null;
   return [text, self].flatMap((t) =>

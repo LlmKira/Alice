@@ -7,7 +7,7 @@ import type { ChatState } from "../mind/state.js";
  * 低存在感时不写，免得变成配额心态）；不写比例（要算术）。4 条以上 2 月先写"only you talking"，
  * ADR-159 改成 STOP 指令——这里只取纯事实那一版。私聊和群里写法相同。
  */
-export function trailingYours(chat: ChatState): number {
+function trailingYours(chat: ChatState): number {
   let n = 0;
   for (let i = chat.timeline.length - 1; i >= 0 && chat.timeline[i]?.sender === null; i--) n++;
   return n;

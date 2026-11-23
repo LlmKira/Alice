@@ -22,30 +22,36 @@ export type Cause =
 const END = /[。！？!?…）)」』]$/;
 const ended = (s: string) => (END.test(s) ? s : `${s}。`);
 
+function shareLine(c: Extract<Cause, { kind: "share" }>, shareId: boolean): string {
+  const what = c.body ? `${c.title} —— ${c.body}` : c.title;
+  if (c.self) return ended(`我刚才自己想到：${what}`);
+  const tag = shareId ? ` [${c.id}]` : "";
+  return ended(c.group ? `刚在频道看到一条：${what}${tag}` : `频道里刚发了一条：${what}${tag}`);
+}
+
+function personLine(c: Extract<Cause, { kind: "person" }>): string {
+  if (c.seen) {
+    return c.about ? `${c.name}这会儿在群里说话；之前${c.about}。` : `${c.name}这会儿在群里说话。`;
+  }
+  return c.about ? `想起了${c.name}。` : "";
+}
+
 /**
  * 一个原因写成一句没有视角的事实（Gemini 按 ADR-194、210 重写的那一版，out-feelings-v2.md）：不写"攒""冒泡""被忘了"，
  * 不写计数，不写该怎么做。没有可写的内容时是空的。
  */
-export function causeLine(c: Cause): string {
+export function causeLine(c: Cause, shareId = false): string {
   switch (c.kind) {
     case "unread":
-      return c.heavy ? "群里这会儿正在聊，刚添了新内容。" : "群里刚才有新消息。";
+      return c.heavy ? "群里这会儿正在聊，刚有人说了新的。" : "群里刚才有新消息。";
     case "absent":
       return c.long ? "群里最近在聊，好一阵没在这里开口了。" : "好一阵没在这个群里说过话了。";
-    case "share": {
-      const what = c.body ? `${c.title} —— ${c.body}` : c.title;
-      if (c.self) return ended(`我刚才自己想到：${what}`);
-      return ended(c.group ? `刚在频道看到一条内容：${what}` : `频道里刚发了一条：${what}`);
-    }
+    case "share":
+      return shareLine(c, shareId);
     case "topic":
       return "群里聊到了一件最近留心着的事。";
     case "person":
-      if (c.seen) {
-        return c.about
-          ? `${c.name}这会儿在群里说话；之前${c.about}。`
-          : `${c.name}这会儿在群里说话。`;
-      }
-      return c.about ? `想起了${c.name}。` : "";
+      return personLine(c);
     case "free":
       return "手头的事刚忙完，这会儿空着。";
     // 这一句不是 Gemini 的原文（out-cross-intent.md 只写了卡片那一条和参数说明），照同一套规矩写：只说事实，不说该做什么。

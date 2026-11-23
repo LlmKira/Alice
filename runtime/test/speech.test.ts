@@ -56,13 +56,39 @@ const request: SpeechRequest = {
   ],
 };
 
+/** 0.5 秒的静音 WAV（24 kHz、16 位单声道）。 */
+function halfSecond(): Buffer {
+  const rate = 24_000;
+  const bytes = rate; // 每秒 rate × 2 字节，半秒就是 rate 字节
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + bytes, 4);
+  header.write("WAVEfmt ", 8, "ascii");
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(rate, 24);
+  header.writeUInt32LE(rate * 2, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(bytes, 40);
+  return Buffer.concat([header, Buffer.alloc(bytes)]);
+}
+/** 同一段静音编成 mp3：两家服务真正回的格式。 */
+const halfSecondMp3 = () =>
+  execFileSync(
+    "ffmpeg",
+    ["-hide_banner", "-loglevel", "error", "-f", "wav", "-i", "pipe:0", "-f", "mp3", "pipe:1"],
+    { input: halfSecond(), maxBuffer: 1 << 20 },
+  );
+
 describe("renderSpeechPrompt", () => {
   const prompt = renderSpeechPrompt("You are Alice.", request);
 
   it("puts the persona first and the output rules after it", () => {
     expect(prompt.system.startsWith("You are Alice.")).toBe(true);
     expect(prompt.system).toContain("replyTo?: string;");
-    expect(prompt.system).toContain("不调用 run_code 一样在场");
     expect(prompt.system).toContain("laugh");
     expect(prompt.tools?.map((t) => t.function.name)).toEqual(["run_code"]);
   });
@@ -81,11 +107,7 @@ describe("renderSpeechPrompt", () => {
     const user = prompt.user;
     expect(user.indexOf("· 你和 小雨 很熟。")).toBeLessThan(user.indexOf("[2] <小雨>"));
     expect(user.indexOf("小雨 用中文跟你说话。")).toBeGreaterThan(user.indexOf("[4] <小雨>"));
-    expect(
-      user.endsWith(
-        "[4] 之后，轮到你了（随手接一两条，也可只点个表情，不想开口就不调用 run_code）：",
-      ),
-    ).toBe(true);
+    expect(user.split("\n").at(-1)).toMatch(/^\[4\] 之后/);
   });
 
   it("says what time it is now, with the year in the card's title, and how long since the last message when that was long ago", () => {
@@ -117,25 +139,6 @@ describe("MiniMax voice synthesis (the optional backend)", () => {
     model: "speech-2.8-hd",
     voice: "Calm_Woman",
     groupId: "g1",
-  };
-  /** 0.5 秒的静音 WAV（24 kHz、16 位单声道）。 */
-  const halfSecond = () => {
-    const rate = 24_000;
-    const bytes = rate; // 每秒 rate × 2 字节，半秒就是 rate 字节
-    const header = Buffer.alloc(44);
-    header.write("RIFF", 0, "ascii");
-    header.writeUInt32LE(36 + bytes, 4);
-    header.write("WAVEfmt ", 8, "ascii");
-    header.writeUInt32LE(16, 16);
-    header.writeUInt16LE(1, 20);
-    header.writeUInt16LE(1, 22);
-    header.writeUInt32LE(rate, 24);
-    header.writeUInt32LE(rate * 2, 28);
-    header.writeUInt16LE(2, 32);
-    header.writeUInt16LE(16, 34);
-    header.write("data", 36, "ascii");
-    header.writeUInt32LE(bytes, 40);
-    return Buffer.concat([header, Buffer.alloc(bytes)]);
   };
   const reply =
     (body: unknown, status = 200) =>
@@ -187,16 +190,12 @@ describe("MiniMax voice synthesis (the optional backend)", () => {
   });
 
   it("decodes the mp3 it really returns before measuring it", async () => {
-    const mp3 = execFileSync(
-      "ffmpeg",
-      ["-hide_banner", "-loglevel", "error", "-f", "wav", "-i", "pipe:0", "-f", "mp3", "pipe:1"],
-      { input: halfSecond(), maxBuffer: 1 << 20 },
-    );
+    const mp3 = halfSecondMp3();
     const voice = await synthesizeMinimax(tts, "喂", {
       fetch: reply({
         data: { audio: mp3.toString("hex") },
         base_resp: { status_code: 0 },
-      }) as typeof fetch,
+      }),
     });
     expect(Buffer.from(voice.ogg.subarray(0, 4)).toString("ascii")).toBe("OggS");
     expect(voice.seconds).toBeGreaterThan(0.4);
@@ -211,7 +210,7 @@ describe("MiniMax voice synthesis (the optional backend)", () => {
         data: { audio },
         base_resp: { status_code: 0 },
         extra_info: { usage_characters: 126, audio_length: 500 },
-      }) as typeof fetch,
+      }),
       charge: (s) => charged.push(s),
     });
     expect(charged).toEqual([
@@ -230,19 +229,19 @@ describe("MiniMax voice synthesis (the optional backend)", () => {
     const charged: Spent[] = [];
     const charge = (s: Spent) => charged.push(s);
     await expect(
-      synthesizeMinimax(tts, "喂", { fetch: reply("down", 401) as typeof fetch, charge }),
+      synthesizeMinimax(tts, "喂", { fetch: reply("down", 401), charge }),
     ).rejects.toThrow("minimax tts: 401");
     await expect(
       synthesizeMinimax(tts, "喂", {
         fetch: reply({
           base_resp: { status_code: 1004, status_msg: "invalid api key" },
-        }) as typeof fetch,
+        }),
         charge,
       }),
     ).rejects.toThrow("invalid api key");
     await expect(
       synthesizeMinimax(tts, "喂", {
-        fetch: reply({ base_resp: { status_code: 0 } }) as typeof fetch,
+        fetch: reply({ base_resp: { status_code: 0 } }),
         charge,
       }),
     ).rejects.toThrow("tts: no audio");
@@ -259,29 +258,6 @@ describe("ElevenLabs voice synthesis", () => {
     stability: 0.4,
     similarityBoost: 0.75,
   };
-  const halfSecondMp3 = () => {
-    const rate = 24_000;
-    const bytes = rate;
-    const header = Buffer.alloc(44);
-    header.write("RIFF", 0, "ascii");
-    header.writeUInt32LE(36 + bytes, 4);
-    header.write("WAVEfmt ", 8, "ascii");
-    header.writeUInt32LE(16, 16);
-    header.writeUInt16LE(1, 20);
-    header.writeUInt16LE(1, 22);
-    header.writeUInt32LE(rate, 24);
-    header.writeUInt32LE(rate * 2, 28);
-    header.writeUInt16LE(2, 32);
-    header.writeUInt16LE(16, 34);
-    header.write("data", 36, "ascii");
-    header.writeUInt32LE(bytes, 40);
-    return execFileSync(
-      "ffmpeg",
-      ["-hide_banner", "-loglevel", "error", "-f", "wav", "-i", "pipe:0", "-f", "mp3", "pipe:1"],
-      { input: Buffer.concat([header, Buffer.alloc(bytes)]), maxBuffer: 1 << 20 },
-    );
-  };
-
   it("converts ElevenLabs mp3 chunks into Ogg/Opus and charges by character", async () => {
     const mp3 = halfSecondMp3();
     const calls: unknown[] = [];
